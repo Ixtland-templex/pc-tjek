@@ -20,13 +20,14 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.10'
+$AppVersion = '2.11'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
 $UndoFile = Join-Path $OutDir 'fortryd-log.json'
 $LogFile  = Join-Path $OutDir 'pc-tjek.log'
 $TimesFile = Join-Path $OutDir 'scan-tider.json'
+$IgnoreFile = Join-Path $OutDir 'markeret-ok.txt'
 # Baggrundsjob kører som administrator, så deres filer må IKKE ligge et sted, almindelige programmer kan ændre (fx Temp).
 # C:\ProgramData\PC-Tjek låses til kun Administratorer og SYSTEM.
 $JobBase = Join-Path $env:ProgramData 'PC-Tjek'
@@ -100,6 +101,8 @@ $ScanScript = {
   function IsVirusErr($e) { $m = [string]$e.Exception.Message; $h = 0; try { $h = $e.Exception.HResult -band 0xFFFF } catch {}; return ($h -eq 225 -or $h -eq 226 -or $m -match '(?i)virus|uønsket software|unwanted software') }
   function Sig($path) {
     if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'Ikke fundet' }
+    # Store-apps og Windows' systemapps er signeret via pakken/kataloget, ikke i selve filen. Mapperne kan kun ændres af Windows.
+    if ($path -like "$env:ProgramFiles\WindowsApps\*" -or $path -like "$env:SystemRoot\SystemApps\*") { return 'Signeret: Microsoft Store-pakke' }
     try { $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop }
     catch { if (IsVirusErr $_) { return 'BLOKERET AF DEFENDER' }; return 'Kunne ikke læses' }
     if ($s.Status -eq 'Valid') { return 'Signeret: ' + ($s.SignerCertificate.Subject -replace '^CN="?([^,"]+).*', '$1') }
@@ -118,10 +121,10 @@ $ScanScript = {
 
   $AllFinds = New-Object System.Collections.ArrayList   # fund
   $AllTimes = New-Object System.Collections.ArrayList   # tidslinje
-  function Add-Find($risk, $cat, $title, $detail, $why, $path, $kind, $data) {
+  function Add-Find($risk, $cat, $title, $detail, $why, $path, $kind, $data, $raad = '') {
     $label = @('Info', 'Lav', 'Mellem', 'Høj', 'Kritisk')[$risk]
     [void]$AllFinds.Add([pscustomobject]@{ Risiko = $label; Niveau = $risk; Kategori = $cat; Titel = $title; Detalje = $detail
-                                     Hvorfor = $why; Sti = $path; Type = $kind; Data = $data; SHA256 = $null })
+                                     Hvorfor = $why; Sti = $path; Type = $kind; Data = $data; SHA256 = $null; Raad = $raad })
   }
   function Add-Time($time, $type, $event, $detail) {
     if ($time) { [void]$AllTimes.Add([pscustomobject]@{ Tid = [datetime]$time; Type = $type; Hændelse = $event; Detalje = $detail; Fokus = '' }) }
@@ -149,8 +152,10 @@ $ScanScript = {
     Add-Time $d.InitialDetectionTime 'Defender' "Trussel fundet: $($th.ThreatName)" $res
   }
   $pref = Get-MpPreference
+  $exCount = 0
   foreach ($x in @($pref.ExclusionPath) + @($pref.ExclusionProcess) + @($pref.ExclusionExtension)) {
     if ($x -and $x -notmatch '^N/A') {
+      $exCount++
       Add-Find 3 'Defender' "Undtagelse i Defender: $x" 'Defender scanner ikke dette sted/program' `
         'Malware tilføjer ofte sig selv som undtagelse, så Defender ikke kan se den. Har du ikke selv tilføjet den, er den meget mistænkelig.' $x 'exclusion' $null
     }
@@ -163,7 +168,7 @@ $ScanScript = {
     $what = switch ($ev.Id) { 1116 { 'Defender: trussel opdaget' } 1117 { 'Defender: handling udført' } 5001 { 'Defender: realtid SLÅET FRA' } 5007 { 'Defender: indstilling ændret' } }
     $msg = ($ev.Message -split "`n" | Where-Object { $_ -match '(Navn|Name|Sti|Path|Ny værdi|New value|Exclusion)' } | Select-Object -First 3) -join ' | '
     Add-Time $ev.TimeCreated 'Defender' $what $msg.Trim()
-    if ($ev.Id -eq 5007 -and $ev.Message -match 'Exclusion') { Add-Find 3 'Defender' 'En Defender-undtagelse blev ændret' "$($ev.TimeCreated)" 'Nogen har ændret Defenders undtagelser. Tjek at det var dig.' '' 'info' $null }
+    if ($ev.Id -eq 5007 -and $ev.Message -match 'Exclusion') { Add-Find $(if ($exCount) { 3 } else { 1 }) 'Defender' 'En Defender-undtagelse blev ændret' "$($ev.TimeCreated) · $($msg.Trim())" 'Nogen har ændret Defenders undtagelser. Tjek at det var dig.' '' 'info' $null $(if ($exCount) { 'Se om undtagelsen herunder er din egen. Kender du den ikke, så fjern den i Windows Sikkerhed → Virus- og trusselsbeskyttelse → Undtagelser.' } else { 'Der er ingen undtagelser lige nu, så der er ikke noget at gøre. Typisk var det en installer, der midlertidigt tilføjede en.' }) }
   }
 
   # ---------- 2. Installerede programmer + MSI-historik ----------
@@ -282,13 +287,19 @@ $ScanScript = {
   $sigCache = @{}
   Get-NetTCPConnection -State Established | Where-Object { $_.RemoteAddress -notmatch '^(127\.|::1|0\.0\.0\.0)' } | Group-Object OwningProcess | ForEach-Object {
     $pp = $procs[[int]$_.Name]; if (-not $pp) { return }
+    if ([int]$_.Name -le 4 -or -not $pp.ExecutablePath) { return }   # Windows-kernen (System/Idle) har ingen programfil
     $path = $pp.ExecutablePath
     if (-not $sigCache.ContainsKey("$path")) { $sigCache["$path"] = Sig $path }
     $sg = $sigCache["$path"]
     if ($sg -notlike 'Signeret*') {
       $remotes = ($_.Group | Select-Object -First 5 | ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)" }) -join ', '
-      $r = if ($path -match $UserWritable) { 4 } else { 3 }
-      Add-Find $r 'Netværk' "Usigneret program på nettet: $($pp.Name)" "$($_.Count) forbindelser → $remotes" 'Et usigneret program har åbne forbindelser til internettet. En backdoor ville se præcis sådan ud.' $path 'file' $null
+      $lanOnly = -not @($_.Group | Where-Object { $_.RemoteAddress -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|fd|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)' }).Count
+      if ($lanOnly) {
+        Add-Find 1 'Netværk' "Program på dit eget netværk: $($pp.Name)" "$($_.Count) forbindelser → $remotes" 'Forbindelsen går kun til enheder på dit eget netværk (fx din server, NAS eller printer).' $path 'file' $null 'Normalt ufarligt. Kender du programmet, kan du markere det som OK.'
+      } else {
+        $r = if ($path -match $UserWritable) { 4 } else { 3 }
+        Add-Find $r 'Netværk' "Usigneret program på nettet: $($pp.Name)" "$($_.Count) forbindelser → $remotes" 'Et program uden verificeret udgiver har forbindelse til internettet. Det er tit helt normale programmer, men en backdoor ville også se sådan ud.' $path 'file' $null 'Tryk på VirusTotal. Er filen ren, og kender du programmet, så markér det som OK. Kender du det ikke, så åbn placeringen og se, hvilket program mappen hører til.'
+      }
     }
   }
   foreach ($pp in $procs.Values) {
@@ -1022,9 +1033,11 @@ $SysInfoScript = {
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel>
               <TextBlock Name="DetWhy" TextWrapping="Wrap" Text="Vælg et fund for at se forklaringen."/>
+              <TextBlock Name="DetAdvice" TextWrapping="Wrap" Margin="0,8,0,0" FontWeight="SemiBold" Foreground="#A78BFA"/>
               <TextBox Name="DetPath" Margin="0,6,0,0" Background="Transparent" Foreground="{StaticResource Muted}" BorderThickness="0" Padding="0" IsReadOnly="True" TextWrapping="Wrap"/>
             </StackPanel>
             <WrapPanel Grid.Column="1" VerticalAlignment="Center" MaxWidth="560">
+              <Button Name="BtnIgnore" Content="✓ Markér som OK" IsEnabled="False" Background="#1E3A2B"/>
               <Button Name="BtnOpen" Content="📂 Åbn placering" IsEnabled="False"/>
               <Button Name="BtnVT" Content="🛡 VirusTotal" IsEnabled="False"/>
               <Button Name="BtnDisable" Content="⛔ Deaktivér" IsEnabled="False" Style="{StaticResource Danger}"/>
@@ -1504,10 +1517,20 @@ function Show-Result {
   $f = $r.Findings
   $c4 = @($f | Where-Object Niveau -eq 4).Count; $c3 = @($f | Where-Object Niveau -eq 3).Count
   $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
+  Update-SecCard $f
+  Show-Result-Rest
+}
+function Update-SecCard($f) {
+  $c4 = @($f | Where-Object Niveau -eq 4).Count; $c3 = @($f | Where-Object Niveau -eq 3).Count
   $removed = @($f | Where-Object { $_.Kategori -eq 'Trussel (fjernet)' }).Count
   if ($c4) { $ui.SecValue.Text = 'Kræver handling'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FF5D6C'); $ui.SecSub.Text = "$c4 aktive fund$(if ($c3) { " · $c3 bør gennemgås" })" }
   elseif ($c3) { $ui.SecValue.Text = 'Bør gennemgås'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FFA24A'); $ui.SecSub.Text = "$c3 ting at kigge på · se planen nedenfor" }
   else { $ui.SecValue.Text = 'Ingen trusler'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#4ADE80'); $ui.SecSub.Text = $(if ($removed) { "$removed tidligere trussel(er) er fjernet af Defender" } else { 'Windows Sikkerhed er aktiv' }) }
+}
+function Show-Result-Rest {
+  $r = $script:Result; $f = $r.Findings
+  $c4 = @($f | Where-Object Niveau -eq 4).Count; $c3 = @($f | Where-Object Niveau -eq 3).Count
+  $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
   $ui.CntSpace.Text = '…'   # udfyldes af Measure-PlanClean med samme beregning som oprydningen
   $score = [math]::Max(0, 100 - 35 * $c4 - 10 * $c3 - 2 * $c2 - [math]::Min(10, $cb))
   $color = if ($score -ge 80) { '#4ADE80' } elseif ($score -ge 50) { '#F6D44A' } elseif ($score -ge 25) { '#FFA24A' } else { '#FF5D6C' }
@@ -1546,6 +1569,10 @@ $ui.BtnScan.Add_Click({
         Detalje = "Ikke set ved scanningen $($n.Siden)"; Hvorfor = 'Er dukket op siden sidste scanning. Genkender du den, er det fint. Ellers så undersøg den.'
         Sti = ($n.Item -split ' = ', 2)[-1]; Type = 'new'; Data = $null; SHA256 = $null })
     }
+    $ign = Get-Ignored
+    $hidden = @($findings | Where-Object { $_.Kategori -ne 'Trussel' -and $ign -contains (Get-FindKey $_) }).Count
+    $findings = @($findings | Where-Object { $_.Kategori -eq 'Trussel' -or $ign -notcontains (Get-FindKey $_) })
+    if ($hidden) { Log "$hidden fund skjult (markeret som OK tidligere)" }
     $script:Result = [pscustomobject]@{ Findings = @($findings | Sort-Object Niveau -Descending); Timeline = $res.Timeline; Space = $res.Space; Perf = $res.Perf; Suspect = $res.Suspect }
     Show-Result
     $ui.StatusText.Text = "Scanning færdig $(Get-Date -Format 'HH:mm') · $($script:Result.Findings.Count) fund · $($script:Result.Timeline.Count) hændelser"
@@ -1556,6 +1583,25 @@ $ui.BtnScan.Add_Click({
 # =====================================================================
 #  Fund
 # =====================================================================
+function Get-FindKey($x) { "$($x.Kategori)|$($x.Titel)|$($x.Sti)" }
+function Get-Ignored { if (Test-Path $IgnoreFile) { @(Get-Content $IgnoreFile -Encoding UTF8) } else { @() } }
+function Add-Ignored($x) { try { Add-Content -Path $IgnoreFile -Value (Get-FindKey $x) -Encoding UTF8 } catch {} }
+function Get-Advice($x) {
+  if ($x.Raad) { return $x.Raad }
+  switch ($x.Kategori) {
+    'Trussel'           { 'Følg trinnet "Fjern virus" på Overblik.' }
+    'Trussel (fjernet)' { 'Ingen handling nødvendig. Defender har ryddet op.' }
+    'Installation'      { 'Kender du programmet? Så markér det som OK. Ellers så find det under Indstillinger → Apps, og afinstallér det.' }
+    'Planlagt opgave'   { 'Kender du den ikke, så tryk Deaktivér (kan fortrydes). Kender du den, så markér den som OK.' }
+    'Autostart'         { 'Kender du den ikke, så tryk Deaktivér (kan fortrydes). Kender du den, så markér den som OK.' }
+    'Tjeneste'          { 'Tjek udgiveren. Er den ukendt og usigneret, så tryk VirusTotal.' }
+    'Ny fil'            { 'Tryk VirusTotal ved tvivl. Ellers kan du roligt ignorere den.' }
+    'Browser'           { 'Kender du ikke udvidelsen, så fjern den i browserens liste over udvidelser.' }
+    'Bloat'             { 'Afinstallér, hvis du ikke bruger det.' }
+    'Nyt siden sidst'   { 'Genkender du det, så markér det som OK.' }
+    default             { 'Kender du det, så markér det som OK.' }
+  }
+}
 function Apply-FindFilter {
   if (-not $script:Result) { return }
   $i = $ui.FilterRisk.SelectedIndex; $txt = $ui.FilterText.Text
@@ -1580,6 +1626,8 @@ $ui.GridFind.Add_SelectionChanged({
   $s = $ui.GridFind.SelectedItem
   if (-not $s) { return }
   $ui.DetWhy.Text = "[$($s.Risiko)]  $($s.Hvorfor)"
+  $ui.DetAdvice.Text = "👉  Hvad du skal gøre: $(Get-Advice $s)"
+  $ui.BtnIgnore.IsEnabled = $s.Kategori -ne 'Trussel'
   $ui.DetPath.Text = (@($s.Sti, $(if ($s.SHA256) { "SHA256: $($s.SHA256)" })) | Where-Object { $_ }) -join "`n"
   $p = ExeOf $s.Sti
   $exists = [bool]($p -and (Test-Path -LiteralPath $p))
@@ -1587,6 +1635,16 @@ $ui.GridFind.Add_SelectionChanged({
   $ui.BtnVT.IsEnabled = [bool]$s.SHA256 -or ($exists -and (Test-Path -LiteralPath $p -PathType Leaf))
   $ui.BtnDisable.IsEnabled = $s.Type -in 'task', 'run'
   $ui.BtnUninstall.IsEnabled = ($s.Type -eq 'appx') -or ($s.Type -eq 'uninstall' -and $s.Data.Cmd)
+})
+$ui.BtnIgnore.Add_Click({
+  $s = $ui.GridFind.SelectedItem
+  if (-not $s) { return }
+  Add-Ignored $s
+  $script:Result = [pscustomobject]@{ Findings = @($script:Result.Findings | Where-Object { $_ -ne $s }); Timeline = $script:Result.Timeline; Space = $script:Result.Space; Perf = $script:Result.Perf; Suspect = $script:Result.Suspect }
+  Update-SecCard $script:Result.Findings; Apply-FindFilter
+  $ui.DetWhy.Text = "✓ '$($s.Titel)' er markeret som OK og vises ikke igen."
+  $ui.DetAdvice.Text = ''; $ui.DetPath.Text = ''; $ui.BtnIgnore.IsEnabled = $false
+  Log "Markeret OK: $(Get-FindKey $s)"
 })
 $ui.BtnOpen.Add_Click({
   $p = ExeOf $ui.GridFind.SelectedItem.Sti
@@ -2028,7 +2086,7 @@ function Build-Plan($r) {
   foreach ($x in ($review | Select-Object -First 3)) {
     $ri++
     $label = switch -Wildcard ($x.Kategori) { 'Installation' { 'Se nærmere på en installation' } 'Defender' { 'Tjek en indstilling i Defender' } 'Netværk' { 'Tjek en netværksforbindelse' } 'Autostart' { 'Tjek noget, der starter automatisk' } 'Tjeneste' { 'Tjek en baggrundstjeneste' } 'Browser' { 'Tjek din browser' } 'Proces' { 'Tjek et program, der kører' } default { 'Se nærmere på et fund' } }
-    [void]$steps.Add((New-Step "review$ri" "$label" "$($x.Titel). $($x.Hvorfor)" 'Vis detaljer' $x))
+    [void]$steps.Add((New-Step "review$ri" "$label" "$($x.Titel). $(Get-Advice $x)" 'Vis detaljer' $x))
   }
   if ($review.Count -gt 3) {
     [void]$steps.Add((New-Step 'reviewall' "$($review.Count - 3) ting mere bør gennemgås" 'Se hele listen under Fund. Ingen af dem er bekræftet farlige, men de skiller sig ud.' 'Vis alle' $null))
@@ -2193,7 +2251,7 @@ function Run-Step($id, [bool]$auto) {
       if ($st.Tag) {
         $hit = @($ui.GridFind.ItemsSource | Where-Object { $_.Titel -eq $st.Tag.Titel -and $_.Sti -eq $st.Tag.Sti }) | Select-Object -First 1
         if ($hit) { $ui.GridFind.SelectedItem = $hit; $ui.GridFind.ScrollIntoView($hit) }
-        if ((Msg "$($st.Tag.Titel)`n`n$($st.Tag.Hvorfor)`n`n$($st.Tag.Sti)`n`nKender du den, og er den i orden?`n(Ja = markér som gennemgået)" 'Gennemgå' 'YesNo' 'Question') -eq 'Yes') { Set-StepState $id 'done' 'Gennemgået' }
+        if ((Msg "$($st.Tag.Titel)`n`n$($st.Tag.Hvorfor)`n`nHvad du skal gøre: $(Get-Advice $st.Tag)`n`n$($st.Tag.Sti)`n`nKender du den, og er den i orden?`n(Ja = markér som OK, så den ikke vises igen)" 'Gennemgå' 'YesNo' 'Question') -eq 'Yes') { Add-Ignored $st.Tag; Set-StepState $id 'done' 'Markeret som OK' }
       } else { Set-StepState $id 'done' 'Åbnet' }
     }
     'restart' {

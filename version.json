@@ -1,14 +1,15 @@
 {
-  "version": "2.10",
+  "version": "2.11",
   "date": "2026-11-24",
   "notes": [
-    "Alt, der bør gennemgås, får nu sit eget trin i planen med forklaring",
-    "Klik på Sikkerhed-kortet for at se fundene"
+    "Hvert fund siger nu, hvad du skal gøre",
+    "Ny knap: Markér som OK, så fundet ikke vises igen",
+    "Færre falske alarmer: Windows-kernen, Store-apps og trafik på dit eget netværk"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "FA613A856A3C5998DBCF5002EC58BCC9826FAF5884215A4187670B230D6B0261"
+      "sha256": "376AEC37BEE3FC103F60738E2989BDFC56D80DB6343B6F261AFB7643EB41C18B"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
