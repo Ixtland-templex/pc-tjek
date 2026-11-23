@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.9'
+$AppVersion = '2.10'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -903,7 +903,7 @@ $SysInfoScript = {
             </Grid>
           </Border>
           <UniformGrid Grid.Column="1" Columns="3">
-            <Border Style="{StaticResource CardB}" Margin="0,0,10,0">
+            <Border Name="SecCard" Style="{StaticResource CardB}" Margin="0,0,10,0" Cursor="Hand" ToolTip="Klik for at se fundene">
               <StackPanel><TextBlock Text="🛡  Sikkerhed" Foreground="{StaticResource Muted}"/>
                 <TextBlock Name="SecValue" Text="–" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
                 <TextBlock Name="SecSub" Text="ikke scannet endnu" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
@@ -1506,7 +1506,7 @@ function Show-Result {
   $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
   $removed = @($f | Where-Object { $_.Kategori -eq 'Trussel (fjernet)' }).Count
   if ($c4) { $ui.SecValue.Text = 'Kræver handling'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FF5D6C'); $ui.SecSub.Text = "$c4 aktive fund$(if ($c3) { " · $c3 bør gennemgås" })" }
-  elseif ($c3) { $ui.SecValue.Text = 'Bør gennemgås'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FFA24A'); $ui.SecSub.Text = "$c3 ting at kigge på · ingen aktive trusler" }
+  elseif ($c3) { $ui.SecValue.Text = 'Bør gennemgås'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FFA24A'); $ui.SecSub.Text = "$c3 ting at kigge på · se planen nedenfor" }
   else { $ui.SecValue.Text = 'Ingen trusler'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#4ADE80'); $ui.SecSub.Text = $(if ($removed) { "$removed tidligere trussel(er) er fjernet af Defender" } else { 'Windows Sikkerhed er aktiv' }) }
   $ui.CntSpace.Text = '…'   # udfyldes af Measure-PlanClean med samme beregning som oprydningen
   $score = [math]::Max(0, 100 - 35 * $c4 - 10 * $c3 - 2 * $c2 - [math]::Min(10, $cb))
@@ -2022,6 +2022,17 @@ function Build-Plan($r) {
   if ($persist.Count) {
     [void]$steps.Add((New-Step 'persist' 'Stop mistænkelige programmer' "$($persist.Count) ukendt(e) program(mer) starter automatisk på en måde, der ligner malware. De slås fra, men slettes ikke, så du kan fortryde." 'Slå dem fra' $persist))
   }
+  # Alt andet, der "bør gennemgås", får sit eget trin med forklaring, så intet er skjult
+  $review = @($f | Where-Object { $_.Niveau -ge 3 -and $_.Type -notin 'task', 'run' -and $_.Kategori -ne 'Trussel' })
+  $ri = 0
+  foreach ($x in ($review | Select-Object -First 3)) {
+    $ri++
+    $label = switch -Wildcard ($x.Kategori) { 'Installation' { 'Se nærmere på en installation' } 'Defender' { 'Tjek en indstilling i Defender' } 'Netværk' { 'Tjek en netværksforbindelse' } 'Autostart' { 'Tjek noget, der starter automatisk' } 'Tjeneste' { 'Tjek en baggrundstjeneste' } 'Browser' { 'Tjek din browser' } 'Proces' { 'Tjek et program, der kører' } default { 'Se nærmere på et fund' } }
+    [void]$steps.Add((New-Step "review$ri" "$label" "$($x.Titel). $($x.Hvorfor)" 'Vis detaljer' $x))
+  }
+  if ($review.Count -gt 3) {
+    [void]$steps.Add((New-Step 'reviewall' "$($review.Count - 3) ting mere bør gennemgås" 'Se hele listen under Fund. Ingen af dem er bekræftet farlige, men de skiller sig ud.' 'Vis alle' $null))
+  }
   if ($ran.Count) {
     [void]$steps.Add((New-Step 'passwords' 'Skift dine vigtigste adgangskoder' 'Noget skadeligt nåede at køre og kan have set dine gemte logins. Skift e-mail først, gerne fra din telefon.' 'Vis hvordan' $null))
   }
@@ -2174,6 +2185,17 @@ function Run-Step($id, [bool]$auto) {
       $ok = 0; foreach ($b in $st.Tag) { try { Remove-AppxPackage -Package $b.Data.Package -ErrorAction Stop; $ok++ } catch {} }
       Set-StepState 'bloat' 'done' "$ok fjernet"; Log "Plan: bloat $ok"
     }
+    { $_ -like 'review*' } {
+      $ui.NavFind.IsChecked = $true
+      $ui.FilterText.Text = ''
+      $ui.FilterRisk.SelectedIndex = 2
+      Apply-FindFilter
+      if ($st.Tag) {
+        $hit = @($ui.GridFind.ItemsSource | Where-Object { $_.Titel -eq $st.Tag.Titel -and $_.Sti -eq $st.Tag.Sti }) | Select-Object -First 1
+        if ($hit) { $ui.GridFind.SelectedItem = $hit; $ui.GridFind.ScrollIntoView($hit) }
+        if ((Msg "$($st.Tag.Titel)`n`n$($st.Tag.Hvorfor)`n`n$($st.Tag.Sti)`n`nKender du den, og er den i orden?`n(Ja = markér som gennemgået)" 'Gennemgå' 'YesNo' 'Question') -eq 'Yes') { Set-StepState $id 'done' 'Gennemgået' }
+      } else { Set-StepState $id 'done' 'Åbnet' }
+    }
     'restart' {
       if ((Msg "Genstart pc'en om 30 sekunder?`n`nGem dit arbejde først." 'Genstart' 'YesNo' 'Question') -ne 'Yes') { return }
       shutdown.exe /r /t 30 /c "PC-Tjek genstarter pc'en om 30 sekunder."
@@ -2198,6 +2220,7 @@ $ui.BtnFixAll.Add_Click({
   $ui.BtnFixAll.Visibility = 'Collapsed'
   Run-Step 'clean' $true
 })
+$ui.SecCard.Add_MouseLeftButtonUp({ if ($script:Result) { $ui.NavFind.IsChecked = $true; $ui.FilterText.Text = ''; $ui.FilterRisk.SelectedIndex = 2; Apply-FindFilter } })
 $ui.BtnDetails.Add_Click({
   $script:ShowDetails = -not $script:ShowDetails
   $ui.StoryCard.Visibility = $(if ($script:ShowDetails) { 'Visible' } else { 'Collapsed' })

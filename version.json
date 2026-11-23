@@ -1,15 +1,14 @@
 {
-  "version": "2.9",
-  "date": "2026-11-23",
+  "version": "2.10",
+  "date": "2026-11-24",
   "notes": [
-    "Nyt \"Din pc\"-overblik: system, processor, grafikkort, RAM, bundkort og diske",
-    "Trusler, som Defender har fjernet, vises ikke længere som kritiske",
-    "Langt færre støj-fund og tre klare statuskort"
+    "Alt, der bør gennemgås, får nu sit eget trin i planen med forklaring",
+    "Klik på Sikkerhed-kortet for at se fundene"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "D0C63EF59FFF78B05103F37ED4503BA8068D4118D7C615FD3A20BC7EC999C4B4"
+      "sha256": "FA613A856A3C5998DBCF5002EC58BCC9826FAF5884215A4187670B230D6B0261"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
