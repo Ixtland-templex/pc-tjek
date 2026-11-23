@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.8'
+$AppVersion = '2.9'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -133,12 +133,19 @@ $ScanScript = {
   $dets    = @(Get-MpThreatDetection)
   foreach ($th in $threats) {
     $d = $dets | Where-Object ThreatID -eq $th.ThreatID | Sort-Object InitialDetectionTime | Select-Object -First 1
-    $res = ($th.Resources -join '; ') -replace 'file:_', ''
+    $paths = @($th.Resources | ForEach-Object { (([string]$_) -replace '^[a-zA-Z]+:_', '') -replace '->.*$', '' } | Where-Object { $_ -match '^[a-zA-Z]:\\' })
+    $res = $paths -join '; '
+    $still = @($paths | Where-Object { Test-Path -LiteralPath $_ })
     $ran = if ($th.DidThreatExecute) { 'JA – den nåede at køre' } else { 'nej' }
-    $risk = if ($th.IsActive -or $th.DidThreatExecute) { 4 } else { 3 }
-    Add-Find $risk 'Trussel' $th.ThreatName "Kørte: $ran · Aktiv nu: $($th.IsActive) · Fundet: $($d.InitialDetectionTime)" `
-      ("Defender har fundet '{0}'. {1}" -f $th.ThreatName, $(if ($th.DidThreatExecute) { 'Den har kørt på pc''en, så det, den nåede at oprette, skal findes (se Hændelsesforløb).' } else { 'Den blev stoppet, før den kørte.' })) `
-      $res 'threat' $null
+    if ($th.IsActive -or $still.Count) {
+      # Stadig til stede: kræver handling
+      Add-Find 4 'Trussel' $th.ThreatName "Stadig til stede · Kørte: $ran · Fundet: $($d.InitialDetectionTime)" `
+        ("Fundet af Defender og stadig på pc'en{0}. Kør en dybdescanning (Defender Offline) for at fjerne den." -f $(if ($still.Count) { " ($($still.Count) fil(er))" } else { '' })) $res 'threat' $null
+    } else {
+      # Allerede fjernet: kun til orientering
+      Add-Find 1 'Trussel (fjernet)' "$($th.ThreatName) (fjernet)" "Fjernet af Defender · Kørte: $ran · Fundet: $($d.InitialDetectionTime)" `
+        ("Defender har fjernet den. Ingen handling nødvendig.{0}" -f $(if ($th.DidThreatExecute) { ' Den nåede dog at køre, så skift dine vigtigste adgangskoder for en sikkerheds skyld.' } else { '' })) $res 'threat' $null
+    }
     Add-Time $d.InitialDetectionTime 'Defender' "Trussel fundet: $($th.ThreatName)" $res
   }
   $pref = Get-MpPreference
@@ -343,7 +350,14 @@ $ScanScript = {
         'Defender blokerer filen, fordi den indeholder malware, men den ligger stadig på disken. Kør en Microsoft Defender Offline-scanning (Ydelse og helbred → Defender Offline-scan), som kan fjerne den, før Windows starter.' $f.FullName 'file' $null
       continue
     }
-    $risk = if ($f.FullName -match '(?i)\\(Temp|Users\\Public|ProgramData)\\' -or $f.Extension.ToLower() -in '.vbs', '.js', '.hta', '.scr') { 2 } else { 1 }
+    # Kun "Bør gennemgås" (2) for de klassiske gemmesteder; resten er info (1)
+    $rel = $f.FullName
+    $risky = ($f.Extension.ToLower() -in '.vbs', '.js', '.hta', '.scr', '.jar') -or
+             ($rel -match '(?i)\\Users\\Public\\') -or
+             ($rel -match '(?i)\\AppData\\(Roaming|Local)\\[^\\]+\.(exe|dll|scr)$') -or
+             ($rel -match '(?i)^C:\\ProgramData\\[^\\]+\.(exe|dll|scr)$') -or
+             ($rel -match '(?i)\\Start Menu\\Programs\\Startup\\')
+    $risk = if ($risky) { 2 } else { 1 }
     Add-Time $f.CreationTime 'Fil' "Ny usigneret fil: $($f.Name)" $f.FullName
     Add-Find $risk 'Ny fil' $f.Name "$([math]::Round($f.Length / 1KB)) KB · oprettet $($f.CreationTime) · $sg" `
       'Usigneret programfil oprettet for nylig et sted, hvor malware ofte lægger sig. Mange er ufarlige (spil, værktøjer). Brug "Tjek på VirusTotal" ved tvivl.' $f.FullName 'file' $null
@@ -660,6 +674,58 @@ $UpdateApplyScript = {
   return 'ok'
 }
 
+
+$SysInfoScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $sync.Status = 'Læser pc-oplysninger...'
+  $o = [ordered]@{}
+  $os = Get-CimInstance Win32_OperatingSystem
+  $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+  $up = (Get-Date) - $os.LastBootUpTime
+  $o.OS = "$($os.Caption -replace 'Microsoft ', '') $($cv.DisplayVersion)"
+  $o.OSsub = "Build $($cv.CurrentBuild).$($cv.UBR) · oppe i $([int]$up.TotalDays) d $($up.Hours) t"
+  $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+  $o.CPU = ($cpu.Name -replace '\s+', ' ' -replace '\(R\)|\(TM\)', '').Trim()
+  $o.CPUsub = "$($cpu.NumberOfCores) kerner / $($cpu.NumberOfLogicalProcessors) tråde · $([math]::Round($cpu.MaxClockSpeed / 1000, 1)) GHz · belastning $($cpu.LoadPercentage) %"
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  $gpuDone = $false
+  if (Test-Path $smi) {
+    $q = & $smi --query-gpu=name,memory.total,temperature.gpu,utilization.gpu,driver_version --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+    if ($q) { $p = $q -split ',\s*'; $o.GPU = $p[0]; $o.GPUsub = "$([math]::Round([double]$p[1] / 1024)) GB VRAM · $($p[2]) °C · belastning $($p[3]) % · driver $($p[4])"; $gpuDone = $true }
+  }
+  if (-not $gpuDone) {
+    $g = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage' } | Select-Object -First 1
+    $vram = $null
+    Get-ChildItem 'HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object {
+      $pp = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+      if ($pp.DriverDesc -eq $g.Name -and $pp.'HardwareInformation.qwMemorySize') { $vram = [math]::Round([double]$pp.'HardwareInformation.qwMemorySize' / 1GB) }
+    }
+    $o.GPU = $g.Name; $o.GPUsub = "$(if ($vram) { "$vram GB VRAM · " })driver $($g.DriverVersion)"
+  }
+  $mods = @(Get-CimInstance Win32_PhysicalMemory)
+  $tot = ($mods | Measure-Object Capacity -Sum).Sum
+  $spd = ($mods | Measure-Object ConfiguredClockSpeed -Maximum).Maximum
+  $used = [math]::Round(100 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize * 100)
+  $o.RAM = "$([math]::Round($tot / 1GB)) GB$(if ($spd) { " · $spd MT/s" })"
+  $o.RAMsub = "$($mods.Count) moduler · $used % i brug lige nu"
+  $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS
+  $o.Board = "$($mb.Manufacturer -replace 'Micro-Star International Co., Ltd.', 'MSI' -replace 'ASUSTeK COMPUTER INC.', 'ASUS' -replace 'Gigabyte Technology Co., Ltd.', 'GIGABYTE') $($mb.Product)".Trim()
+  $o.Boardsub = "BIOS $($bios.SMBIOSBIOSVersion) · $(if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString('dd-MM-yyyy') })"
+  $dl = @()
+  foreach ($d in @(Get-PhysicalDisk)) {
+    $rc = $d | Get-StorageReliabilityCounter
+    $t = if ($rc.Temperature) { " · $($rc.Temperature) °C" } else { '' }
+    $h = if ($d.HealthStatus -eq 'Healthy') { 'sund' } else { [string]$d.HealthStatus }
+    $dl += "$($d.FriendlyName) ($([math]::Round($d.Size / 1GB)) GB $($d.MediaType -replace 'Unspecified', '')) · $h$t"
+  }
+  $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+  $o.Disk = "C: $([math]::Round($c.FreeSpace / 1GB)) GB ledig af $([math]::Round($c.Size / 1GB)) GB"
+  $o.Disksub = ($dl -join "`n")
+  return $o
+}
+
 # =====================================================================
 #  GUI
 # =====================================================================
@@ -816,7 +882,7 @@ $UpdateApplyScript = {
 
       <!-- OVERBLIK -->
       <Grid Name="PageHome">
-        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <DockPanel Margin="0,0,0,18">
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
             <Button Name="BtnExport" Content="📄  Eksportér rapport" IsEnabled="False"/>
@@ -836,16 +902,36 @@ $UpdateApplyScript = {
               </StackPanel>
             </Grid>
           </Border>
-          <UniformGrid Grid.Column="1" Columns="3" Rows="2">
-            <Border Style="{StaticResource CardB}" Margin="0,0,10,10"><StackPanel><TextBlock Text="Kritisk" Foreground="{StaticResource Muted}"/><TextBlock Name="CntCrit" Text="–" FontSize="30" FontWeight="Bold" Foreground="#FF5D6C"/></StackPanel></Border>
-            <Border Style="{StaticResource CardB}" Margin="0,0,10,10"><StackPanel><TextBlock Text="Høj risiko" Foreground="{StaticResource Muted}"/><TextBlock Name="CntHigh" Text="–" FontSize="30" FontWeight="Bold" Foreground="#FFA24A"/></StackPanel></Border>
-            <Border Style="{StaticResource CardB}" Margin="0,0,0,10"><StackPanel><TextBlock Text="Mellem" Foreground="{StaticResource Muted}"/><TextBlock Name="CntMed" Text="–" FontSize="30" FontWeight="Bold" Foreground="#F6D44A"/></StackPanel></Border>
-            <Border Style="{StaticResource CardB}" Margin="0,0,10,0"><StackPanel><TextBlock Text="Bloat" Foreground="{StaticResource Muted}"/><TextBlock Name="CntLow" Text="–" FontSize="30" FontWeight="Bold" Foreground="#4ADE80"/></StackPanel></Border>
-            <Border Style="{StaticResource CardB}" Margin="0,0,10,0"><StackPanel><TextBlock Text="GB kan frigøres" Foreground="{StaticResource Muted}"/><TextBlock Name="CntSpace" Text="–" FontSize="30" FontWeight="Bold" Foreground="#60A5FA"/></StackPanel></Border>
-            <Border Style="{StaticResource CardB}"><StackPanel><TextBlock Text="Nyt siden sidst" Foreground="{StaticResource Muted}"/><TextBlock Name="CntNew" Text="–" FontSize="30" FontWeight="Bold" Foreground="#C084FC"/></StackPanel></Border>
+          <UniformGrid Grid.Column="1" Columns="3">
+            <Border Style="{StaticResource CardB}" Margin="0,0,10,0">
+              <StackPanel><TextBlock Text="🛡  Sikkerhed" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="SecValue" Text="–" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                <TextBlock Name="SecSub" Text="ikke scannet endnu" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+            <Border Style="{StaticResource CardB}" Margin="0,0,10,0">
+              <StackPanel><TextBlock Text="💾  Lagerplads" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="CntSpace" Text="–" FontSize="26" FontWeight="Bold" Foreground="#60A5FA" Margin="0,6,0,0"/>
+                <TextBlock Name="SpaceSub" Text="kan ryddes" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+            <Border Style="{StaticResource CardB}">
+              <StackPanel><TextBlock Text="🚀  Opstart" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="StartValue" Text="–" FontSize="26" FontWeight="Bold" Foreground="#C084FC" Margin="0,6,0,0"/>
+                <TextBlock Name="StartSub" Text="programmer starter med Windows" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
           </UniformGrid>
         </Grid>
-        <Grid Grid.Row="2">
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Margin="0,0,0,16" Padding="18,14">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <TextBlock Text="💻  Din pc" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,10"/>
+            <UniformGrid Grid.Row="1" Columns="3">
+              <StackPanel Margin="0,0,16,10"><TextBlock Text="SYSTEM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysOS" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysOSsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,10"><TextBlock Text="PROCESSOR" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysCpu" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysCpusub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,0,10"><TextBlock Text="GRAFIKKORT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysGpu" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysGpusub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,0"><TextBlock Text="HUKOMMELSE" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysRam" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysRamsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,0"><TextBlock Text="BUNDKORT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysBoard" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysBoardsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel><TextBlock Text="LAGER" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysDisk" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysDisksub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+            </UniformGrid>
+          </Grid>
+        </Border>
+        <Grid Grid.Row="3">
         <Border Name="ScanCard" Style="{StaticResource CardB}" Padding="28,24" Visibility="Collapsed" Panel.ZIndex="1">
           <Grid>
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -1365,7 +1451,7 @@ function Build-Story($r) {
   else { L "🟢  Ingen tegn på aktiv malware de steder, der er tjekket." }
   L ''
 
-  $thr = @($f | Where-Object Kategori -eq 'Trussel')
+  $thr = @($f | Where-Object { $_.Kategori -like 'Trussel*' })
   L '━━  1 · HVAD DEFENDER HAR FANGET'
   if ($thr.Count) {
     foreach ($t in $thr) { L "   • $($t.Titel)"; L "     $($t.Detalje)"; L "     $($t.Sti)" }
@@ -1418,8 +1504,10 @@ function Show-Result {
   $f = $r.Findings
   $c4 = @($f | Where-Object Niveau -eq 4).Count; $c3 = @($f | Where-Object Niveau -eq 3).Count
   $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
-  $ui.CntCrit.Text = $c4; $ui.CntHigh.Text = $c3; $ui.CntMed.Text = $c2; $ui.CntLow.Text = $cb
-  $ui.CntNew.Text = $script:NewSince.Count
+  $removed = @($f | Where-Object { $_.Kategori -eq 'Trussel (fjernet)' }).Count
+  if ($c4) { $ui.SecValue.Text = 'Kræver handling'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FF5D6C'); $ui.SecSub.Text = "$c4 aktive fund$(if ($c3) { " · $c3 bør gennemgås" })" }
+  elseif ($c3) { $ui.SecValue.Text = 'Bør gennemgås'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#FFA24A'); $ui.SecSub.Text = "$c3 ting at kigge på · ingen aktive trusler" }
+  else { $ui.SecValue.Text = 'Ingen trusler'; $ui.SecValue.Foreground = $Brush.ConvertFromString('#4ADE80'); $ui.SecSub.Text = $(if ($removed) { "$removed tidligere trussel(er) er fjernet af Defender" } else { 'Windows Sikkerhed er aktiv' }) }
   $ui.CntSpace.Text = '…'   # udfyldes af Measure-PlanClean med samme beregning som oprydningen
   $score = [math]::Max(0, 100 - 35 * $c4 - 10 * $c3 - 2 * $c2 - [math]::Min(10, $cb))
   $color = if ($score -ge 80) { '#4ADE80' } elseif ($score -ge 50) { '#F6D44A' } elseif ($score -ge 25) { '#FFA24A' } else { '#FF5D6C' }
@@ -1659,6 +1747,8 @@ function Load-Startup {
   $on = @($list | Where-Object Aktiv).Count
   $can = @($list | Where-Object { $_.Aktiv -and $_.Tip -like 'Kan slås fra*' }).Count
   $ui.StartInfo.Text = "$on af $($list.Count) programmer starter automatisk · $can kan uden videre slås fra · Til/fra virker som i Jobliste: intet slettes."
+  $ui.StartValue.Text = "$on"
+  $ui.StartSub.Text = "starter med Windows$(if ($can) { " · $can kan slås fra" } else { '' })"
 }
 function Toggle-Selected {
   $it = $ui.GridStart.SelectedItem
@@ -1918,7 +2008,12 @@ function Build-Plan($r) {
   $steps = New-Object System.Collections.ArrayList
   $threats = @($f | Where-Object { $_.Kategori -eq 'Trussel' })
   $infected = @($threats | Where-Object { $_.Titel -like 'Inficeret fil:*' })
-  $ran = @($threats | Where-Object { $_.Detalje -match 'Kørte: JA' })
+  $ran = @($f | Where-Object { $_.Kategori -like 'Trussel*' -and $_.Detalje -match 'Kørte: JA' })
+  $pwFlag = Join-Path $OutDir 'adgangskoder-skiftet.txt'
+  if ($ran.Count -and (Test-Path $pwFlag)) {
+    $doneNames = @(Get-Content $pwFlag -Encoding UTF8)
+    $ran = @($ran | Where-Object { $doneNames -notcontains (($_.Titel) -replace ' \(fjernet\)$', '') })
+  }
   if ($infected.Count -or @($threats | Where-Object { $_.Niveau -ge 4 }).Count) {
     $why = if ($infected.Count) { "Der ligger $($infected.Count) fil(er) med virus på pc'en. En dybdescanning fjerner dem, før Windows starter (ca. 15 min)." } else { 'Windows har fundet en aktiv trussel. En dybdescanning fjerner den, før Windows starter (ca. 15 min).' }
     [void]$steps.Add((New-Step 'virus' 'Fjern virus' $why 'Start dybdescanning' $null))
@@ -1967,7 +2062,8 @@ function Measure-PlanClean {
     $tot = 0.0; if ($res) { foreach ($k in $res.Keys) { $tot += [double]$res[$k] } }
     foreach ($row in $script:CleanRows) { if ($res -and $res.ContainsKey($row.Id)) { $row.Tal = [double]$res[$row.Id]; $row.Info = Fmt-GB $row.Tal } }
     $script:CleanMeasured = $true; $ui.BtnCleanRun.IsEnabled = $true
-    $ui.CntSpace.Text = '{0:N1}' -f ($tot / 1GB)
+    $ui.CntSpace.Text = Fmt-GB $tot
+    try { $cc = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"; $ui.SpaceSub.Text = "kan ryddes · $([math]::Round($cc.FreeSpace / 1GB)) GB ledig på C:" } catch {}
     $st = Get-Step 'clean'; if (-not $st) { return }
     if ($err) { $st.Info = 'Kunne ikke måle. Du kan stadig prøve at rydde op.'; $st.Valgt = $true; return }
     if ($tot -lt 50MB) { Set-StepState 'clean' 'done' 'Intet at rydde'; $st.Info = 'Der er næsten ingen midlertidige filer.'; return }
@@ -2009,7 +2105,11 @@ function Run-Step($id, [bool]$auto) {
     }
     'passwords' {
       Msg ("Sådan gør du (helst fra din telefon):`n`n1. Skift adgangskoden til din e-mail først.`n2. Derefter bank (MitID er ikke påvirket), Discord, Steam og sociale medier.`n3. Slå to-trins-bekræftelse til, hvor du kan.`n4. Log ud af alle enheder i de vigtigste tjenester.`n`nBrug ikke den samme adgangskode flere steder.") 'Adgangskoder' | Out-Null
-      if ((Msg 'Har du gjort det, eller vil du gøre det senere?' 'Adgangskoder' 'YesNo' 'Question') -eq 'Yes') { Set-StepState 'passwords' 'done' 'Klaret' }
+      if ((Msg 'Har du skiftet dem? (Ja = marker som klaret, så du ikke bliver spurgt igen for de samme trusler)' 'Adgangskoder' 'YesNo' 'Question') -eq 'Yes') {
+        $names = @($script:Result.Findings | Where-Object { $_.Kategori -like 'Trussel*' -and $_.Detalje -match 'Kørte: JA' } | ForEach-Object { ($_.Titel) -replace ' \(fjernet\)$', '' })
+        try { $names | Add-Content -Path (Join-Path $OutDir 'adgangskoder-skiftet.txt') -Encoding UTF8 } catch {}
+        Set-StepState 'passwords' 'done' 'Klaret'
+      }
     }
     'persist' {
       $names = ($st.Tag | ForEach-Object { "  • $($_.Titel)" }) -join "`n"
@@ -2184,7 +2284,19 @@ $ui.BtnUpdateApp.Add_Click({
 
 # =====================================================================
 Load-Startup
-$win.Add_ContentRendered({ Check-AppUpdate $false })
+function Load-SysInfo {
+  Invoke-Bg $SysInfoScript $null {
+    param($o, $err, $c)
+    if ($o -is [array]) { $o = @($o | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
+    if (-not $o) { return }
+    foreach ($k in 'OS', 'CPU', 'GPU', 'RAM', 'Board', 'Disk') {
+      $n = @{ OS = 'SysOS'; CPU = 'SysCpu'; GPU = 'SysGpu'; RAM = 'SysRam'; Board = 'SysBoard'; Disk = 'SysDisk' }[$k]
+      $ui[$n].Text = [string]$o[$k]; $ui[$n].ToolTip = [string]$o[$k]
+      $ui["${n}sub"].Text = [string]$o["${k}sub"]
+    }
+  } $null
+}
+$win.Add_ContentRendered({ Load-SysInfo; Check-AppUpdate $false })
 Log 'UI klar'
 [void]$win.ShowDialog()
 $jobTimer.Stop()
