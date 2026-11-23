@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.1'
+$AppVersion = '2.5'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -31,7 +31,7 @@ $ConfigFile = Join-Path $PSScriptRoot 'pc-tjek.config.json'
 $UpdateUrl = $null
 if (Test-Path $ConfigFile) { try { $UpdateUrl = ([string](Get-Content $ConfigFile -Raw | ConvertFrom-Json).UpdateUrl).TrimEnd('/') } catch {} }
 if ($UpdateUrl -notmatch '^https://raw\.githubusercontent\.com/[\w\-]+/[\w\-.]+/[\w\-./]+$' -or $UpdateUrl -match 'DIT-BRUGERNAVN') { $UpdateUrl = $null }
-function Log($m) { try { Add-Content -Path $LogFile -Value ("{0:yyyy-MM-dd HH:mm:ss}  {1}" -f (Get-Date), $m) -Encoding UTF8 } catch {} }
+function Log($m) { try { [IO.File]::AppendAllText($LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} }
 Log "Start v$AppVersion"
 
 # ---------- Lille C#-hjælper: rækker med afkrydsning + mørk titellinje ----------
@@ -68,6 +68,9 @@ namespace PcTjek {
 $ScanScript = {
   param($sync, $arg)
   $ErrorActionPreference = 'SilentlyContinue'
+  # En enkelt fejl må aldrig stoppe hele scanningen: log den, og fortsæt med næste linje
+  trap { if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan-advarsel (fortsætter): {1}`r`n" -f (Get-Date), $_.Exception.Message), [Text.Encoding]::UTF8) } catch {} }; continue }
+  if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan-motor startet`r`n" -f (Get-Date)), [Text.Encoding]::UTF8) } catch {} }
   $since = (Get-Date).AddDays(-45)
   function Status($t) { $sync.Status = $t }
   # Faser med vægt (summer til 100) – bruges til procent og tidsestimat
@@ -79,15 +82,19 @@ $ScanScript = {
     $sync.Phase = $i; $sync.PhaseStart = $start; $sync.PhaseWeight = $Phases[$i - 1]
     $sync.Progress = [double]$start; $sync.Status = $text; $sync.Detail = ''
     $sync.PhaseTimes[$i] = Get-Date
+    if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan fase {1}: {2}`r`n" -f (Get-Date), $i, $text), [Text.Encoding]::UTF8) } catch {} }
   }
   function Sub([double]$frac, $detail) {
     $sync.Progress = $sync.PhaseStart + $sync.PhaseWeight * [math]::Min(1, [math]::Max(0, $frac))
     if ($detail) { $sync.Detail = $detail }
   }
 
+  # Windows-fejl 225 (ERROR_VIRUS_INFECTED) / 226: Defender nægter adgang til filen, fordi den er inficeret
+  function IsVirusErr($e) { $m = [string]$e.Exception.Message; $h = 0; try { $h = $e.Exception.HResult -band 0xFFFF } catch {}; return ($h -eq 225 -or $h -eq 226 -or $m -match '(?i)virus|uønsket software|unwanted software') }
   function Sig($path) {
     if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'Ikke fundet' }
-    $s = Get-AuthenticodeSignature -LiteralPath $path
+    try { $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop }
+    catch { if (IsVirusErr $_) { return 'BLOKERET AF DEFENDER' }; return 'Kunne ikke læses' }
     if ($s.Status -eq 'Valid') { return 'Signeret: ' + ($s.SignerCertificate.Subject -replace '^CN="?([^,"]+).*', '$1') }
     return 'USIGNERET (' + [string]$s.Status + ')'
   }
@@ -102,15 +109,15 @@ $ScanScript = {
   $LolBins      = '(?i)\\(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin)\.exe'
   $BadArgs      = '(?i)(-enc|-encodedcommand|frombase64string|-w(indowstyle)?\s+hidden|iex|invoke-expression|downloadstring|http[s]?://)'
 
-  $F = New-Object System.Collections.ArrayList   # fund
-  $T = New-Object System.Collections.ArrayList   # tidslinje
+  $AllFinds = New-Object System.Collections.ArrayList   # fund
+  $AllTimes = New-Object System.Collections.ArrayList   # tidslinje
   function Add-Find($risk, $cat, $title, $detail, $why, $path, $kind, $data) {
     $label = @('Info', 'Lav', 'Mellem', 'Høj', 'Kritisk')[$risk]
-    [void]$F.Add([pscustomobject]@{ Risiko = $label; Niveau = $risk; Kategori = $cat; Titel = $title; Detalje = $detail
+    [void]$AllFinds.Add([pscustomobject]@{ Risiko = $label; Niveau = $risk; Kategori = $cat; Titel = $title; Detalje = $detail
                                      Hvorfor = $why; Sti = $path; Type = $kind; Data = $data; SHA256 = $null })
   }
   function Add-Time($time, $type, $event, $detail) {
-    if ($time) { [void]$T.Add([pscustomobject]@{ Tid = [datetime]$time; Type = $type; Hændelse = $event; Detalje = $detail; Fokus = '' }) }
+    if ($time) { [void]$AllTimes.Add([pscustomobject]@{ Tid = [datetime]$time; Type = $type; Hændelse = $event; Detalje = $detail; Fokus = '' }) }
   }
 
   # ---------- 1. Defender ----------
@@ -279,17 +286,33 @@ $ScanScript = {
   $ext = '.exe', '.dll', '.ps1', '.vbs', '.js', '.bat', '.cmd', '.msi', '.scr', '.jar', '.hta'
   $skip = '(?i)\\(Packages|WinGet|Microsoft\\Edge|Microsoft\\Teams|Google\\Chrome\\Application|Google\\Chrome\\User Data\\[^\\]+\\(Cache|Code Cache|Extensions)|npm-cache|pip\\cache|Discord\\app-|Spotify|NVIDIA|Steam|squirrel|\\Programs\\(Microsoft VS Code|Obsidian|GitHub Desktop|claude|chatgpt))\\'
   $roots = "$env:ProgramData", "$env:LOCALAPPDATA", "$env:APPDATA", "$env:TEMP", "$env:PUBLIC", 'C:\Windows\Temp'
+  # Egen mappegennemgang: følger IKKE genveje/junctions (undgår løkker) og springer store caches over
+  $skipDir = '(?i)^(node_modules|\.git|Packages|WindowsApps|WinGet|Package Cache|Cache|Code Cache|GPUCache|cache2|CacheStorage|Service Worker|IndexedDB|INetCache|npm-cache|\.cache|DXCache|GLCache|D3DSCache|Crashpad)$'
+  $found = New-Object System.Collections.ArrayList
   $seen = 0; $ri = 0
-  $files = foreach ($r in $roots) {
+  foreach ($r in $roots) {
     $ri++; $leaf = Split-Path $r -Leaf
     Sub (($ri - 1) / $roots.Count) "Gennemgår $leaf..."
-    Get-ChildItem -LiteralPath $r -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
-      $seen++
-      if ($seen % 500 -eq 0) { Sub (($ri - 1 + [math]::Min(0.95, $seen / 60000.0)) / $roots.Count) ('{0:N0} filer gennemgået · {1}' -f $seen, $leaf) }
-      if ($ext -contains $_.Extension.ToLower() -and $_.CreationTime -gt $since -and $_.FullName -notmatch $skip) { $_ }
+    if (-not (Test-Path -LiteralPath $r)) { continue }
+    $stack = New-Object System.Collections.Stack
+    $stack.Push((New-Object IO.DirectoryInfo $r))
+    while ($stack.Count -gt 0) {
+      $d = $stack.Pop()
+      try {
+        foreach ($e in $d.EnumerateFileSystemInfos()) {
+          if ($e -is [IO.DirectoryInfo]) {
+            if (($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $e.Name -match $skipDir) { continue }
+            $stack.Push($e)
+          } else {
+            $seen++
+            if ($seen % 1000 -eq 0) { Sub (($ri - 1 + [math]::Min(0.95, $seen / 80000.0)) / $roots.Count) ('{0:N0} filer gennemgået · {1}' -f $seen, $leaf) }
+            if ($e.CreationTime -gt $since -and $ext -contains $e.Extension.ToLower() -and $e.FullName -notmatch $skip) { [void]$found.Add($e) }
+          }
+        }
+      } catch { }   # ingen adgang / mappe forsvundet
     }
   }
-  $files = @($files | Sort-Object CreationTime -Descending | Select-Object -First 2000)
+  $files = @($found | Sort-Object CreationTime -Descending | Select-Object -First 1500)
   Phase 7 "Tjekker signaturer på $($files.Count) nye filer"
   $n = 0
   foreach ($f in $files) {
@@ -297,12 +320,21 @@ $ScanScript = {
     $isBin = $f.Extension.ToLower() -in '.exe', '.dll', '.msi', '.scr'
     $sg = if ($isBin) { Sig $f.FullName } else { 'script' }
     if ($sg -like 'Signeret*') { continue }
+    $sha = $null; $blocked = $sg -eq 'BLOKERET AF DEFENDER'
+    if (-not $blocked -and $f.Length -lt 100MB) {
+      try { $sha = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { if (IsVirusErr $_) { $blocked = $true } }
+    }
+    if ($blocked) {
+      Add-Time $f.CreationTime 'Defender' "INFICERET FIL: $($f.Name)" $f.FullName
+      Add-Find 4 'Trussel' "Inficeret fil: $($f.Name)" "Windows nægter at åbne den · oprettet $($f.CreationTime) · $([math]::Round($f.Length / 1KB)) KB" `
+        'Defender blokerer filen, fordi den indeholder malware, men den ligger stadig på disken. Kør en Microsoft Defender Offline-scanning (Ydelse og helbred → Defender Offline-scan), som kan fjerne den, før Windows starter.' $f.FullName 'file' $null
+      continue
+    }
     $risk = if ($f.FullName -match '(?i)\\(Temp|Users\\Public|ProgramData)\\' -or $f.Extension.ToLower() -in '.vbs', '.js', '.hta', '.scr') { 2 } else { 1 }
-    $sha = if ($f.Length -lt 100MB) { (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash } else { $null }
     Add-Time $f.CreationTime 'Fil' "Ny usigneret fil: $($f.Name)" $f.FullName
     Add-Find $risk 'Ny fil' $f.Name "$([math]::Round($f.Length / 1KB)) KB · oprettet $($f.CreationTime) · $sg" `
       'Usigneret programfil oprettet for nylig et sted, hvor malware ofte lægger sig. Mange er ufarlige (spil, værktøjer). Brug "Tjek på VirusTotal" ved tvivl.' $f.FullName 'file' $null
-    $F[$F.Count - 1].SHA256 = $sha
+    $AllFinds[$AllFinds.Count - 1].SHA256 = $sha
   }
 
   # ---------- 6. Browser ----------
@@ -333,7 +365,7 @@ $ScanScript = {
 
   # ---------- 7. Bloat + plads ----------
   Phase 9 'Beregner plads og bloat'
-  $S = New-Object System.Collections.ArrayList
+  $AllSpace = New-Object System.Collections.ArrayList
   $pi = 0
   function DirSize($p) { (Get-ChildItem -LiteralPath $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
   foreach ($x in @(
@@ -345,7 +377,7 @@ $ScanScript = {
       @{ N = 'Crash dumps'; P = "$env:LOCALAPPDATA\CrashDumps"; Note = 'Sikkert at slette' })) {
     $pi++; Sub ($pi / 6) "Måler $($x.N)..."
     $sz = DirSize $x.P
-    [void]$S.Add([pscustomobject]@{ Hvad = $x.N; GB = [math]::Round($sz / 1GB, 2); Note = $x.Note; Sti = $x.P })
+    [void]$AllSpace.Add([pscustomobject]@{ Hvad = $x.N; GB = [math]::Round($sz / 1GB, 2); Note = $x.Note; Sti = $x.P })
   }
   $bloatRx = '(?i)^(GIGABYTE|GBT_|PowerISO|Futuremark|McAfee|Norton|WildTangent|IObit|Driver Booster|ByteFence|Segurazo|OneLaunch|Wave Browser|Web Companion|Avast|AVG |CCleaner|Advanced SystemCare|PC App Store|Shift Browser)'
   foreach ($p in ($progs | Where-Object { $_.DisplayName -match $bloatRx })) {
@@ -360,7 +392,7 @@ $ScanScript = {
 
   # ---------- 8. Analyse: fokusvindue + fortælling ----------
   Phase 10 'Analyserer hændelsesforløbet'
-  foreach ($ev in $T) {
+  foreach ($ev in $AllTimes) {
     foreach ($w in $suspectWindows) { if ($ev.Tid -ge $w.Start -and $ev.Tid -le $w.End) { $ev.Fokus = "⚠ efter $($w.Name)" } }
   }
   $boot = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 |
@@ -369,12 +401,12 @@ $ScanScript = {
   $top = $procs.Values | Group-Object Name | ForEach-Object { [pscustomobject]@{ Navn = $_.Name; MB = [math]::Round((($_.Group | Measure-Object WorkingSetSize -Sum).Sum) / 1MB) } } | Sort-Object MB -Descending | Select-Object -First 8
 
   $snap = [ordered]@{
-    Autostart   = @($F | Where-Object { $_.Kategori -eq 'Autostart' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
-    Opgaver     = @($F | Where-Object { $_.Kategori -eq 'Planlagt opgave' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
-    Tjenester   = @($F | Where-Object { $_.Kategori -eq 'Tjeneste' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
-    Browser     = @($F | Where-Object { $_.Kategori -eq 'Browser' -and $_.Titel -like '*-udvidelse:*' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
+    Autostart   = @($AllFinds | Where-Object { $_.Kategori -eq 'Autostart' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
+    Opgaver     = @($AllFinds | Where-Object { $_.Kategori -eq 'Planlagt opgave' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
+    Tjenester   = @($AllFinds | Where-Object { $_.Kategori -eq 'Tjeneste' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
+    Browser     = @($AllFinds | Where-Object { $_.Kategori -eq 'Browser' -and $_.Titel -like '*-udvidelse:*' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
     Programmer  = @($progs | ForEach-Object { $_.DisplayName } | Sort-Object -Unique)
-    Undtagelser = @($F | Where-Object { $_.Type -eq 'exclusion' } | ForEach-Object { $_.Sti } | Sort-Object -Unique)
+    Undtagelser = @($AllFinds | Where-Object { $_.Type -eq 'exclusion' } | ForEach-Object { $_.Sti } | Sort-Object -Unique)
   }
   $phaseSec = @{}
   for ($i = 1; $i -le $Phases.Count; $i++) {
@@ -385,9 +417,9 @@ $ScanScript = {
   Status 'Færdig.'
   return @{
     PhaseSec = $phaseSec
-    Findings = @($F | Sort-Object Niveau -Descending)
-    Timeline = @($T | Sort-Object Tid -Descending)
-    Space    = @($S)
+    Findings = @($AllFinds | Sort-Object Niveau -Descending)
+    Timeline = @($AllTimes | Sort-Object Tid -Descending)
+    Space    = @($AllSpace)
     Perf     = [pscustomobject]@{ BootSek = $(if ($boot) { [math]::Round([int]$boot / 1000) } else { $null }); RamBrugtPct = [math]::Round(100 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize * 100)); Top = $top; SidsteStart = $os.LastBootUpTime }
     Suspect  = @($suspectWindows)
     Snapshot = $snap
@@ -470,7 +502,7 @@ $FilesScript = {
   $hashed = 0; $budget = 30GB
   foreach ($g in $cand) {
     if ($hashed -gt $budget) { break }
-    $byHash = $g.Group | ForEach-Object { $hashed += $_.Length; [pscustomobject]@{ F = $_; H = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash } } | Where-Object H | Group-Object H | Where-Object Count -gt 1
+    $byHash = $g.Group | ForEach-Object { $hashed += $_.Length; [pscustomobject]@{ F = $_; H = $(try { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }) } } | Where-Object H | Group-Object H | Where-Object Count -gt 1
     foreach ($h in $byHash) {
       # behold den med "pæneste" navn (uden (1)), ellers den nyeste
       $sorted = $h.Group | Sort-Object @{ e = { $_.F.Name -match '\(\d+\)|kopi|copy' } }, @{ e = { $_.F.LastWriteTime }; Descending = $true }
@@ -1015,41 +1047,111 @@ function Fmt-GB($bytes) { if ($bytes -ge 1GB) { '{0:N1} GB' -f ($bytes / 1GB) } 
 # =====================================================================
 #  Baggrundsjob: én timer holder øje med alle job
 # =====================================================================
+# Hvert job kører som sin egen PowerShell-proces (arver administratorrettigheder).
+# Fremdrift skrives til progress.txt, resultatet til out.xml (Export-Clixml bevarer typer som datoer).
+$JobRunnerText = @'
+param([string]$Dir)
+$ErrorActionPreference = 'SilentlyContinue'
+$logFile = [IO.File]::ReadAllText((Join-Path $Dir 'log.txt')).Trim()
+function JLog($m) { try { [IO.File]::AppendAllText($logFile, ("{0:yyyy-MM-dd HH:mm:ss}  {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} }
+JLog "Job-proces kører (PID $PID)"
+if (-not ('PcTjekSyncTable' -as [type])) {
+Add-Type -TypeDefinition @"
+using System; using System.Collections; using System.IO; using System.Text; using System.Globalization;
+public class PcTjekSyncTable : Hashtable {
+  string path; DateTime last = DateTime.MinValue;
+  public PcTjekSyncTable(string p) { path = p; }
+  public override object this[object key] { get { return base[key]; } set { base[key] = value; Flush(false); } }
+  public void Flush(bool force) {
+    if (!force && (DateTime.Now - last).TotalMilliseconds < 200) return;
+    last = DateTime.Now;
+    var sb = new StringBuilder();
+    foreach (DictionaryEntry e in this) {
+      object v = e.Value;
+      if (v is string || v is double || v is int || v is long || v is bool || v is decimal)
+        sb.Append(e.Key).Append('\t').Append(Convert.ToString(v, CultureInfo.InvariantCulture).Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ')).Append('\n');
+    }
+    try { File.WriteAllText(path + ".tmp", sb.ToString(), Encoding.UTF8); File.Copy(path + ".tmp", path, true); } catch { }
+  }
+}
+"@
+}
+$sync = New-Object PcTjekSyncTable (Join-Path $Dir 'progress.txt')
+$sync['Progress'] = -1.0
+try {
+  $arg = Import-Clixml (Join-Path $Dir 'in.xml')
+  $work = [scriptblock]::Create([IO.File]::ReadAllText((Join-Path $Dir 'work.ps1')))
+  $result = & $work $sync $arg
+  Export-Clixml -InputObject $result -Path (Join-Path $Dir 'out.xml') -Depth 8
+  JLog 'Job-proces færdig'
+} catch {
+  [IO.File]::WriteAllText((Join-Path $Dir 'error.txt'), [string]$_.Exception.Message, [Text.Encoding]::UTF8)
+  JLog "Job-proces FEJL: $($_.Exception.Message)"
+}
+$sync.Flush($true)
+'@
+
 $script:Jobs = New-Object System.Collections.ArrayList
 function Invoke-Bg([scriptblock]$Work, $Arg, [scriptblock]$Done, $Ctx) {
-  $s = [hashtable]::Synchronized(@{ Status = ''; Detail = ''; Progress = -1.0; Done = $false; Result = $null; Error = $null })
-  $rs = [runspacefactory]::CreateRunspace(); $rs.ApartmentState = 'STA'; $rs.Open()
-  $ps = [powershell]::Create(); $ps.Runspace = $rs
-  $wrapper = {
-    param($sync, $workText, $arg)
-    try { $sync.Result = & ([scriptblock]::Create($workText)) $sync $arg } catch { $sync.Error = $_.Exception.Message }
-    $sync.Done = $true
+  try {
+    $dir = Join-Path $env:TEMP ('pctjek-job-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $utf8 = New-Object Text.UTF8Encoding $true
+    [IO.File]::WriteAllText((Join-Path $dir 'work.ps1'), $Work.ToString(), $utf8)
+    [IO.File]::WriteAllText((Join-Path $dir 'runner.ps1'), $JobRunnerText, $utf8)
+    [IO.File]::WriteAllText((Join-Path $dir 'log.txt'), $LogFile, $utf8)
+    if ($null -eq $Arg) { $Arg = @{} }
+    Export-Clixml -InputObject $Arg -Path (Join-Path $dir 'in.xml') -Depth 6
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -PassThru `
+         -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\runner.ps1`" -Dir `"$dir`""
+    $s = @{ Status = ''; Detail = ''; Progress = -1.0 }
+    [void]$script:Jobs.Add(@{ S = $s; P = $p; Dir = $dir; Done = $Done; Ctx = $Ctx })
+    $ui.Busy.Visibility = 'Visible'
+    Log "Job startet (proces $($p.Id))"
+  } catch {
+    Log "Invoke-Bg FEJL: $($_.Exception.Message)"
+    Msg "Kunne ikke starte baggrundsjob:`n$($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null
   }
-  [void]$ps.AddScript($wrapper).AddArgument($s).AddArgument($Work.ToString()).AddArgument($Arg)
-  $h = $ps.BeginInvoke()
-  [void]$script:Jobs.Add(@{ S = $s; PS = $ps; RS = $rs; H = $h; Done = $Done; Ctx = $Ctx })
-  $ui.Busy.Visibility = 'Visible'
+}
+function Read-JobProgress($j) {
+  $f = Join-Path $j.Dir 'progress.txt'
+  if (-not (Test-Path $f)) { return }
+  try { $lines = [IO.File]::ReadAllLines($f, [Text.Encoding]::UTF8) } catch { return }
+  foreach ($l in $lines) {
+    $kv = $l -split "`t", 2
+    if ($kv.Count -ne 2) { continue }
+    $num = 0.0
+    if ([double]::TryParse($kv[1], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$num) -and $kv[0] -ne 'Status' -and $kv[0] -ne 'Detail') { $j.S[$kv[0]] = $num }
+    else { $j.S[$kv[0]] = $kv[1] }
+  }
 }
 $jobTimer = New-Object Windows.Threading.DispatcherTimer
 $jobTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $jobTimer.Add_Tick({
   if ($script:Jobs.Count -eq 0) { return }
+  foreach ($j in @($script:Jobs)) { Read-JobProgress $j }
   $last = $script:Jobs[$script:Jobs.Count - 1]
   if ($last.S.Status) { $ui.StatusText.Text = $last.S.Status }
   if ([double]$last.S.Progress -ge 0) { $ui.Busy.IsIndeterminate = $false; $ui.Busy.Value = [double]$last.S.Progress } else { $ui.Busy.IsIndeterminate = $true }
   $sj = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.Kind -eq 'scan' } | Select-Object -First 1
-  if ($sj) { Update-ScanProgress $sj.S }
+  if ($sj) { try { Update-ScanProgress $sj.S } catch { if (-not $script:ProgErrLogged) { Log "Fremdrift-fejl: $_"; $script:ProgErrLogged = $true } } }
   foreach ($j in @($script:Jobs)) {
-    if (-not $j.S.Done) { continue }
+    if (-not $j.P.HasExited) { continue }
     [void]$script:Jobs.Remove($j)
-    try { $j.PS.EndInvoke($j.H) | Out-Null } catch {}
-    $j.PS.Dispose(); $j.RS.Close()
-    if ($j.S.Error) { Log "Job-fejl: $($j.S.Error)" }
-    try { & $j.Done $j.S.Result $j.S.Error $j.Ctx } catch { Log "Done-fejl: $_"; Msg "Fejl: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+    $res = $null; $err = $null
+    $out = Join-Path $j.Dir 'out.xml'; $ef = Join-Path $j.Dir 'error.txt'
+    if (Test-Path $ef) { $err = [IO.File]::ReadAllText($ef) }
+    elseif (Test-Path $out) { try { $res = Import-Clixml $out } catch { $err = "Kunne ikke læse resultatet: $($_.Exception.Message)" } }
+    else { $err = "Jobbet stoppede uventet (kode $($j.P.ExitCode))." }
+    if ($err) { Log "Job-fejl: $err" }
+    Remove-Item -Recurse -Force $j.Dir -ErrorAction SilentlyContinue
+    try { & $j.Done $res $err $j.Ctx } catch { Log "Done-fejl: $_"; Msg "Fejl: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
   }
   if ($script:Jobs.Count -eq 0) { $ui.Busy.Visibility = 'Hidden' }
 })
 $jobTimer.Start()
+# Luk evt. kørende job-processer, når appen lukkes
+$win.Add_Closed({ foreach ($j in @($script:Jobs)) { try { if (-not $j.P.HasExited) { $j.P.Kill() } } catch {} } })
 
 # Gendannelsespunkt før ændringer (én gang pr. session)
 $script:RestoreDone = $false
@@ -1260,7 +1362,8 @@ $ui.BtnScan.Add_Click({
   if (Test-Path $TimesFile) { try { $script:PrevTimes = Get-Content $TimesFile -Raw | ConvertFrom-Json } catch {} }
   $ui.ScanCard.Visibility = 'Visible'; $ui.StoryCard.Visibility = 'Hidden'
   $ui.ScoreLabel.Text = 'scanner...'
-  Invoke-Bg $ScanScript $null {
+  Log 'Scan startet'
+  Invoke-Bg $ScanScript @{ LogFile = $LogFile } {
     param($res, $err, $c)
     $ui.ScanCard.Visibility = 'Collapsed'; $ui.StoryCard.Visibility = 'Visible'
     $ui.BtnScan.IsEnabled = $true; $ui.BtnScan.Content = "🔍   Scan igen"
@@ -1322,7 +1425,7 @@ $ui.BtnOpen.Add_Click({
 })
 $ui.BtnVT.Add_Click({
   $s = $ui.GridFind.SelectedItem; $h = $s.SHA256
-  if (-not $h) { $h = (Get-FileHash -LiteralPath (ExeOf $s.Sti) -Algorithm SHA256).Hash }
+  if (-not $h) { try { $h = (Get-FileHash -LiteralPath (ExeOf $s.Sti) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { Msg "Filen kan ikke åbnes. Windows blokerer den sandsynligvis, fordi den er inficeret." | Out-Null; return } }
   if ($h) { Start-Process "https://www.virustotal.com/gui/file/$h" }   # kun fingeraftrykket sendes, ikke filen
 })
 
@@ -1420,7 +1523,7 @@ function Get-StartTip($name, $cmd, $sig) {
 }
 function Sig-Short($path) {
   if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return '(fil ikke fundet)' }
-  $s = Get-AuthenticodeSignature -LiteralPath $path
+  try { $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop } catch { return 'BLOKERET AF DEFENDER?' }
   if ($s.Status -eq 'Valid') { return ($s.SignerCertificate.Subject -replace '^CN="?([^,"]+).*', '$1') }
   return 'USIGNERET'
 }
