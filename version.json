@@ -1,0 +1,23 @@
+{
+  "version": "2.1",
+  "date": "2026-11-23",
+  "notes": [
+    "Fremdrift med procent og tidsestimat under scanning",
+    "Automatisk opdatering via GitHub",
+    "Scanningen lærer, hvor lang tid den tager på din pc"
+  ],
+  "files": [
+    {
+      "name": "PC-Tjek-App.ps1",
+      "sha256": "54FB3B464B17FDB955F4DC882ACE190CF8D201E55510B0D18583285AC8DC735E"
+    },
+    {
+      "name": "PC-Tjek.ico",
+      "sha256": "73475A722621CFB8D365F245EBEA782F44257861749043A55062E38C41495B50"
+    },
+    {
+      "name": "Uninstall-PCTjek.ps1",
+      "sha256": "DAB434826C46EA4297CCB3D646CE99409B0B2DB470552C6A14BC2AD3A4FDE180"
+    }
+  ]
+}
