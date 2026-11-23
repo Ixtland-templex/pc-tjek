@@ -20,13 +20,20 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.7'
+$AppVersion = '2.8'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
 $UndoFile = Join-Path $OutDir 'fortryd-log.json'
 $LogFile  = Join-Path $OutDir 'pc-tjek.log'
 $TimesFile = Join-Path $OutDir 'scan-tider.json'
+# Baggrundsjob kører som administrator, så deres filer må IKKE ligge et sted, almindelige programmer kan ændre (fx Temp).
+# C:\ProgramData\PC-Tjek låses til kun Administratorer og SYSTEM.
+$JobBase = Join-Path $env:ProgramData 'PC-Tjek'
+$JobRoot = Join-Path $JobBase 'jobs'
+New-Item -ItemType Directory -Force $JobRoot | Out-Null
+try { & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /T /C /Q | Out-Null } catch {}
+Get-ChildItem $JobRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 $ConfigFile = Join-Path $PSScriptRoot 'pc-tjek.config.json'
 $UpdateUrl = $null
 if (Test-Path $ConfigFile) { try { $UpdateUrl = ([string](Get-Content $ConfigFile -Raw | ConvertFrom-Json).UpdateUrl).TrimEnd('/') } catch {} }
@@ -168,14 +175,15 @@ $ScanScript = {
     if ($e.Id -eq 1033) {
       $hidden = -not ($progNames -contains $name)
       $noMaker = [string]::IsNullOrWhiteSpace($maker)
-      $kidsGame = $name -match '(?i)paw|patrol|crack|keygen|free.?download|setup|installer|update'
+      $kidsGame = $name -match '(?i)paw.?patrol|crack|keygen|free.?download|repack|torrent'
       if ($hidden -or $noMaker -or $kidsGame) {
         $why = @()
         if ($hidden)   { $why += 'produktet står ikke længere på listen over installerede programmer (skjult eller fjernet)' }
         if ($noMaker)  { $why += 'den har ingen producent' }
         if ($kidsGame) { $why += 'navnet ligner en typisk falsk installer' }
-        Add-Find 3 'Installation' "MSI-installation: $name" "$($e.TimeCreated) · producent: $(if ($maker) { $maker } else { '(ingen)' })" `
-          ('Mistænkelig installation, fordi ' + ($why -join ', ') + '. Se Hændelsesforløb for, hvad der skete lige efter.') '' 'msi' $null
+        $mrisk = if ($kidsGame -or ($hidden -and $noMaker)) { 3 } else { 2 }
+        Add-Find $mrisk 'Installation' "MSI-installation: $name" "$($e.TimeCreated) · producent: $(if ($maker) { $maker } else { '(ingen)' })" `
+          ('Bør gennemgås, fordi ' + ($why -join ', ') + '. Under Hændelsesforløb kan du se, hvad der ellers skete omkring samme tid.') '' 'msi' $null
         [void]$suspectWindows.Add([pscustomobject]@{ Start = $e.TimeCreated.AddMinutes(-30); End = $e.TimeCreated.AddHours(6); Name = $name })
       }
     }
@@ -218,6 +226,11 @@ $ScanScript = {
     foreach ($a in $t.Actions) {
       if (-not $a.Execute) { continue }
       $exe = ExePath $a.Execute; $sg = Sig $exe; $full = "$($a.Execute) $($a.Arguments)".Trim()
+      # PC-Tjeks egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*") {
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter PC-Tjek, når du klikker på ikonet' 'Oprettet af PC-Tjeks installer.' $full 'self' $null
+        continue
+      }
       $risk = 0; $why = 'Planlagt opgave fra en signeret udgiver.'
       if ($sg -notlike 'Signeret*') { $risk = 2; $why = 'Planlagt opgave, der kører et usigneret program.' }
       if ($exe -match $UserWritable -and $sg -notlike 'Signeret*') { $risk = 3; $why = 'Usigneret program i en brugermappe, kørt af en planlagt opgave. Det er et typisk mønster for malware.' }
@@ -272,7 +285,7 @@ $ScanScript = {
     }
   }
   foreach ($pp in $procs.Values) {
-    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID) {
+    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|jobs\\)') {
       Add-Find 4 'Proces' "Mistænkelig kommando kører: $($pp.Name)" $pp.CommandLine 'Et skjult/kodet script kører lige nu.' $pp.ExecutablePath 'file' $null
     }
   }
@@ -454,7 +467,7 @@ $CleanMeasureScript = {
 $CleanRunScript = {
   param($sync, $arg)
   $ErrorActionPreference = 'SilentlyContinue'
-  $freed = @{}
+  $freed = @{}; $skipped = 0
   foreach ($c in $arg.Cats) {
     $sync.Status = "Rydder op: $($c.Navn)..."
     $cut = (Get-Date).AddHours(-[double]$c.MinAgeHours)
@@ -471,7 +484,7 @@ $CleanRunScript = {
           foreach ($f in $files) {
             if ($f.LastWriteTime -ge $cut) { continue }
             $len = $f.Length
-            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $n += $len } catch {}   # filer i brug springes over
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $n += $len } catch { $skipped++ }   # filer i brug springes over
           }
           if ($root.PSIsContainer) {   # tomme undermapper
             Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -Directory | Sort-Object { $_.FullName.Length } -Descending |
@@ -482,6 +495,7 @@ $CleanRunScript = {
     }
     $freed[$c.Id] = [double]$n
   }
+  $freed['_skipped'] = [double]$skipped
   return $freed
 }
 
@@ -546,7 +560,10 @@ $WingetListScript = {
   $lines = @(& winget upgrade --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { ([string]$_ -split "`r")[-1] })
   $sep = -1
   for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^-{10,}') { $sep = $i; break } }
-  if ($sep -lt 1) { return @() }
+  if ($sep -lt 1) {
+    if (($lines -join ' ') -match '(?i)no installed package|no applicable|ingen installerede|ingen tilgængelige|no available upgrade') { return @() }
+    throw 'Kunne ikke læse svaret fra winget. Prøv igen senere.'
+  }
   $starts = @(); $m = [regex]::Matches($lines[$sep - 1], '\S+')
   foreach ($x in $m) { $starts += $x.Index }
   if ($starts.Count -lt 4) { return @() }
@@ -605,7 +622,7 @@ $UpdateCheckScript = {
 $UpdateApplyScript = {
   param($sync, $arg)
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  $tmp = Join-Path $env:TEMP ("pctjek-update-" + [guid]::NewGuid().ToString('N'))
+  $tmp = Join-Path $arg.JobRoot ("update-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force $tmp | Out-Null
   $allowed = '^[\w\-. ]+\.(ps1|ico|cmd|md|txt)$'
   $i = 0
@@ -853,7 +870,7 @@ $UpdateApplyScript = {
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <DockPanel Margin="0,0,0,12">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-              <Button Name="BtnFixAll" Content="✨  Ret det hele for mig" Style="{StaticResource Primary}" Visibility="Collapsed" Padding="18,10" FontSize="14"/>
+              <Button Name="BtnFixAll" Content="🧹  Ryd anbefalede filer" Style="{StaticResource Primary}" Visibility="Collapsed" Padding="18,10" FontSize="14"/>
               <Button Name="BtnDetails" Content="Vis detaljer" Visibility="Collapsed" Margin="0"/>
             </StackPanel>
             <StackPanel>
@@ -1156,7 +1173,7 @@ $sync.Flush($true)
 $script:Jobs = New-Object System.Collections.ArrayList
 function Invoke-Bg([scriptblock]$Work, $Arg, [scriptblock]$Done, $Ctx) {
   try {
-    $dir = Join-Path $env:TEMP ('pctjek-job-' + [guid]::NewGuid().ToString('N'))
+    $dir = Join-Path $JobRoot ('job-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force $dir | Out-Null
     $utf8 = New-Object Text.UTF8Encoding $true
     [IO.File]::WriteAllText((Join-Path $dir 'work.ps1'), $Work.ToString(), $utf8)
@@ -1356,7 +1373,7 @@ function Build-Story($r) {
   } else { L '   Ingen trusler i Defenders historik.' }
   L ''
 
-  L '━━  2 · HVAD EN MISTÆNKELIG INSTALLER GJORDE (rekonstrueret)'
+  L '━━  2 · HÆNDELSER OMKRING EN INSTALLATION, DER BØR GENNEMGÅS'
   if ($r.Suspect.Count) {
     foreach ($w in $r.Suspect) {
       $evs = @($r.Timeline | Where-Object { $_.Tid -ge $w.Start -and $_.Tid -le $w.End } | Sort-Object Tid)
@@ -1364,8 +1381,8 @@ function Build-Story($r) {
       if ($evs.Count) {
         L ('   De næste timer: ' + (($evs | Group-Object Type | ForEach-Object { "$($_.Count) × $($_.Name.ToLower())" }) -join ', '))
         foreach ($e in ($evs | Where-Object { $_.Type -in 'Tjeneste', 'Opgave', 'Fil', 'Browser', 'Defender' } | Select-Object -First 12)) { L "     $($e.Tid.ToString('HH:mm'))  $($e.Hændelse)" }
-        if (@($evs | Where-Object { $_.Type -in 'Tjeneste', 'Opgave' }).Count) { L '   → ADVARSEL: Der blev oprettet tjenester/opgaver i samme tidsrum. Det er sådan en backdoor sikrer, at den starter igen. Tjek dem under Fund.' }
-        else { L '   → Ingen nye tjenester eller planlagte opgaver i tidsrummet. Det er et godt tegn.' }
+        if (@($evs | Where-Object { $_.Type -in 'Tjeneste', 'Opgave' }).Count) { L '   → Der blev oprettet tjenester/opgaver i samme tidsrum. Det beviser ikke en sammenhæng, men gennemgå dem under Fund.' }
+        else { L '   → Ingen nye tjenester eller planlagte opgaver i samme tidsrum.' }
       } else { L '   Ingen andre spor i tidsrummet.' }
       L ''
     }
@@ -1403,8 +1420,7 @@ function Show-Result {
   $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
   $ui.CntCrit.Text = $c4; $ui.CntHigh.Text = $c3; $ui.CntMed.Text = $c2; $ui.CntLow.Text = $cb
   $ui.CntNew.Text = $script:NewSince.Count
-  $free = ($r.Space | Where-Object { $_.Hvad -notmatch 'Overførsler' } | Measure-Object GB -Sum).Sum
-  $ui.CntSpace.Text = '{0:N1}' -f $free
+  $ui.CntSpace.Text = '…'   # udfyldes af Measure-PlanClean med samme beregning som oprydningen
   $score = [math]::Max(0, 100 - 35 * $c4 - 10 * $c3 - 2 * $c2 - [math]::Min(10, $cb))
   $color = if ($score -ge 80) { '#4ADE80' } elseif ($score -ge 50) { '#F6D44A' } elseif ($score -ge 25) { '#FFA24A' } else { '#FF5D6C' }
   $ui.ScoreLabel.Text = if ($score -ge 80) { 'god stand' } elseif ($score -ge 50) { 'kan forbedres' } elseif ($score -ge 25) { 'bør tjekkes' } else { 'kritisk' }
@@ -1558,15 +1574,16 @@ $StartTips = [ordered]@{
   '(?i)security|defender|securityhealth'      = 'BEHOLD: Windows Sikkerhed'
   '(?i)realtek|audio|nvidia|amd|intel|touchpad|synaptics|bærbare|portable' = 'Behold: driver/hardware'
   '(?i)tailscale|synology|launcher'           = 'Behold, hvis du bruger synkronisering/fjernadgang'
-  '(?i)nzxt'                                  = 'Kan slås fra: tung (CPU/RAM). Start den selv ved behov'
+  '(?i)nzxt'                                  = 'Valgfri: tung (CPU/RAM), men styrer måske blæsere/køling'
   '(?i)poweriso'                              = 'Kan slås fra: Windows kan selv montere ISO-filer'
   '(?i)spotify'                               = 'Kan slås fra: åbn den, når du vil høre musik'
   '(?i)discord'                               = 'Kan slås fra: åbn den, når du skal bruge den'
   '(?i)chatgpt|claude|copilot'                = 'Kan slås fra: åbn den, når du skal bruge den'
   '(?i)steam|battle\.net|epic|xbox'           = 'Kan slås fra: spil-launchere behøver ikke at starte med Windows'
-  '(?i)teams|skype|onedrive'                  = 'Kan slås fra, hvis du ikke bruger den dagligt'
-  '(?i)gigabyte|gcc|rgb|corsair|icue|armoury' = 'Kan slås fra, hvis du ikke styrer RGB/blæsere fra Windows'
-  '(?i)cisco|anyconnect'                      = 'Kan slås fra, medmindre du bruger VPN hver dag'
+  '(?i)onedrive'                              = 'Valgfri: behold, hvis du synkroniserer filer med OneDrive'
+  '(?i)teams|skype'                           = 'Valgfri: slå fra, hvis du ikke bruger den dagligt'
+  '(?i)gigabyte|gcc|rgb|corsair|icue|armoury' = 'Valgfri: behold, hvis den styrer blæsere eller RGB'
+  '(?i)cisco|anyconnect'                      = 'Valgfri: behold, hvis du bruger VPN (fx skolens)'
   '(?i)adobe|acrobat|updater|update'          = 'Kan slås fra: opdaterer også, når programmet åbnes'
 }
 function Get-StartTip($name, $cmd, $sig) {
@@ -1679,8 +1696,8 @@ $L = $env:LOCALAPPDATA
 $CleanCats = @(
   @{ Id = 'utemp';  Navn = 'Midlertidige filer (din bruger)'; Paths = @($env:TEMP); MinAgeHours = 24; Note = 'Rester fra programmer og installere'; Default = $true },
   @{ Id = 'wtemp';  Navn = 'Midlertidige filer (Windows)'; Paths = @('C:\Windows\Temp'); MinAgeHours = 24; Note = 'Systemets midlertidige filer'; Default = $true },
-  @{ Id = 'wu';     Navn = 'Windows Update-downloads'; Paths = @('C:\Windows\SoftwareDistribution\Download'); MinAgeHours = 72; Note = 'Allerede installerede opdateringer'; Default = $true },
-  @{ Id = 'do';     Navn = 'Leveringsoptimering (cache)'; Paths = @('C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache'); MinAgeHours = 0; Note = 'Opdateringsfiler delt med andre pc''er'; Special = 'do'; Default = $true },
+  @{ Id = 'wu';     Navn = 'Windows Update-downloads'; Paths = @('C:\Windows\SoftwareDistribution\Download'); MinAgeHours = 72; Note = 'Allerede installerede opdateringer. Windows rydder normalt selv op'; Default = $false },
+  @{ Id = 'do';     Navn = 'Leveringsoptimering (cache)'; Paths = @('C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache'); MinAgeHours = 0; Note = 'Opdateringsfiler delt med andre pc''er. Windows rydder normalt selv op'; Special = 'do'; Default = $false },
   @{ Id = 'dumps';  Navn = 'Crash dumps og fejlrapporter'; Paths = @("$L\CrashDumps", 'C:\Windows\Minidump', 'C:\Windows\MEMORY.DMP', 'C:\ProgramData\Microsoft\Windows\WER\ReportArchive', 'C:\ProgramData\Microsoft\Windows\WER\ReportQueue'); MinAgeHours = 24; Note = 'Bruges kun til fejlsøgning af gamle nedbrud'; Default = $true },
   @{ Id = 'shader'; Navn = 'Shader-cache (DirectX/NVIDIA)'; Paths = @("$L\D3DSCache", "$L\NVIDIA\DXCache", "$L\NVIDIA\GLCache", "$L\AMD\DxCache"); MinAgeHours = 24; Note = 'Genopbygges automatisk. Spil kan hakke lidt første gang efter'; Default = $false },
   @{ Id = 'thumbs'; Navn = 'Miniaturebilleder (thumbnail-cache)'; Paths = @("$L\Microsoft\Windows\Explorer\thumbcache_*.db"); MinAgeHours = 0; Note = 'Genopbygges, når du åbner mapper'; Default = $false },
@@ -1917,10 +1934,9 @@ function Build-Plan($r) {
   if ($start.Count) {
     [void]$steps.Add((New-Step 'startup' 'Gør opstarten hurtigere' "$($start.Count) programmer starter med Windows uden grund ($((($start | Select-Object -First 4).Navn) -join ', ')$(if ($start.Count -gt 4) { ' ...' })). De kan stadig åbnes, når du vil." "Slå $($start.Count) fra" $null))
   }
-  $gb = ($r.Space | Where-Object { $_.Hvad -match 'Midlertidige|Windows Update|Crash' } | Measure-Object GB -Sum).Sum
-  if ($gb -ge 0.3) {
-    [void]$steps.Add((New-Step 'clean' 'Ryd op i skrammel' ("Ca. {0:N1} GB midlertidige filer og cache, som Windows ikke har brug for." -f $gb) 'Ryd op' $null))
-  }
+  $cs = New-Step 'clean' 'Ryd op i midlertidige filer' 'Måler, hvor meget der kan ryddes...' 'Ryd op' $null
+  $cs.Valgt = $false
+  [void]$steps.Add($cs)
   [void]$steps.Add((New-Step 'update' 'Opdatér dine programmer' 'Gamle programmer er en af de mest almindelige måder, virus kommer ind på. Opdateringen kører i baggrunden.' 'Opdatér alt' $null))
   $ext = @($f | Where-Object { $_.Kategori -eq 'Browser' -and $_.Niveau -ge 2 })
   if ($ext.Count) {
@@ -1937,9 +1953,28 @@ function Build-Plan($r) {
   $n = 0; foreach ($s in $steps) { $n++; $s.Gruppe = "$n" }
   $script:PlanRows = @($steps)
   $ui.PlanList.ItemsSource = $script:PlanRows
-  $ui.BtnFixAll.Visibility = $(if (@($script:PlanRows | Where-Object { $_.Id -in 'persist', 'startup', 'clean', 'update' }).Count) { 'Visible' } else { 'Collapsed' })
+  $ui.BtnFixAll.Visibility = 'Collapsed'   # vises, når oprydningen er målt
   $ui.BtnDetails.Visibility = 'Visible'
   Update-PlanHeader
+  Measure-PlanClean
+}
+# Samme kategorier og filtre bruges til målingen og selve oprydningen, så tallene passer sammen
+function Measure-PlanClean {
+  $ui.CntSpace.Text = '…'
+  Invoke-Bg $CleanMeasureScript @{ Cats = @($CleanCats | Where-Object { $_.Default }) } {
+    param($res, $err, $c)
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [hashtable] })[-1] }
+    $tot = 0.0; if ($res) { foreach ($k in $res.Keys) { $tot += [double]$res[$k] } }
+    foreach ($row in $script:CleanRows) { if ($res -and $res.ContainsKey($row.Id)) { $row.Tal = [double]$res[$row.Id]; $row.Info = Fmt-GB $row.Tal } }
+    $script:CleanMeasured = $true; $ui.BtnCleanRun.IsEnabled = $true
+    $ui.CntSpace.Text = '{0:N1}' -f ($tot / 1GB)
+    $st = Get-Step 'clean'; if (-not $st) { return }
+    if ($err) { $st.Info = 'Kunne ikke måle. Du kan stadig prøve at rydde op.'; $st.Valgt = $true; return }
+    if ($tot -lt 50MB) { Set-StepState 'clean' 'done' 'Intet at rydde'; $st.Info = 'Der er næsten ingen midlertidige filer.'; return }
+    $st.Info = "Ca. $(Fmt-GB $tot) midlertidige filer og cache, som Windows ikke har brug for. Filer i brug springes over."
+    $st.Valgt = $true
+    $ui.BtnFixAll.Visibility = 'Visible'
+  } $null
 }
 
 # ---------- Handlinger for hvert trin ----------
@@ -1984,10 +2019,13 @@ function Run-Step($id, [bool]$auto) {
     }
     'startup' {
       $t = @(@(Get-StartupItems) | Where-Object { $_.Aktiv -and $_.Tip -like 'Kan slås fra*' })
-      foreach ($x in $t) { try { Set-StartupState $x $false } catch {} }
+      $names = ($t | ForEach-Object { "  • $($_.Navn)" }) -join "`n"
+      if ((Msg "Disse programmer starter ikke længere automatisk:`n`n$names`n`nDu kan stadig åbne dem selv, og du kan slå dem til igen under Opstart." 'Gør opstarten hurtigere' 'YesNo' 'Question') -ne 'Yes') { return }
+      $ok = 0; $fail = @()
+      foreach ($x in $t) { try { Set-StartupState $x $false; $ok++ } catch { $fail += $x.Navn } }
       Load-Startup
-      Set-StepState 'startup' 'done' "$($t.Count) slået fra"; Log "Plan: opstart $($t.Count)"
-      Next-Auto
+      if ($fail.Count) { Set-StepState 'startup' 'fail' "$ok af $($t.Count) slået fra · ikke: $($fail -join ', ')" } else { Set-StepState 'startup' 'done' "$ok slået fra" }
+      Log "Plan: opstart $ok/$($t.Count)"
     }
     'clean' {
       Set-StepState 'clean' 'busy' 'Rydder op...'
@@ -1995,8 +2033,10 @@ function Run-Step($id, [bool]$auto) {
       Invoke-Bg $CleanRunScript @{ Cats = $cats } {
         param($res, $err, $c)
         if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [hashtable] })[-1] }
-        $tot = 0; if ($res) { foreach ($v in $res.Values) { $tot += [double]$v } }
-        if ($err) { Set-StepState 'clean' 'fail' 'Fejl' } else { Set-StepState 'clean' 'done' "$(Fmt-GB $tot) frigjort" }
+        $tot = 0; $sk = 0
+        if ($res) { foreach ($k in $res.Keys) { if ($k -eq '_skipped') { $sk = [int]$res[$k] } else { $tot += [double]$res[$k] } } }
+        if ($err) { Set-StepState 'clean' 'fail' 'Fejl. Prøv igen' }
+        else { Set-StepState 'clean' 'done' ("$(Fmt-GB $tot) ryddet" + $(if ($sk) { " · $sk filer i brug sprunget over" } else { '' })) }
         Next-Auto
       } $null
     }
@@ -2004,16 +2044,21 @@ function Run-Step($id, [bool]$auto) {
       Set-StepState 'update' 'busy' 'Finder opdateringer...'
       Invoke-Bg $WingetListScript $null {
         param($res, $err, $c)
-        if ($err) { Set-StepState 'update' 'fail' 'winget mangler'; Next-Auto; return }
-        $ids = @($res | ForEach-Object { $_.Id } | Where-Object { $_ })
-        if (-not $ids.Count) { Set-StepState 'update' 'done' 'Alt var opdateret'; Next-Auto; return }
+        if ($err) { Set-StepState 'update' 'fail' 'Kunne ikke søge efter opdateringer'; Log "winget: $err"; return }
+        $list = @($res | Where-Object { $_.Id })
+        if (-not $list.Count) { Set-StepState 'update' 'done' 'Alt er opdateret'; return }
+        $names = ($list | ForEach-Object { "  • $($_.Navn)  ($($_.Version) → $($_.Ny))" }) -join "`n"
+        if ((Msg "Disse programmer opdateres:`n`n$names`n`nLuk dem gerne først. Det kører i baggrunden." 'Opdatér programmer' 'YesNo' 'Question') -ne 'Yes') { $st2 = Get-Step 'update'; $st2.Status = ''; $st2.Valgt = $true; return }
+        $ids = @($list | ForEach-Object { $_.Id })
         Set-StepState 'update' 'busy' "Opdaterer $($ids.Count) programmer..."
         Invoke-Bg $WingetUpgradeScript @{ Ids = $ids } {
           param($res2, $err2, $c2)
           if ($res2 -is [array]) { $res2 = @($res2 | Where-Object { $_ -is [hashtable] })[-1] }
-          $okc = if ($res2) { @($res2.Values | Where-Object { $_ -eq 'OK' }).Count } else { 0 }
-          Set-StepState 'update' 'done' "$okc af $($c2.N) opdateret"
-          Next-Auto
+          $failed = @(); $okc = 0
+          if ($res2) { foreach ($k in $res2.Keys) { if ($res2[$k] -eq 'OK') { $okc++ } else { $failed += $k } } }
+          if ($err2 -or -not $res2) { Set-StepState 'update' 'fail' 'Opdateringen fejlede. Prøv igen' }
+          elseif ($failed.Count) { Set-StepState 'update' 'fail' "$okc af $($c2.N) opdateret · prøv igen for $((($failed | ForEach-Object { ($_ -split '\.')[-1] }) -join ', '))" }
+          else { Set-StepState 'update' 'done' "$okc af $($c2.N) opdateret" }
         } @{ N = $ids.Count }
       } $null
     }
@@ -2046,14 +2091,12 @@ $ui.PlanList.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [W
   $b = $e.OriginalSource
   if ($b -is [Windows.Controls.Button] -and $b.Tag) { Run-Step ([string]$b.Tag) $false }
 })
+# Hovedknappen gør kun én forudsigelig ting: rydder de anbefalede midlertidige filer
 $ui.BtnFixAll.Add_Click({
-  $ids = @($script:PlanRows | Where-Object { $_.Id -in 'persist', 'startup', 'clean', 'update' -and $_.Gruppe -ne '✓' } | ForEach-Object { $_.Id })
-  if (-not $ids.Count) { return }
-  $txt = ($script:PlanRows | Where-Object { $_.Id -in $ids } | ForEach-Object { "  • $($_.Navn)" }) -join "`n"
-  if ((Msg "Appen klarer nu de sikre ting for dig:`n`n$txt`n`nIntet slettes, som du har brug for, og det, der slås fra, kan slås til igen.`nDet tager typisk 2-10 minutter. Du kan bruge pc'en imens." 'Ret det hele for mig' 'YesNo' 'Question') -ne 'Yes') { return }
-  $script:AutoQueue.Clear(); foreach ($i in $ids) { [void]$script:AutoQueue.Add($i) }
+  $st = Get-Step 'clean'
+  if (-not $st -or $st.Gruppe -eq '✓' -or -not $st.Valgt) { return }
   $ui.BtnFixAll.Visibility = 'Collapsed'
-  Next-Auto
+  Run-Step 'clean' $true
 })
 $ui.BtnDetails.Add_Click({
   $script:ShowDetails = -not $script:ShowDetails
@@ -2125,7 +2168,7 @@ $ui.BtnUpdateApp.Add_Click({
   $notes = (@($v.notes) | ForEach-Object { "  • $_" }) -join "`n"
   if ((Msg "Opdatér PC-Tjek fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
   $ui.BtnUpdateApp.IsEnabled = $false
-  Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion } {
+  Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion; JobRoot = $JobRoot } {
     param($r, $err, $c)
     if ($err) { $ui.BtnUpdateApp.IsEnabled = $true; Log "Opdatering fejlede: $err"; Msg "Opdateringen blev ikke installeret:`n`n$err" 'Opdatering' 'OK' 'Error' | Out-Null; return }
     Log "Opdateret til $($c.Version)"

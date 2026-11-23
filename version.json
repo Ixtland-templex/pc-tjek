@@ -1,15 +1,16 @@
 {
-  "version": "2.7",
+  "version": "2.8",
   "date": "2026-11-23",
   "notes": [
-    "Ny \"Din plan\": få, simple trin med én knap hver",
-    "\"Ret det hele for mig\" klarer de sikre ting automatisk",
-    "App-opdatering virker, også mens appen kører"
+    "PC-Tjek markerer ikke længere sin egen genvej som mistænkelig",
+    "Hovedknappen rydder kun midlertidige filer, og du ser præcis, hvor meget der ryddes",
+    "Ærlige statusbeskeder (\"2 af 3 opdateret\")",
+    "Baggrundsjob kører fra en beskyttet mappe"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "3A14B1590D3D3DA60D8B28DE696E6A31C828C1061E24934AFBF909BDFE318C02"
+      "sha256": "EA3A6A094799F7FA35D1361730FE558CD699B296B9D7F70728BE3DD18EEF424D"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
