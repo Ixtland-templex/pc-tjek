@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.5'
+$AppVersion = '2.6'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -587,8 +587,20 @@ $UpdateCheckScript = {
   param($sync, $arg)
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   $sync.Status = 'Søger efter app-opdatering...'
-  $v = Invoke-RestMethod -Uri ("{0}/version.json?t={1}" -f $arg.Url, [DateTime]::UtcNow.Ticks) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'Cache-Control' = 'no-cache' }
-  return $v
+  # Find den nyeste udgave (commit) via GitHubs API, og hent filerne fra netop den. Så rammer vi aldrig en forældet kopi.
+  $m = [regex]::Match($arg.Url, '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)$')
+  if ($m.Success) {
+    try {
+      $c = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/{1}/commits/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'User-Agent' = 'PC-Tjek'; 'Accept' = 'application/vnd.github+json' }
+      if ($c.sha -match '^[0-9a-f]{40}$') {
+        $base = "https://raw.githubusercontent.com/{0}/{1}/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $c.sha
+        $v = Invoke-RestMethod -Uri "$base/version.json" -UseBasicParsing -TimeoutSec 15
+        $v | Add-Member -NotePropertyName BaseUrl -NotePropertyValue $base -Force
+        return $v
+      }
+    } catch { }
+  }
+  return (Invoke-RestMethod -Uri ("{0}/version.json?t={1}" -f $arg.Url, [DateTime]::UtcNow.Ticks) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'Cache-Control' = 'no-cache' })
 }
 $UpdateApplyScript = {
   param($sync, $arg)
@@ -597,6 +609,14 @@ $UpdateApplyScript = {
   New-Item -ItemType Directory -Force $tmp | Out-Null
   $allowed = '^[\w\-. ]+\.(ps1|ico|cmd|md|txt)$'
   $i = 0
+  $todo = @()
+  foreach ($f in $arg.Files) {
+    if ($f.name -notmatch $allowed -or $f.name -match '\.\.') { throw "Ugyldigt filnavn i opdateringen: $($f.name)" }
+    $cur = Join-Path $arg.Dest $f.name
+    if ((Test-Path $cur) -and (Get-FileHash -LiteralPath $cur -Algorithm SHA256).Hash -eq ([string]$f.sha256).ToUpper()) { continue }   # uændret: spring over
+    $todo += $f
+  }
+  $arg.Files = $todo
   foreach ($f in $arg.Files) {
     $i++
     if ($f.name -notmatch $allowed -or $f.name -match '\.\.') { throw "Ugyldigt filnavn i opdateringen: $($f.name)" }
@@ -612,7 +632,11 @@ $UpdateApplyScript = {
   foreach ($f in $arg.Files) {
     $target = Join-Path $arg.Dest $f.name
     if (Test-Path $target) { Copy-Item -Force $target $backup }
-    Copy-Item -Force (Join-Path $tmp $f.name) $target
+    $ok = $false
+    for ($try = 0; $try -lt 5 -and -not $ok; $try++) {
+      try { Copy-Item -Force (Join-Path $tmp $f.name) $target -ErrorAction Stop; $ok = $true } catch { Start-Sleep -Milliseconds 600 }
+    }
+    if (-not $ok) { throw "Kunne ikke erstatte $($f.name) (filen er i brug). Luk appen, og kør installeren i stedet." }
     Unblock-File $target -ErrorAction SilentlyContinue
   }
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -1032,7 +1056,7 @@ $ui = @{}
 foreach ($node in $xaml.SelectNodes('//*[@Name]')) { $ui[$node.Name] = $win.FindName($node.Name) }
 $ui.VerText.Text = "v$AppVersion"
 $icoPath = Join-Path $PSScriptRoot 'PC-Tjek.ico'
-if (Test-Path $icoPath) { try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create([Uri]$icoPath) } catch {} }
+if (Test-Path $icoPath) { try { $ms = New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($icoPath)); $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create($ms, 'None', 'OnLoad') } catch {} }   # indlæst i hukommelsen, så filen ikke låses
 $win.Add_SourceInitialized({ try { [PcTjek.Win]::Dark((New-Object System.Windows.Interop.WindowInteropHelper $win).Handle) } catch {} })
 $win.Dispatcher.Add_UnhandledException({
   param($s, $e)
@@ -1877,7 +1901,7 @@ $ui.BtnUpdateApp.Add_Click({
   $notes = (@($v.notes) | ForEach-Object { "  • $_" }) -join "`n"
   if ((Msg "Opdatér PC-Tjek fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
   $ui.BtnUpdateApp.IsEnabled = $false
-  Invoke-Bg $UpdateApplyScript @{ Url = $UpdateUrl; Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion } {
+  Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion } {
     param($r, $err, $c)
     if ($err) { $ui.BtnUpdateApp.IsEnabled = $true; Log "Opdatering fejlede: $err"; Msg "Opdateringen blev ikke installeret:`n`n$err" 'Opdatering' 'OK' 'Error' | Out-Null; return }
     Log "Opdateret til $($c.Version)"

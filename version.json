@@ -1,19 +1,15 @@
 {
-  "version": "2.5",
+  "version": "2.6",
   "date": "2026-11-23",
   "notes": [
-    "Filer, som Defender blokerer, vises nu som kritiske fund",
-    "En enkelt fejl kan ikke længere stoppe hele scanningen",
-    "Scanningen kører stabilt i baggrunden"
+    "App-opdatering virker nu, også mens appen kører",
+    "Opdateringer ses med det samme (ingen 5 minutters ventetid)",
+    "Filer, som Defender blokerer, vises som kritiske fund"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "7B0ABB961078079266C3E69C90AC835216092024B487AC25E53D9F67FD93E62D"
-    },
-    {
-      "name": "PC-Tjek.ico",
-      "sha256": "73475A722621CFB8D365F245EBEA782F44257861749043A55062E38C41495B50"
+      "sha256": "C4B61A6DCCE6DCD6BBFD45FA908957404522058289687EFC74B031053952307D"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
