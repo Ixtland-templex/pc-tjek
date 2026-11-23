@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.13'
+$AppVersion = '2.14'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -285,6 +285,10 @@ $ScanScript = {
       if (-not $a.Execute) { continue }
       $exe = ExePath $a.Execute; $sg = Sig $exe; $full = "$($a.Execute) $($a.Arguments)".Trim()
       # PC-Tjeks egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek Vagt' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Vagt.ps1*") {
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek Vagt (denne app)' 'Starter vagten, når du logger ind' 'Oprettet af PC-Tjek.' $full 'self' $null
+        continue
+      }
       if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*") {
         Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter PC-Tjek, når du klikker på ikonet' 'Oprettet af PC-Tjeks installer.' $full 'self' $null
         continue
@@ -349,7 +353,7 @@ $ScanScript = {
     }
   }
   foreach ($pp in $procs.Values) {
-    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|jobs\\)') {
+    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|PC-Tjek-Vagt\.ps1|jobs\\)') {
       Add-Find 4 'Proces' "Mistænkelig kommando kører: $($pp.Name)" $pp.CommandLine 'Et skjult/kodet script kører lige nu.' $pp.ExecutablePath 'file' $null
     }
   }
@@ -936,6 +940,7 @@ $SysInfoScript = {
         <StackPanel Grid.Row="1">
           <RadioButton Name="NavHome"    Style="{StaticResource Nav}" GroupName="nav" IsChecked="True" Content="🏠   Overblik"/>
           <RadioButton Name="NavTweaks"  Style="{StaticResource Nav}" GroupName="nav" Content="⚡   Optimering"/>
+          <RadioButton Name="NavVagt"    Style="{StaticResource Nav}" GroupName="nav" Content="🛡   Vagt"/>
           <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
           <RadioButton Name="NavTime"    Style="{StaticResource Nav}" GroupName="nav" Content="🕒   Hændelsesforløb"/>
           <RadioButton Name="NavStart"   Style="{StaticResource Nav}" GroupName="nav" Content="🚀   Opstart"/>
@@ -1078,6 +1083,69 @@ $SysInfoScript = {
                    Text="Analysen vises her efter scanningen: hvad der er fundet, hvad en evt. falsk installer gjorde, og hvad du bør gøre."/>
         </Border>
         </Grid>
+      </Grid>
+
+      <!-- VAGT -->
+      <Grid Name="PageVagt" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,16">
+          <TextBlock Style="{StaticResource H1}" Text="Vagt"/>
+          <TextBlock Style="{StaticResource Sub}" Text="Passer på din pc i baggrunden, også når PC-Tjek er lukket. Du får en lille besked nederst til højre, hvis der sker noget."/>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Name="VagtIconBg" Width="56" Height="56" CornerRadius="16" Background="#242A39" HorizontalAlignment="Left">
+              <TextBlock Name="VagtIcon" Text="🛡" FontSize="27" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+              <TextBlock Name="VagtStatus" Text="Tjekker..." FontSize="20" FontWeight="SemiBold"/>
+              <TextBlock Name="VagtSub" Style="{StaticResource Sub}" Margin="0,3,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="BtnVagtTest" Content="👀  Vis et eksempel"/>
+              <Button Name="BtnVagtToggle" Content="Slå vagten til" Style="{StaticResource Primary}" Padding="18,10" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <UniformGrid Grid.Row="2" Columns="2" Margin="0,0,0,14">
+          <Border Style="{StaticResource CardB}" Margin="0,0,7,0" Padding="18,16">
+            <DockPanel>
+              <CheckBox Name="ChkDl" DockPanel.Dock="Right" IsChecked="True" VerticalAlignment="Top" RenderTransformOrigin="0.5,0.5"><CheckBox.RenderTransform><ScaleTransform ScaleX="1.4" ScaleY="1.4"/></CheckBox.RenderTransform></CheckBox>
+              <StackPanel Margin="0,0,12,0">
+                <TextBlock Text="🛡  Download-vagt" FontSize="15.5" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Tjekker programfiler, du henter, med det samme: hvem der har lavet dem, hvor de kommer fra, og om Defender finder noget. Advarer, før du kører noget farligt."/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Margin="7,0,0,0" Padding="18,16">
+            <DockPanel>
+              <CheckBox Name="ChkWd" DockPanel.Dock="Right" IsChecked="True" VerticalAlignment="Top" RenderTransformOrigin="0.5,0.5"><CheckBox.RenderTransform><ScaleTransform ScaleX="1.4" ScaleY="1.4"/></CheckBox.RenderTransform></CheckBox>
+              <StackPanel Margin="0,0,12,0">
+                <TextBlock Text="👀  Vagthund" FontSize="15.5" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Giver besked, når noget nyt sætter sig fast: opstartsprogrammer, planlagte opgaver, tjenester, browserudvidelser og Defender-undtagelser. Du kan slå det fra med ét klik."/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+        </UniformGrid>
+        <Border Grid.Row="3" Style="{StaticResource CardB}" Padding="6">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <DockPanel Margin="10,6,6,6">
+              <Button Name="BtnVagtRefresh" DockPanel.Dock="Right" Content="⟳" Margin="0" Padding="10,4"/>
+              <TextBlock Text="Det har vagten set" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <DataGrid Name="GridVagt" Grid.Row="1" IsReadOnly="True">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="TID" Binding="{Binding Tid, StringFormat='dd-MM HH:mm'}" Width="100"/>
+                <DataGridTextColumn Header="" Binding="{Binding Ikon}" Width="36"/>
+                <DataGridTextColumn Header="TYPE" Binding="{Binding Type}" Width="100"/>
+                <DataGridTextColumn Header="HVAD" Binding="{Binding Titel}" Width="2*"/>
+                <DataGridTextColumn Header="DETALJE" Binding="{Binding Detalje}" Width="3*"/>
+              </DataGrid.Columns>
+            </DataGrid>
+          </Grid>
+        </Border>
       </Grid>
 
       <!-- OPTIMERING -->
@@ -1527,12 +1595,13 @@ function With-RestorePoint($why, $ctx, [scriptblock]$then) {
 # =====================================================================
 #  Navigation
 # =====================================================================
-$pages = @{ NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
+$pages = @{ NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
 foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
     foreach ($k in $pages.Keys) { $ui[$pages[$k]].Visibility = $(if ($ui[$k].IsChecked) { 'Visible' } else { 'Collapsed' }) }
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health }
+    if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
   })
 }
@@ -2289,6 +2358,9 @@ function Build-Plan($r) {
     if ($script:Tweaks.Drv -and $script:Tweaks.Drv.DrvDays -gt 120) { $bits += 'grafikdriveren er gammel' }
     [void]$steps.Add((New-Step 'tweaks' 'Få gratis ydelse' (($bits -join ' · ') + '. Se hvordan under Optimering.') 'Vis mig hvordan' $null))
   }
+  if (-not (Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue)) {
+    [void]$steps.Add((New-Step 'vagt' 'Slå Vagten til' 'Få en advarsel, hvis du henter noget farligt, eller hvis et nyt program sætter sig fast i opstarten. Kører stille i baggrunden.' 'Slå til' $null))
+  }
   [void]$steps.Add((New-Step 'update' 'Opdatér dine programmer' 'Gamle programmer er en af de mest almindelige måder, virus kommer ind på. Opdateringen kører i baggrunden.' 'Opdatér alt' $null))
   $ext = @($f | Where-Object { $_.Kategori -eq 'Browser' -and $_.Niveau -ge 2 })
   if ($ext.Count) {
@@ -2432,6 +2504,7 @@ function Run-Step($id, [bool]$auto) {
       Set-StepState 'bloat' 'done' "$ok fjernet"; Log "Plan: bloat $ok"
     }
     'tweaks' { $ui.NavTweaks.IsChecked = $true; Set-StepState 'tweaks' 'done' 'Åbnet' }
+    'vagt' { if (Install-Vagt) { Set-StepState 'vagt' 'done' 'Vagten passer på dig' } }
     { $_ -like 'review*' } {
       $ui.NavFind.IsChecked = $true
       $ui.FilterText.Text = ''
@@ -2637,6 +2710,88 @@ $ui.DrvAction2.Add_Click({
 })
 $ui.BtnTweakRefresh.Add_Click({ Show-Tweaks })
 
+
+# =====================================================================
+#  VAGT: Download-vagt + Vagthund (baggrundsproces ved login)
+# =====================================================================
+$VagtScript = Join-Path $PSScriptRoot 'PC-Tjek-Vagt.ps1'
+$VagtCfg    = Join-Path $JobBase 'vagt.json'
+$VagtLog    = Join-Path $JobBase 'vagt-log.txt'
+function Get-VagtTask { Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue }
+function Get-VagtProc { @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*PC-Tjek-Vagt.ps1*' }) }
+function Install-Vagt {
+  if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når PC-Tjek er installeret med installeren (i Program Files).`n`nKør 'Installer PC-Tjek.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
+  if (-not (Test-Path $VagtScript)) { Msg "Filen PC-Tjek-Vagt.ps1 mangler. Opdatér PC-Tjek, eller kør installeren igen." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
+  try {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $sys = Join-Path $env:SystemRoot 'System32'
+    $args2 = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$VagtScript`""
+    $action = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $args2 -WorkingDirectory $PSScriptRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName 'PC-Tjek Vagt' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'PC-Tjek Vagt: tjekker downloads og nye opstartsprogrammer. Starter ved login.' -Force | Out-Null
+    Save-VagtCfg
+    Start-ScheduledTask -TaskName 'PC-Tjek Vagt'
+    Log 'Vagt slået til'
+    return $true
+  } catch { Msg "Kunne ikke slå vagten til: $($_.Exception.Message)" 'Vagt' 'OK' 'Error' | Out-Null; return $false }
+}
+function Remove-Vagt {
+  try { Stop-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue } catch {}
+  foreach ($p in Get-VagtProc) { try { Stop-Process -Id $p.ProcessId -Force } catch {} }
+  try { Unregister-ScheduledTask -TaskName 'PC-Tjek Vagt' -Confirm:$false -ErrorAction Stop } catch {}
+  Log 'Vagt slået fra'
+}
+function Save-VagtCfg {
+  $o = [ordered]@{ Downloads = [bool]$ui.ChkDl.IsChecked; Watchdog = [bool]$ui.ChkWd.IsChecked }
+  try { [IO.File]::WriteAllText($VagtCfg, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
+}
+function Load-Vagt {
+  if (Test-Path $VagtCfg) { try { $j = Get-Content $VagtCfg -Raw | ConvertFrom-Json; $script:VagtLoading = $true; $ui.ChkDl.IsChecked = [bool]$j.Downloads; $ui.ChkWd.IsChecked = [bool]$j.Watchdog; $script:VagtLoading = $false } catch {} }
+  $task = Get-VagtTask; $running = (Get-VagtProc).Count -gt 0
+  if ($task -and $running) {
+    $ui.VagtStatus.Text = 'Vagten passer på din pc ✓'; $ui.VagtSub.Text = 'Kører i baggrunden og starter automatisk, når du logger ind.'
+    $ui.VagtIconBg.Background = $Brush.ConvertFromString('#1E5A3A'); $ui.BtnVagtToggle.Content = 'Slå vagten fra'; $ui.BtnVagtToggle.Style = $win.FindResource([Windows.Controls.Button])
+    $ui.BtnVagtTest.IsEnabled = $true
+  } elseif ($task) {
+    $ui.VagtStatus.Text = 'Vagten er slået til, men kører ikke lige nu'; $ui.VagtSub.Text = 'Den starter ved næste login, eller tryk Genstart.'
+    $ui.VagtIconBg.Background = $Brush.ConvertFromString('#6B5313'); $ui.BtnVagtToggle.Content = 'Genstart vagten'; $ui.BtnVagtToggle.Style = $win.FindResource('Primary')
+    $ui.BtnVagtTest.IsEnabled = $false
+  } else {
+    $ui.VagtStatus.Text = 'Vagten er slået fra'; $ui.VagtSub.Text = 'Slå den til for at få besked, hvis du henter noget farligt, eller hvis noget nyt sætter sig fast.'
+    $ui.VagtIconBg.Background = $Brush.ConvertFromString('#242A39'); $ui.BtnVagtToggle.Content = 'Slå vagten til'; $ui.BtnVagtToggle.Style = $win.FindResource('Primary')
+    $ui.BtnVagtTest.IsEnabled = $false
+  }
+  $rows = @()
+  if (Test-Path $VagtLog) {
+    $lines = @(Get-Content $VagtLog -Encoding UTF8 -Tail 300)
+    [array]::Reverse($lines)
+    $rows = @($lines | ForEach-Object {
+      try { $o = $_ | ConvertFrom-Json
+        $ik = switch ($o.Niveau) { 'danger' { '⛔' } 'caution' { '⚠' } 'safe' { '✓' } 'handling' { '👆' } default { '•' } }
+        [pscustomobject]@{ Tid = [datetime]$o.Tid; Ikon = $ik; Type = $o.Type; Titel = $o.Titel; Detalje = $o.Detalje }
+      } catch {}
+    })
+  }
+  $ui.GridVagt.ItemsSource = $rows
+  $script:VagtLoaded = $true
+}
+$ui.BtnVagtToggle.Add_Click({
+  $task = Get-VagtTask
+  if ($task -and (Get-VagtProc).Count) {
+    if ((Msg 'Slå vagten fra? Du får så ingen advarsler om farlige downloads.' 'Vagt' 'YesNo' 'Question') -ne 'Yes') { return }
+    Remove-Vagt
+  } elseif ($task) { Start-ScheduledTask -TaskName 'PC-Tjek Vagt'; Start-Sleep -Milliseconds 1500 }
+  else { if (Install-Vagt) { Start-Sleep -Milliseconds 2000 } }
+  Load-Vagt
+  $st = Get-Step 'vagt'; if ($st -and (Get-VagtTask)) { Set-StepState 'vagt' 'done' 'Slået til' }
+})
+$ui.ChkDl.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg } })
+$ui.ChkWd.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg } })
+$ui.BtnVagtRefresh.Add_Click({ Load-Vagt })
+$ui.BtnVagtTest.Add_Click({ try { [IO.File]::WriteAllText((Join-Path $JobBase 'vagt-test.flag'), 'test'); $ui.StatusText.Text = 'Kig nederst til højre om et par sekunder 👀' } catch {} })
+
 # =====================================================================
 #  Eksport
 # =====================================================================
@@ -2728,7 +2883,15 @@ function Load-SysInfo {
     }
   } $null
 }
-$win.Add_ContentRendered({ Load-SysInfo; Check-AppUpdate $false })
+function Refresh-VagtVersion {
+  try {
+    $vp = Get-VagtProc | Select-Object -First 1
+    if ($vp -and (Test-Path $VagtScript) -and (Get-Item $VagtScript).LastWriteTime -gt $vp.CreationDate) {
+      Stop-Process -Id $vp.ProcessId -Force; Start-Sleep -Milliseconds 500; Start-ScheduledTask -TaskName 'PC-Tjek Vagt'; Log 'Vagten genstartet med ny version'
+    }
+  } catch {}
+}
+$win.Add_ContentRendered({ Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false })
 Log 'UI klar'
 [void]$win.ShowDialog()
 $jobTimer.Stop()

@@ -21,7 +21,7 @@ if ($txt -notmatch "\`$AppVersion = '[\d.]+'") { throw 'Kunne ikke finde $AppVer
 $txt = $txt -replace "\`$AppVersion = '[\d.]+'", "`$AppVersion = '$Version'"
 [IO.File]::WriteAllText($app, $txt, $utf8Bom)
 
-$files = foreach ($f in 'PC-Tjek-App.ps1', 'PC-Tjek.ico', 'Uninstall-PCTjek.ps1') {
+$files = foreach ($f in 'PC-Tjek-App.ps1', 'PC-Tjek-Vagt.ps1', 'Uninstall-PCTjek.ps1') {
   [ordered]@{ name = $f; sha256 = (Get-FileHash (Join-Path $root $f) -Algorithm SHA256).Hash }
 }
 $json = [ordered]@{ version = $Version; date = (Get-Date -Format 'yyyy-MM-dd'); notes = @($Notes); files = @($files) } | ConvertTo-Json -Depth 4

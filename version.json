@@ -1,19 +1,23 @@
 {
-  "version": "2.13",
+  "version": "2.14",
   "date": "2026-11-24",
   "notes": [
-    "Ny side: ⚡ Optimering",
-    "Tjekker om din RAM kører med fuld hastighed (XMP/EXPO)",
-    "Tjekker skærmens Hz og alderen på driver og BIOS"
+    "Ny: 🛡 Vagt med Download-vagt og Vagthund",
+    "Advarer, hvis du henter en farlig fil",
+    "Giver besked, når noget nyt sætter sig fast i opstarten"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "9CC4F3B5C6C328DB24DF31B32AFF87A2F74D3A03E9DDAE7BA71D4CACE23A4F6F"
+      "sha256": "061C8C4CF3E62C49352A26FFF8290B776E03AA0500DB8CADF3B55A8B10458FFD"
+    },
+    {
+      "name": "PC-Tjek-Vagt.ps1",
+      "sha256": "99C1CD9E99EFF4C2C4C708997EA2A2363DDE9ECF3C5F81C73ABB69D82B4394FB"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
-      "sha256": "DAB434826C46EA4297CCB3D646CE99409B0B2DB470552C6A14BC2AD3A4FDE180"
+      "sha256": "9D2BC00BBDAF27034D93CFDAED4749DEF11F981712D2CC87173B25317724BB02"
     }
   ]
 }
