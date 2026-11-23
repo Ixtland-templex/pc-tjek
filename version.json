@@ -1,15 +1,15 @@
 {
-  "version": "2.6",
+  "version": "2.7",
   "date": "2026-11-23",
   "notes": [
-    "App-opdatering virker nu, også mens appen kører",
-    "Opdateringer ses med det samme (ingen 5 minutters ventetid)",
-    "Filer, som Defender blokerer, vises som kritiske fund"
+    "Ny \"Din plan\": få, simple trin med én knap hver",
+    "\"Ret det hele for mig\" klarer de sikre ting automatisk",
+    "App-opdatering virker, også mens appen kører"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "C4B61A6DCCE6DCD6BBFD45FA908957404522058289687EFC74B031053952307D"
+      "sha256": "3A14B1590D3D3DA60D8B28DE696E6A31C828C1061E24934AFBF909BDFE318C02"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

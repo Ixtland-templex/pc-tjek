@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.6'
+$AppVersion = '2.7'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -848,7 +848,45 @@ $UpdateApplyScript = {
             <TextBlock Name="ScanPhases" Grid.Row="4" Margin="0,18,0,0" FontSize="14" LineHeight="26" Foreground="{StaticResource Muted}"/>
           </Grid>
         </Border>
-        <Border Name="StoryCard" Style="{StaticResource CardB}" Padding="0">
+        <!-- DIN PLAN -->
+        <Grid Name="PlanCard">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,12">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="BtnFixAll" Content="✨  Ret det hele for mig" Style="{StaticResource Primary}" Visibility="Collapsed" Padding="18,10" FontSize="14"/>
+              <Button Name="BtnDetails" Content="Vis detaljer" Visibility="Collapsed" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Name="PlanTitle" Text="Din plan" FontSize="20" FontWeight="SemiBold"/>
+              <TextBlock Name="PlanSub" Style="{StaticResource Sub}" Text="Tryk på Scan pc'en. Bagefter får du en kort liste med det, du skal gøre, med én knap til hvert trin."/>
+            </StackPanel>
+          </DockPanel>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <ItemsControl Name="PlanList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="#161A23" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,0,0,10">
+                    <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="52"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                      <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource Accent}" VerticalAlignment="Center" HorizontalAlignment="Left">
+                        <TextBlock Text="{Binding Gruppe}" FontSize="15" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      </Border>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <TextBlock Text="{Binding Navn}" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock Text="{Binding Info}" Foreground="#8A94A7" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Status}" Foreground="#4ADE80" VerticalAlignment="Center" Margin="0,0,12,0" FontWeight="SemiBold"/>
+                        <Button Content="{Binding Note}" Tag="{Binding Id}" IsEnabled="{Binding Valgt}" Style="{StaticResource Primary}" Margin="0" MinWidth="150"/>
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </Grid>
+        <Border Name="StoryCard" Style="{StaticResource CardB}" Padding="0" Visibility="Collapsed">
           <TextBox Name="Story" Background="Transparent" BorderThickness="0" Padding="20,16" IsReadOnly="True" TextWrapping="Wrap" FontSize="13.5"
                    VerticalScrollBarVisibility="Auto" FontFamily="Segoe UI Variable Text, Segoe UI"
                    Text="Analysen vises her efter scanningen: hvad der er fundet, hvad en evt. falsk installer gjorde, og hvad du bør gøre."/>
@@ -1373,6 +1411,9 @@ function Show-Result {
   Animate-Score $score $color
   $ui.Verdict.Text = if ($c4) { 'Kritiske fund. Læs analysen nedenfor.' } elseif ($c3) { 'Ingen kritiske fund, men nogle ting bør tjekkes.' } else { "Ser fornuftigt ud. Kig på Oprydning og Opstart, hvis pc'en er langsom." }
   $ui.Story.Text = Build-Story $r
+  try { Build-Plan $r } catch { Log "Plan-fejl: $_" }
+  $left = @($script:PlanRows).Count
+  $ui.Verdict.Text = if ($c4) { "Der er fundet noget alvorligt. Følg planen nedenfor, start fra toppen." } elseif ($left) { "Følg de $left trin nedenfor. Det tager kun et par minutter." } else { "Din pc ser fin ud. 🎉" }
   Apply-FindFilter; Apply-TimeFilter
   $ui.BtnExport.IsEnabled = $true
   Fill-CleanFromScan
@@ -1384,12 +1425,12 @@ $ui.BtnScan.Add_Click({
   $script:ScanStart = Get-Date; $script:EtaSmooth = $null; $ui.ScanBar.Value = 0
   $script:PrevTimes = $null
   if (Test-Path $TimesFile) { try { $script:PrevTimes = Get-Content $TimesFile -Raw | ConvertFrom-Json } catch {} }
-  $ui.ScanCard.Visibility = 'Visible'; $ui.StoryCard.Visibility = 'Hidden'
+  $ui.ScanCard.Visibility = 'Visible'; $ui.StoryCard.Visibility = 'Collapsed'; $ui.PlanCard.Visibility = 'Hidden'; $script:ShowDetails = $false
   $ui.ScoreLabel.Text = 'scanner...'
   Log 'Scan startet'
   Invoke-Bg $ScanScript @{ LogFile = $LogFile } {
     param($res, $err, $c)
-    $ui.ScanCard.Visibility = 'Collapsed'; $ui.StoryCard.Visibility = 'Visible'
+    $ui.ScanCard.Visibility = 'Collapsed'; $ui.PlanCard.Visibility = 'Visible'; $ui.BtnDetails.Content = 'Vis detaljer'
     $ui.BtnScan.IsEnabled = $true; $ui.BtnScan.Content = "🔍   Scan igen"
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [hashtable] })[-1] }   # sikkerhed mod løst output
     if ($err -or -not $res) { Msg "Scanningen fejlede: $err" 'PC-Tjek' 'OK' 'Error' | Out-Null; return }
@@ -1461,21 +1502,9 @@ $ui.BtnDisable.Add_Click({
   if ((Msg "Deaktivér:`n`n$($s.Titel)`n$($s.Sti)`n`nKan fortrydes med 'Fortryd seneste' på Overblik." 'Bekræft' 'YesNo' 'Warning') -ne 'Yes') { return }
   With-RestorePoint 'før deaktivering' $s {
     param($s)
-    try {
-      $undo = [System.Collections.ArrayList]@(Read-Undo)
-      if ($s.Type -eq 'task') {
-        Disable-ScheduledTask -TaskPath $s.Data.TaskPath -TaskName $s.Data.TaskName -ErrorAction Stop | Out-Null
-        [void]$undo.Add([pscustomobject]@{ Kind = 'task'; TaskPath = $s.Data.TaskPath; TaskName = $s.Data.TaskName; When = (Get-Date).ToString('s') })
-      } else {
-        [void]$undo.Add([pscustomobject]@{ Kind = 'run'; Key = $s.Data.Key; Name = $s.Data.Name; Value = $s.Data.Value; When = (Get-Date).ToString('s') })
-        Write-Undo $undo
-        Remove-ItemProperty -Path $s.Data.Key -Name $s.Data.Name -ErrorAction Stop
-      }
-      Write-Undo $undo
-      $s.Detalje = "DEAKTIVERET $(Get-Date -Format 'HH:mm') · " + $s.Detalje
-      $ui.GridFind.Items.Refresh()
-      $ui.StatusText.Text = "Deaktiveret: $($s.Titel)"; Log "Deaktiveret $($s.Titel)"
-    } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+    $n = Disable-Findings @($s)
+    $ui.GridFind.Items.Refresh()
+    if ($n) { $ui.StatusText.Text = "Deaktiveret: $($s.Titel)" } else { Msg 'Det lykkedes ikke at deaktivere den. Se pc-tjek.log.' 'PC-Tjek' 'OK' 'Error' | Out-Null }
   }
 })
 $ui.BtnUninstall.Add_Click({
@@ -1837,6 +1866,201 @@ $ui.BtnGameMode.Add_Click({
   Log 'Spiltilstand til'; Load-Health
 })
 $ui.BtnOfflineScan.Add_Click({ Start-Process 'windowsdefender://threatsettings' })
+
+# =====================================================================
+#  DIN PLAN: få, simple trin med én knap hver
+# =====================================================================
+$script:PlanRows = @()
+$script:AutoQueue = New-Object System.Collections.ArrayList
+$script:ShowDetails = $false
+
+function New-Step($id, $title, $why, $button, $data) {
+  $r = New-Object PcTjek.Row
+  $r.Id = $id; $r.Navn = $title; $r.Info = $why; $r.Note = $button; $r.Valgt = $true; $r.Status = ''; $r.Tag = $data
+  return $r
+}
+function Get-Step($id) { $script:PlanRows | Where-Object { $_.Id -eq $id } | Select-Object -First 1 }
+function Set-StepState($id, $state, $text) {
+  $st = Get-Step $id; if (-not $st) { return }
+  switch ($state) {
+    'busy' { $st.Status = '⏳ ' + $text; $st.Valgt = $false }
+    'done' { $st.Status = '✓ ' + $text; $st.Valgt = $false; $st.Gruppe = '✓'; $st.Note = 'Klaret' }
+    'fail' { $st.Status = '✗ ' + $text; $st.Valgt = $true }
+  }
+  Update-PlanHeader
+}
+function Update-PlanHeader {
+  $left = @($script:PlanRows | Where-Object { $_.Gruppe -ne '✓' })
+  if (-not $script:PlanRows.Count) { return }
+  if ($left.Count -eq 0) { $ui.PlanTitle.Text = '🎉 Alt er klaret'; $ui.PlanSub.Text = "Din pc er ryddet op. Scan igen om en uges tid, eller hvis noget føles mærkeligt."; $ui.BtnFixAll.Visibility = 'Collapsed' }
+  else { $ui.PlanTitle.Text = "Din plan · $($left.Count) $(if ($left.Count -eq 1) { 'ting' } else { 'ting' }) at gøre"; $ui.PlanSub.Text = 'Start fra toppen. Tryk på knappen ud for hvert trin, eller lad appen klare de sikre ting for dig.' }
+}
+
+function Build-Plan($r) {
+  $f = $r.Findings
+  $steps = New-Object System.Collections.ArrayList
+  $threats = @($f | Where-Object { $_.Kategori -eq 'Trussel' })
+  $infected = @($threats | Where-Object { $_.Titel -like 'Inficeret fil:*' })
+  $ran = @($threats | Where-Object { $_.Detalje -match 'Kørte: JA' })
+  if ($infected.Count -or @($threats | Where-Object { $_.Niveau -ge 4 }).Count) {
+    $why = if ($infected.Count) { "Der ligger $($infected.Count) fil(er) med virus på pc'en. En dybdescanning fjerner dem, før Windows starter (ca. 15 min)." } else { 'Windows har fundet en aktiv trussel. En dybdescanning fjerner den, før Windows starter (ca. 15 min).' }
+    [void]$steps.Add((New-Step 'virus' 'Fjern virus' $why 'Start dybdescanning' $null))
+  }
+  $persist = @($f | Where-Object { $_.Niveau -ge 3 -and $_.Type -in 'task', 'run' })
+  if ($persist.Count) {
+    [void]$steps.Add((New-Step 'persist' 'Stop mistænkelige programmer' "$($persist.Count) ukendt(e) program(mer) starter automatisk på en måde, der ligner malware. De slås fra, men slettes ikke, så du kan fortryde." 'Slå dem fra' $persist))
+  }
+  if ($ran.Count) {
+    [void]$steps.Add((New-Step 'passwords' 'Skift dine vigtigste adgangskoder' 'Noget skadeligt nåede at køre og kan have set dine gemte logins. Skift e-mail først, gerne fra din telefon.' 'Vis hvordan' $null))
+  }
+  $start = @(@(Get-StartupItems) | Where-Object { $_.Aktiv -and $_.Tip -like 'Kan slås fra*' })
+  if ($start.Count) {
+    [void]$steps.Add((New-Step 'startup' 'Gør opstarten hurtigere' "$($start.Count) programmer starter med Windows uden grund ($((($start | Select-Object -First 4).Navn) -join ', ')$(if ($start.Count -gt 4) { ' ...' })). De kan stadig åbnes, når du vil." "Slå $($start.Count) fra" $null))
+  }
+  $gb = ($r.Space | Where-Object { $_.Hvad -match 'Midlertidige|Windows Update|Crash' } | Measure-Object GB -Sum).Sum
+  if ($gb -ge 0.3) {
+    [void]$steps.Add((New-Step 'clean' 'Ryd op i skrammel' ("Ca. {0:N1} GB midlertidige filer og cache, som Windows ikke har brug for." -f $gb) 'Ryd op' $null))
+  }
+  [void]$steps.Add((New-Step 'update' 'Opdatér dine programmer' 'Gamle programmer er en af de mest almindelige måder, virus kommer ind på. Opdateringen kører i baggrunden.' 'Opdatér alt' $null))
+  $ext = @($f | Where-Object { $_.Kategori -eq 'Browser' -and $_.Niveau -ge 2 })
+  if ($ext.Count) {
+    [void]$steps.Add((New-Step 'extensions' 'Tjek dine browserudvidelser' "$($ext.Count) udvidelse(r) kan læse alt, hvad du gør på nettet: $((($ext | Select-Object -First 3).Titel -replace '^.*?: ', '') -join ', '). Fjern dem, du ikke kender." 'Åbn udvidelser' $ext))
+  }
+  $bloat = @($f | Where-Object { $_.Kategori -eq 'Bloat' -and $_.Type -eq 'appx' })
+  if ($bloat.Count -ge 3) {
+    [void]$steps.Add((New-Step 'bloat' 'Fjern unødvendige Windows-apps' "$($bloat.Count) forudinstallerede apps, som du kan undvære (nyheder, kabale og lignende). De kan hentes igen fra Microsoft Store." 'Fjern dem' $bloat))
+  }
+  $up = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalDays
+  if ($up -ge 5) {
+    [void]$steps.Add((New-Step 'restart' 'Genstart pc''en' ("Pc'en har kørt i {0:N0} dage uden genstart. Det gør den langsommere. Gør det til sidst." -f $up) 'Genstart' $null))
+  }
+  $n = 0; foreach ($s in $steps) { $n++; $s.Gruppe = "$n" }
+  $script:PlanRows = @($steps)
+  $ui.PlanList.ItemsSource = $script:PlanRows
+  $ui.BtnFixAll.Visibility = $(if (@($script:PlanRows | Where-Object { $_.Id -in 'persist', 'startup', 'clean', 'update' }).Count) { 'Visible' } else { 'Collapsed' })
+  $ui.BtnDetails.Visibility = 'Visible'
+  Update-PlanHeader
+}
+
+# ---------- Handlinger for hvert trin ----------
+function Disable-Findings($items) {
+  $undo = [System.Collections.ArrayList]@(Read-Undo)
+  $ok = 0
+  foreach ($s in $items) {
+    try {
+      if ($s.Type -eq 'task') {
+        Disable-ScheduledTask -TaskPath $s.Data.TaskPath -TaskName $s.Data.TaskName -ErrorAction Stop | Out-Null
+        [void]$undo.Add([pscustomobject]@{ Kind = 'task'; TaskPath = $s.Data.TaskPath; TaskName = $s.Data.TaskName; When = (Get-Date).ToString('s') })
+      } elseif ($s.Type -eq 'run') {
+        [void]$undo.Add([pscustomobject]@{ Kind = 'run'; Key = $s.Data.Key; Name = $s.Data.Name; Value = $s.Data.Value; When = (Get-Date).ToString('s') })
+        Write-Undo $undo
+        Remove-ItemProperty -Path $s.Data.Key -Name $s.Data.Name -ErrorAction Stop
+      }
+      $s.Detalje = "DEAKTIVERET $(Get-Date -Format 'HH:mm') · " + $s.Detalje; $ok++
+      Log "Deaktiveret $($s.Titel)"
+    } catch { Log "Kunne ikke deaktivere $($s.Titel): $_" }
+  }
+  Write-Undo $undo
+  return $ok
+}
+
+function Run-Step($id, [bool]$auto) {
+  $st = Get-Step $id
+  if (-not $st -or ($st.Gruppe -eq '✓')) { Next-Auto; return }
+  switch ($id) {
+    'virus' {
+      if ((Msg "Pc'en genstarter nu og scanner i ca. 15 minutter, før Windows starter.`n`nGem dit arbejde, og luk andre programmer først.`n`nStart dybdescanningen?" 'Fjern virus' 'YesNo' 'Warning') -ne 'Yes') { return }
+      try { Start-MpWDOScan -ErrorAction Stop; Set-StepState 'virus' 'busy' 'Genstarter...' } catch { Start-Process 'windowsdefender://threatsettings'; Set-StepState 'virus' 'fail' 'Start den i Windows Sikkerhed' }
+    }
+    'passwords' {
+      Msg ("Sådan gør du (helst fra din telefon):`n`n1. Skift adgangskoden til din e-mail først.`n2. Derefter bank (MitID er ikke påvirket), Discord, Steam og sociale medier.`n3. Slå to-trins-bekræftelse til, hvor du kan.`n4. Log ud af alle enheder i de vigtigste tjenester.`n`nBrug ikke den samme adgangskode flere steder.") 'Adgangskoder' | Out-Null
+      if ((Msg 'Har du gjort det, eller vil du gøre det senere?' 'Adgangskoder' 'YesNo' 'Question') -eq 'Yes') { Set-StepState 'passwords' 'done' 'Klaret' }
+    }
+    'persist' {
+      $names = ($st.Tag | ForEach-Object { "  • $($_.Titel)" }) -join "`n"
+      if (-not $auto -and (Msg "Disse programmer slås fra ved opstart:`n`n$names`n`nDe slettes ikke. Du kan fortryde med 'Fortryd seneste'." 'Bekræft' 'YesNo' 'Question') -ne 'Yes') { return }
+      Set-StepState 'persist' 'busy' 'Slår fra...'
+      With-RestorePoint 'før deaktivering' $st { param($st) $n = Disable-Findings $st.Tag; Set-StepState 'persist' 'done' "$n slået fra"; Next-Auto }
+    }
+    'startup' {
+      $t = @(@(Get-StartupItems) | Where-Object { $_.Aktiv -and $_.Tip -like 'Kan slås fra*' })
+      foreach ($x in $t) { try { Set-StartupState $x $false } catch {} }
+      Load-Startup
+      Set-StepState 'startup' 'done' "$($t.Count) slået fra"; Log "Plan: opstart $($t.Count)"
+      Next-Auto
+    }
+    'clean' {
+      Set-StepState 'clean' 'busy' 'Rydder op...'
+      $cats = @($CleanCats | Where-Object { $_.Default })
+      Invoke-Bg $CleanRunScript @{ Cats = $cats } {
+        param($res, $err, $c)
+        if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [hashtable] })[-1] }
+        $tot = 0; if ($res) { foreach ($v in $res.Values) { $tot += [double]$v } }
+        if ($err) { Set-StepState 'clean' 'fail' 'Fejl' } else { Set-StepState 'clean' 'done' "$(Fmt-GB $tot) frigjort" }
+        Next-Auto
+      } $null
+    }
+    'update' {
+      Set-StepState 'update' 'busy' 'Finder opdateringer...'
+      Invoke-Bg $WingetListScript $null {
+        param($res, $err, $c)
+        if ($err) { Set-StepState 'update' 'fail' 'winget mangler'; Next-Auto; return }
+        $ids = @($res | ForEach-Object { $_.Id } | Where-Object { $_ })
+        if (-not $ids.Count) { Set-StepState 'update' 'done' 'Alt var opdateret'; Next-Auto; return }
+        Set-StepState 'update' 'busy' "Opdaterer $($ids.Count) programmer..."
+        Invoke-Bg $WingetUpgradeScript @{ Ids = $ids } {
+          param($res2, $err2, $c2)
+          if ($res2 -is [array]) { $res2 = @($res2 | Where-Object { $_ -is [hashtable] })[-1] }
+          $okc = if ($res2) { @($res2.Values | Where-Object { $_ -eq 'OK' }).Count } else { 0 }
+          Set-StepState 'update' 'done' "$okc af $($c2.N) opdateret"
+          Next-Auto
+        } @{ N = $ids.Count }
+      } $null
+    }
+    'extensions' {
+      $hasChrome = @($st.Tag | Where-Object { $_.Titel -like 'Chrome*' }).Count
+      if ($hasChrome) { Start-Process 'chrome.exe' 'chrome://extensions' } else { Start-Process 'msedge.exe' 'edge://extensions' }
+      Msg "Browseren åbner nu listen over udvidelser.`n`nFjern dem, du ikke selv har installeret eller ikke kender:`n`n$((($st.Tag | ForEach-Object { '  • ' + ($_.Titel -replace '^.*?: ', '') }) -join "`n"))" 'Udvidelser' | Out-Null
+      Set-StepState 'extensions' 'done' 'Tjekket'
+    }
+    'bloat' {
+      $names = ($st.Tag | ForEach-Object { '  • ' + ($_.Titel -replace '^Windows-app: ', '') }) -join "`n"
+      if ((Msg "Disse apps fjernes:`n`n$names`n`nDe kan hentes igen fra Microsoft Store." 'Bekræft' 'YesNo' 'Question') -ne 'Yes') { return }
+      $ok = 0; foreach ($b in $st.Tag) { try { Remove-AppxPackage -Package $b.Data.Package -ErrorAction Stop; $ok++ } catch {} }
+      Set-StepState 'bloat' 'done' "$ok fjernet"; Log "Plan: bloat $ok"
+    }
+    'restart' {
+      if ((Msg "Genstart pc'en om 30 sekunder?`n`nGem dit arbejde først." 'Genstart' 'YesNo' 'Question') -ne 'Yes') { return }
+      shutdown.exe /r /t 30 /c "PC-Tjek genstarter pc'en om 30 sekunder."
+      Set-StepState 'restart' 'busy' 'Genstarter om 30 sek.'
+    }
+  }
+}
+function Next-Auto {
+  if ($script:AutoQueue.Count -eq 0) { return }
+  $nxt = $script:AutoQueue[0]; $script:AutoQueue.RemoveAt(0)
+  Run-Step $nxt $true
+}
+$ui.PlanList.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+  param($sender, $e)
+  $b = $e.OriginalSource
+  if ($b -is [Windows.Controls.Button] -and $b.Tag) { Run-Step ([string]$b.Tag) $false }
+})
+$ui.BtnFixAll.Add_Click({
+  $ids = @($script:PlanRows | Where-Object { $_.Id -in 'persist', 'startup', 'clean', 'update' -and $_.Gruppe -ne '✓' } | ForEach-Object { $_.Id })
+  if (-not $ids.Count) { return }
+  $txt = ($script:PlanRows | Where-Object { $_.Id -in $ids } | ForEach-Object { "  • $($_.Navn)" }) -join "`n"
+  if ((Msg "Appen klarer nu de sikre ting for dig:`n`n$txt`n`nIntet slettes, som du har brug for, og det, der slås fra, kan slås til igen.`nDet tager typisk 2-10 minutter. Du kan bruge pc'en imens." 'Ret det hele for mig' 'YesNo' 'Question') -ne 'Yes') { return }
+  $script:AutoQueue.Clear(); foreach ($i in $ids) { [void]$script:AutoQueue.Add($i) }
+  $ui.BtnFixAll.Visibility = 'Collapsed'
+  Next-Auto
+})
+$ui.BtnDetails.Add_Click({
+  $script:ShowDetails = -not $script:ShowDetails
+  $ui.StoryCard.Visibility = $(if ($script:ShowDetails) { 'Visible' } else { 'Collapsed' })
+  $ui.PlanCard.Visibility = $(if ($script:ShowDetails) { 'Collapsed' } else { 'Visible' })
+  $ui.BtnDetails.Content = $(if ($script:ShowDetails) { '← Tilbage til planen' } else { 'Vis detaljer' })
+})
 
 # =====================================================================
 #  Eksport
