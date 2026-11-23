@@ -152,11 +152,25 @@ function Check-Download($path) {
     else { [void]$reasons.Add('Filen er ikke signeret af en kendt udgiver') }
   }
   # Defender tjekker filen (bruger også Microsofts cloud-database)
-  $threat = $false
+  # Defender-resultatet læses fra Defenders egen tekst og historik. Er det uklart, siger vi det.
+  $def = 'unknown'
   $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
-  if (Test-Path $mp) { $null = & $mp -Scan -ScanType 3 -File $path 2>&1; if ($LASTEXITCODE -eq 2) { $threat = $true } }
-  if (-not (Test-Path -LiteralPath $path)) { $threat = $true }   # Defender har fjernet den
-  if ($threat) { [void]$reasons.Insert(0, 'Microsoft Defender har fundet malware i filen') } else { [void]$good.Add('Defender fandt intet') }
+  if (Test-Path $mp) {
+    $t0 = (Get-Date).AddSeconds(-2)
+    $out = (& $mp -Scan -ScanType 3 -File $path 2>&1 | ForEach-Object { [string]$_ }) -join "`n"
+    $code = $LASTEXITCODE
+    $n = if ($out -match '(?i)found (\d+) threat') { [int]$matches[1] } else { -1 }
+    $hist = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.InitialDetectionTime -ge $t0 -and (($_.Resources -join ' ') -like "*$path*") })
+    if ($n -gt 0 -or $hist.Count) { $def = 'threat' }
+    elseif ($code -eq 0 -and $out -match '(?i)found no threats') { $def = 'clean' }
+  }
+  if (-not (Test-Path -LiteralPath $path)) { $def = 'threat' }   # filen er væk: Defender har fjernet den
+  $threat = $def -eq 'threat'
+  switch ($def) {
+    'threat' { [void]$reasons.Insert(0, 'Microsoft Defender har fundet malware i filen') }
+    'clean'  { [void]$good.Add('Defender fandt intet') }
+    default  { [void]$reasons.Add('Defender kunne ikke tjekke filen, så den er ikke verificeret') }
+  }
   # Mistænkelige mønstre
   $double = $f.Name -match '(?i)\.(pdf|docx?|xlsx?|jpe?g|png|mp4|mp3|txt)\.(exe|scr|bat|cmd|js|vbs|lnk|com)$'
   if ($double) { [void]$reasons.Add('Dobbelt filendelse (fx .pdf.exe). Det er et klassisk trick') }
@@ -172,8 +186,9 @@ function Check-Download($path) {
   if ($ext -in '.bat', '.cmd', '.ps1', '.vbs', '.js', '.hta', '.reg', '.lnk') { [void]$reasons.Add('Det er et script/genvej, der kan køre kommandoer direkte') }
 
   $level = if ($threat -or $double -or ($words -and -not $signer)) { 'danger' }
+           elseif ($signer -and $def -eq 'clean' -and $reasons.Count -eq 0) { 'safe' }
+           elseif ($reasons.Count -eq 1 -and $def -eq 'unknown' -and $signer) { 'info' }
            elseif ($reasons.Count) { 'caution' }
-           elseif ($signer) { 'safe' }
            else { 'info' }
   $from = if ($domain) { "Hentet fra $domain" } else { 'Ukendt kilde' }
   $sizeTxt = if ($f.Length -ge 1MB) { '{0:N1} MB' -f ($f.Length / 1MB) } else { '{0:N0} KB' -f ($f.Length / 1KB) }
@@ -191,7 +206,10 @@ function Check-Download($path) {
     'safe' {
       Show-Popup 'safe' "Ser sikker ud: $($f.Name)" ("$from · $sizeTxt`n" + (($good | ForEach-Object { "✓  $_" }) -join "`n")) @($ok) 12
     }
-    default { if ($ext -in '.iso', '.rar', '.7z') { Show-Popup 'info' "Ny fil: $($f.Name)" "$from · $sizeTxt`nDefender fandt intet. Pas på med programmer indeni, hvis kilden er ukendt." @($ok) 12 } }
+    default {
+      $txt = (@($good | ForEach-Object { "✓  $_" }) + @($reasons | ForEach-Object { "•  $_" })) -join "`n"
+      Show-Popup 'info' "Ny fil: $($f.Name)" "$from · $sizeTxt`n$txt$(if ($ext -in '.iso', '.rar', '.7z', '.zip') { "`nPas på med programmer indeni, hvis kilden er ukendt." })" @($ok) 15
+    }
   }
   VLog 'Download' $level $f.Name ((@($reasons) + @($good)) -join ' · ') $path
 }
@@ -265,21 +283,49 @@ function Disable-Item($it) {
     }
   }
 }
+# Baseline: nøgle -> mål (kommando/sti), så vi også opdager, når en kendt post pludselig peger på noget andet
 $script:Baseline = $null
-if (Test-Path $SnapFile) { try { $script:Baseline = @(Get-Content $SnapFile -Raw | ConvertFrom-Json) | ForEach-Object { $_ } } catch {} }
+if (Test-Path $SnapFile) {
+  try {
+    $j = Get-Content $SnapFile -Raw | ConvertFrom-Json
+    if ($j -is [array]) { $script:Baseline = $null }   # gammelt format: start forfra uden alarmer
+    else { $script:Baseline = @{}; foreach ($pr in $j.PSObject.Properties) { $script:Baseline[$pr.Name] = [string]$pr.Value } }
+  } catch {}
+}
+function Save-Baseline($now) {
+  $m = [ordered]@{}; foreach ($k in $now.Keys) { $m[$k] = [string]$now[$k].Cmd }
+  $script:Baseline = @{}; foreach ($k in $m.Keys) { $script:Baseline[$k] = $m[$k] }
+  try { [IO.File]::WriteAllText($SnapFile, ($m | ConvertTo-Json -Depth 2), (New-Object Text.UTF8Encoding $false)) } catch {}
+}
+function Norm-Ver($s) { ([string]$s) -replace '\d+(\.\d+){1,3}', '#' }   # versionsnumre ignoreres (almindelige opdateringer)
 function Check-Watchdog {
   $now = Get-Snap
   $keys = @($now.Keys)
+  $script:LastWd = Get-Date
   if ($null -eq $script:Baseline) {   # første gang: husk alt, ingen alarmer
-    $script:Baseline = $keys
-    ConvertTo-Json -InputObject $keys | Out-File -Encoding utf8 $SnapFile
+    Save-Baseline $now
     VLog 'Vagthund' 'info' 'Vagthunden er startet' "$($keys.Count) ting registreret" ''
     return
   }
-  $new = @($keys | Where-Object { $script:Baseline -notcontains $_ })
+  # Ændrede poster: samme navn, men nyt mål
+  $changed = @($keys | Where-Object { $script:Baseline.ContainsKey($_) -and (Norm-Ver $script:Baseline[$_]) -ne (Norm-Ver $now[$_].Cmd) })
+  foreach ($k in $changed) {
+    $it = $now[$k]; $old = $script:Baseline[$k]
+    $label = Kind-Label $it.Kind
+    $sig = if ($it.Kind -in 'run', 'task', 'service', 'startfile') { Sig-Of $it.Cmd } else { '' }
+    $level = if ($sig -eq 'USIGNERET' -or $it.Kind -eq 'excl') { 'caution' } else { 'info' }
+    $who = if ($sig -and $sig -ne 'USIGNERET') { "Det nye mål er signeret af $sig." } elseif ($sig -eq 'USIGNERET') { 'Det nye mål er IKKE signeret af en kendt udgiver.' } else { '' }
+    $btns = New-Object System.Collections.ArrayList
+    if ($it.Kind -in 'run', 'task', 'startfile' -and ($it.Kind -eq 'task' -or $it.Hive)) {
+      [void]$btns.Add(@{ Text = '⛔  Slå fra'; Kind = 'danger'; Data = $it; Action = { param($x) try { Disable-Item $x; VLog 'Vagthund' 'handling' "Slået fra: $($x.Name)" $x.Cmd $x.Cmd } catch {} } })
+    } else { [void]$btns.Add(@{ Text = 'Åbn PC-Tjek'; Kind = 'primary'; Action = { Open-App } }) }
+    [void]$btns.Add(@{ Text = 'Det er OK'; Kind = 'normal'; Action = $null })
+    Show-Popup $level "Ændret $($label.ToLower()): $($it.Name)" "Peger nu på et andet program. $who`n`nNu:  $($it.Cmd)`nFør: $old" @($btns) $(if ($level -eq 'caution') { 0 } else { 30 })
+    VLog 'Vagthund' $level "Ændret $($label.ToLower()): $($it.Name)" "Før: $old · Nu: $($it.Cmd)" $it.Cmd
+  }
+  $new = @($keys | Where-Object { -not $script:Baseline.ContainsKey($_) })
+  if ($changed.Count -or $new.Count -or $keys.Count -ne $script:Baseline.Count -or @($keys | Where-Object { $script:Baseline[$_] -ne [string]$now[$_].Cmd }).Count) { Save-Baseline $now }
   if ($new.Count) {
-    $script:Baseline = $keys
-    ConvertTo-Json -InputObject $keys | Out-File -Encoding utf8 $SnapFile
     $items = @($new | ForEach-Object { $it = $now[$_]; $it.Key = $_; $it })
     if ($items.Count -gt 3) {
       $list = ($items | Select-Object -First 6 | ForEach-Object { "•  $(Kind-Label $_.Kind): $(if ($_.Kind -eq 'ext') { Ext-Name $_.Cmd } else { $_.Name })" }) -join "`n"
@@ -309,9 +355,6 @@ function Check-Watchdog {
       Show-Popup $level "Ny $($label.ToLower()): $name" ("$why $who`n`n$($it.Cmd)").Trim() @($btns) $(if ($level -eq 'caution') { 0 } else { 40 })
       VLog 'Vagthund' $level "$($label): $name" "$why $who" $it.Cmd
     }
-  } elseif ($keys.Count -ne $script:Baseline.Count) {
-    $script:Baseline = $keys
-    ConvertTo-Json -InputObject $keys | Out-File -Encoding utf8 $SnapFile
   }
 }
 function Kind-Label($k) { switch ($k) { 'run' { 'Opstartsprogram' } 'startfile' { 'Opstartsfil' } 'task' { 'Planlagt opgave' } 'service' { 'Tjeneste' } 'ext' { 'Browserudvidelse' } 'excl' { 'Defender-undtagelse' } default { 'Ting' } } }
@@ -321,6 +364,13 @@ function Kind-Label($k) { switch ($k) { 'run' { 'Opstartsprogram' } 'startfile' 
 # =====================================================================
 $script:Cfg = Get-Cfg
 $script:Tick = 0
+$script:LastDl = $null; $script:LastWd = $null
+$StatusFile = Join-Path $Base 'vagt-status.json'
+function Write-Status {
+  $o = [ordered]@{ Heartbeat = (Get-Date).ToString('s'); Downloads = $script:Cfg.Downloads; Watchdog = $script:Cfg.Watchdog
+                   DownloadsChecked = $(if ($script:LastDl) { $script:LastDl.ToString('s') } else { '' }); WatchdogChecked = $(if ($script:LastWd) { $script:LastWd.ToString('s') } else { '' }) }
+  try { [IO.File]::WriteAllText($StatusFile, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
+}
 VLog 'Vagt' 'info' 'Vagten er startet' "Overvåger $DlDir" ''
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(3)
@@ -333,8 +383,9 @@ $timer.Add_Tick({
       Show-Popup 'safe' 'Ser sikker ud: SteamSetup.exe' "Hentet fra cdn.akamai.steamstatic.com · 2,3 MB`n✓  Signeret af Valve Corp.`n✓  Defender fandt intet" @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) 15
       Show-Popup 'caution' 'Vær forsigtig: PawPatrol_Setup.exe' "Hentet fra mediafire.com · 4,1 MB`n`n•  Filen er ikke signeret af en kendt udgiver`n•  Hentet fra en fildelingstjeneste og ikke fra producentens egen side`n`n(Dette er bare et eksempel.)" @(@{ Text = '🗑  Flyt til papirkurv'; Kind = 'danger'; Action = $null }, @{ Text = 'Jeg stoler på den'; Kind = 'normal'; Action = $null }) 30
     }
-    if ($script:Cfg.Downloads) { Poll-Downloads }
+    if ($script:Cfg.Downloads) { Poll-Downloads; $script:LastDl = Get-Date }
     if ($script:Cfg.Watchdog -and ($script:Tick % 20 -eq 2)) { Check-Watchdog }   # ca. hvert minut
+    if ($script:Tick % 10 -eq 1) { Write-Status }
   } catch { VLog 'Fejl' 'info' 'Fejl i vagten' $_.Exception.Message '' }
 })
 $timer.Start()

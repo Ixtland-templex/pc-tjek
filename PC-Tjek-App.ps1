@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.14'
+$AppVersion = '2.15'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -427,7 +427,8 @@ $ScanScript = {
     $AllFinds[$AllFinds.Count - 1].SHA256 = $sha
   }
 
-  # Lad Defender selv tjekke de markerede filer (bruger også Microsofts cloud-database). Rene filer nedgraderes.
+  # Lad Defender tjekke de markerede filer, KUN læsning (-DisableRemediation: Defender ændrer intet).
+  # Resultatet læses fra Defenders egen tekst: "found no threats" / "found N threats". Alt andet = kunne ikke verificeres.
   $mpcmd = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
   $toCheck = @($AllFinds | Where-Object { $_.Kategori -eq 'Ny fil' -and $_.Niveau -ge 2 -and $_.Sti } | Select-Object -First 80)
   if ($toCheck.Count -and (Test-Path $mpcmd)) {
@@ -436,16 +437,19 @@ $ScanScript = {
     foreach ($x in $toCheck) {
       $ci++; Sub (0.7 + 0.3 * $ci / $toCheck.Count) "Defender tjekker fil $ci af $($toCheck.Count)"
       if (-not (Test-Path -LiteralPath $x.Sti)) { continue }
-      $null = & $mpcmd -Scan -ScanType 3 -File $x.Sti 2>&1
+      $out = (& $mpcmd -Scan -ScanType 3 -File $x.Sti -DisableRemediation 2>&1 | ForEach-Object { [string]$_ }) -join "`n"
       $code = $LASTEXITCODE
-      if ($code -eq 0) {
-        $x.Niveau = 1; $x.Risiko = 'Lav'; $x.Detalje = '✓ Tjekket af Defender: ren · ' + $x.Detalje
-        $x.Raad = 'Defender har tjekket filen og fandt intet. Du behøver ikke gøre noget.'
-      } elseif ($code -eq 2) {
+      $nThreat = if ($out -match '(?i)found (\d+) threat') { [int]$matches[1] } else { -1 }
+      if ($nThreat -gt 0) {
         $x.Niveau = 4; $x.Risiko = 'Kritisk'; $x.Kategori = 'Trussel'; $x.Titel = "Defender fandt malware: $(Split-Path $x.Sti -Leaf)"
-        $x.Hvorfor = 'Defender fandt malware i filen under tjekket og har forsøgt at fjerne den.'
-        $x.Raad = 'Kør trinnet "Fjern virus" på Overblik for at være sikker på, at alt er væk.'
+        $x.Hvorfor = 'Fundet af Defender under tjekket. Scanningen har ikke ændret noget, så filen ligger der stadig.'
+        $x.Raad = 'Brug trinnet "Fjern virus" på Overblik. Så fjerner Defender den.'
         Add-Time (Get-Date) 'Defender' "Malware fundet ved tjek: $(Split-Path $x.Sti -Leaf)" $x.Sti
+      } elseif ($code -eq 0 -and $out -match '(?i)found no threats') {
+        $x.Niveau = 1; $x.Risiko = 'Lav'; $x.Detalje = '✓ Tjekket af Defender: intet fundet · ' + $x.Detalje
+        $x.Raad = 'Defender har tjekket filen og fandt intet. Du behøver ikke gøre noget.'
+      } else {
+        $x.Detalje = '? Kunne ikke verificeres af Defender · ' + $x.Detalje
       }
     }
   }
@@ -1115,6 +1119,7 @@ $SysInfoScript = {
               <StackPanel Margin="0,0,12,0">
                 <TextBlock Text="🛡  Download-vagt" FontSize="15.5" FontWeight="SemiBold"/>
                 <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Tjekker programfiler, du henter, med det samme: hvem der har lavet dem, hvor de kommer fra, og om Defender finder noget. Advarer, før du kører noget farligt."/>
+                <TextBlock Name="VagtDlInfo" Margin="0,8,0,0" FontSize="12" Foreground="#6FA8FF"/>
               </StackPanel>
             </DockPanel>
           </Border>
@@ -1123,7 +1128,8 @@ $SysInfoScript = {
               <CheckBox Name="ChkWd" DockPanel.Dock="Right" IsChecked="True" VerticalAlignment="Top" RenderTransformOrigin="0.5,0.5"><CheckBox.RenderTransform><ScaleTransform ScaleX="1.4" ScaleY="1.4"/></CheckBox.RenderTransform></CheckBox>
               <StackPanel Margin="0,0,12,0">
                 <TextBlock Text="👀  Vagthund" FontSize="15.5" FontWeight="SemiBold"/>
-                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Giver besked, når noget nyt sætter sig fast: opstartsprogrammer, planlagte opgaver, tjenester, browserudvidelser og Defender-undtagelser. Du kan slå det fra med ét klik."/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Giver besked, når noget nyt sætter sig fast, eller når noget kendt pludselig peger på et andet program: opstart, planlagte opgaver, tjenester, browserudvidelser og Defender-undtagelser."/>
+                <TextBlock Name="VagtWdInfo" Margin="0,8,0,0" FontSize="12" Foreground="#6FA8FF"/>
               </StackPanel>
             </DockPanel>
           </Border>
@@ -1780,9 +1786,9 @@ function Show-Result-Rest {
   $c4 = @($f | Where-Object Niveau -eq 4).Count; $c3 = @($f | Where-Object Niveau -eq 3).Count
   $c2 = @($f | Where-Object Niveau -eq 2).Count; $cb = @($f | Where-Object Kategori -eq 'Bloat').Count
   $ui.CntSpace.Text = '…'   # udfyldes af Measure-PlanClean med samme beregning som oprydningen
-  $score = [math]::Max(0, 100 - 35 * $c4 - 10 * $c3 - 2 * $c2 - [math]::Min(10, $cb))
+  $score = [math]::Max(0, 100 - 40 * $c4 - 12 * $c3)   # kun sikkerhed (ikke bloat eller plads), så et fald betyder noget
   $color = if ($score -ge 80) { '#4ADE80' } elseif ($score -ge 50) { '#F6D44A' } elseif ($score -ge 25) { '#FFA24A' } else { '#FF5D6C' }
-  $ui.ScoreLabel.Text = if ($score -ge 80) { 'god stand' } elseif ($score -ge 50) { 'kan forbedres' } elseif ($score -ge 25) { 'bør tjekkes' } else { 'kritisk' }
+  $ui.ScoreLabel.Text = if ($c4) { 'sikkerhed: handling' } elseif ($c3) { 'sikkerhed: tjek' } else { 'sikkerhed: god' }
   Animate-Score $score $color
   $ui.Verdict.Text = if ($c4) { 'Kritiske fund. Læs analysen nedenfor.' } elseif ($c3) { 'Ingen kritiske fund, men nogle ting bør tjekkes.' } else { "Ser fornuftigt ud. Kig på Oprydning og Opstart, hvis pc'en er langsom." }
   $ui.Story.Text = Build-Story $r
@@ -2355,7 +2361,6 @@ function Build-Plan($r) {
     if ($script:Tweaks.Ram -and $script:Tweaks.Ram.Gain) { $bits += "RAM kører $($script:Tweaks.Ram.Cfg) i stedet for $($script:Tweaks.Ram.Rated) MT/s" }
     $lowHz = @($script:Tweaks.Hz | Where-Object { $_.Max -gt $_.Cur + 1 }) | Select-Object -First 1
     if ($lowHz) { $bits += "skærmen kører $($lowHz.Cur) Hz, men kan $($lowHz.Max) Hz" }
-    if ($script:Tweaks.Drv -and $script:Tweaks.Drv.DrvDays -gt 120) { $bits += 'grafikdriveren er gammel' }
     [void]$steps.Add((New-Step 'tweaks' 'Få gratis ydelse' (($bits -join ' · ') + '. Se hvordan under Optimering.') 'Vis mig hvordan' $null))
   }
   if (-not (Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue)) {
@@ -2577,7 +2582,7 @@ function Get-TweakResults {
     $amd = (Get-CimInstance Win32_Processor | Select-Object -First 1).Manufacturer -match 'AMD'
     $prof = if ($amd -and $type -eq 'DDR5') { 'EXPO' } else { 'XMP' }
     $t.Ram = @{ Cfg = $cfg; Rated = $rated; Type = $type; Count = $mods.Count; Pn = $pn.Trim(); Board = $board; Prof = $prof
-                Gain = ($rated -gt $cfg + 150); Single = ($mods.Count -eq 1) }
+                Gain = ($cfg -gt 0 -and $rated -gt $cfg + 150); Single = ($mods.Count -eq 1); Unknown = ($cfg -le 0) }
   } catch { $t.Ram = $null }
   # ---- Skærme ----
   try {
@@ -2619,14 +2624,15 @@ function Show-Tweaks {
   $tips = 0
   # ---- RAM-kort ----
   $r = $t.Ram
+  $ui.RamNowLbl.Text = 'I BRUG'; $ui.RamCanLbl.Text = 'MODULET ER MÆRKET'
+  if ($r -and $r.Unknown) { $r = $null }
   if ($r) {
     $ui.RamNow.Text = "$($r.Cfg) MT/s"
     if ($r.Gain) {
       $tips++
-      Set-Badge 'Ram' 'tip' '💡 Gratis ydelse'
+      Set-Badge 'Ram' 'tip' "💡 Mulig forbedring · Avanceret"
       $ui.RamCan.Text = "$($r.Rated) MT/s"; $ui.RamArrow.Visibility = 'Visible'; $ui.RamCan.Visibility = 'Visible'; $ui.RamCanLbl.Visibility = 'Visible'
-      $pct = [math]::Round(($r.Rated - $r.Cfg) / $r.Cfg * 100)
-      $ui.RamText.Text = "Din $($r.Type) RAM ($($r.Pn)) er bygget til $($r.Rated) MT/s, men kører kun $($r.Cfg). Det er ca. $pct % langsommere end muligt. Det skyldes næsten altid, at $($r.Prof) ikke er slået til i BIOS. Det er en indstilling, som RAM-producenten selv har testet, så det er sikkert."
+      $ui.RamText.Text = "Din $($r.Type) RAM kører med $($r.Cfg) MT/s. Ud fra modelnummeret ($($r.Pn)) ser modulet ud til at være mærket $($r.Rated) MT/s. Den hastighed får man normalt ved at slå $($r.Prof) til i BIOS.`n`n$($r.Prof) er en profil, som RAM-producenten har testet, men teknisk set er det overclocking. Om det kører stabilt, afhænger af dit bundkort og din processor. Hvor meget hurtigere spil bliver, varierer fra spil til spil."
     } else {
       Set-Badge 'Ram' 'good' '✓ Alt godt'
       $ui.RamArrow.Visibility = 'Collapsed'; $ui.RamCan.Visibility = 'Collapsed'; $ui.RamCanLbl.Visibility = 'Collapsed'
@@ -2638,9 +2644,9 @@ function Show-Tweaks {
             elseif ($r.Board -match '(?i)micro-star|msi') { "I MSI-BIOS: øverst til venstre findes en $($r.Prof)-knap. Slå den til (Profile 1)." }
             elseif ($r.Board -match '(?i)asrock') { "I ASRock-BIOS: OC Tweaker → DRAM Configuration → Load $($r.Prof) Setting → Profile 1." }
             else { "Find indstillingen $($r.Prof) (eller 'Memory Profile') i BIOS, og vælg Profile 1." }
-    $ui.RamStepsText.Text = "1.  Tryk på 'Genstart til BIOS' (eller genstart, og tryk gentagne gange på Del, mens pc'en starter).`n2.  $bios`n3.  Tryk F10 for at gemme og genstarte.`n4.  Åbn PC-Tjek igen, og tryk 'Tjek igen'. Nu bør der stå $($r.Rated) MT/s.`n`nStarter pc'en ikke bagefter, venter den typisk lidt og nulstiller selv. Ellers så slå $($r.Prof) fra igen."
+    $ui.RamStepsText.Text = "Avanceret: gør det kun, hvis du er tryg ved at ændre i BIOS.`n`n1.  Tryk på 'Genstart til BIOS' (eller genstart, og tryk gentagne gange på Del, mens pc'en starter).`n2.  $bios`n3.  Tryk F10 for at gemme og genstarte.`n4.  Åbn PC-Tjek igen, og tryk 'Tjek igen'. Nu bør der stå $($r.Rated) MT/s.`n`nStarter pc'en ikke bagefter, venter den typisk lidt og nulstiller selv. Ellers så slå $($r.Prof) fra igen."
     $ui.RamAction.Content = '🔁  Genstart til BIOS'; $ui.RamAction.Visibility = $(if ($r.Gain) { 'Visible' } else { 'Collapsed' })
-  } else { Set-Badge 'Ram' 'info' 'Kunne ikke læses'; $ui.RamText.Text = 'Windows ville ikke oplyse RAM-hastigheden.' }
+  } else { Set-Badge 'Ram' 'info' 'Kunne ikke måles'; $ui.RamNow.Text = '–'; $ui.RamArrow.Visibility = 'Collapsed'; $ui.RamCan.Visibility = 'Collapsed'; $ui.RamCanLbl.Visibility = 'Collapsed'; $ui.RamText.Text = 'Windows oplyser ikke RAM-hastigheden på denne pc, så den kan ikke vurderes.'; $ui.RamAction.Visibility = 'Collapsed' }
 
   # ---- Skærm-kort ----
   $hz = @($t.Hz)
@@ -2666,15 +2672,18 @@ function Show-Tweaks {
   # ---- Driver/BIOS-kort ----
   $d = $t.Drv
   if ($d) {
-    $ui.DrvNowLbl.Text = 'GRAFIKDRIVER'; $ui.DrvCanLbl.Text = 'BIOS'; $ui.DrvArrow.Text = '·'
-    $ui.DrvNow.Text = Fmt-Age $d.DrvDays; $ui.DrvCan.Text = Fmt-Age $d.BiosDays
+    $ui.DrvNowLbl.Text = 'GRAFIKDRIVER (INSTALLERET)'; $ui.DrvCanLbl.Text = 'BIOS (INSTALLERET)'; $ui.DrvArrow.Text = '·'
+    $ver = [string]$d.DrvVer
+    if ($d.Gpu -match '(?i)nvidia' -and $ver -match '\d+\.\d+\.\d(\d)\.(\d{2})(\d{2})$') { $ver = "$($matches[1])$($matches[2]).$($matches[3])" }
+    $ui.DrvNow.Text = $ver; $ui.DrvCan.Text = [string]$d.BiosVer
     $ui.DrvCan.Foreground = $ui.DrvNow.Foreground
     $oldDrv = $d.DrvDays -gt 120; $oldBios = $d.BiosDays -gt 730
     $parts = @()
-    $parts += "Grafikdriveren til $($d.Gpu) er fra $(if ($d.DrvDate) { $d.DrvDate.ToString('dd-MM-yyyy') } else { '?' })." + $(if ($oldDrv) { ' Nyere drivere giver ofte bedre ydelse i nye spil og retter fejl.' } else { ' Den er ret ny. 👍' })
-    $parts += "BIOS'en ($($d.BiosVer)) på dit $($d.Board) er fra $(if ($d.BiosDate) { $d.BiosDate.ToString('dd-MM-yyyy') } else { '?' })." + $(if ($oldBios) { ' En nyere BIOS kan give bedre stabilitet, RAM-kompatibilitet og sikkerhedsrettelser. Det er dog en større operation, så kun hvis du er tryg ved det.' } else { ' Den er fin.' })
+    $parts += "Grafikdriver til $($d.Gpu): version $ver fra $(if ($d.DrvDate) { $d.DrvDate.ToString('dd-MM-yyyy') } else { '?' }) ($(Fmt-Age $d.DrvDays) gammel)."
+    $parts += "BIOS på $($d.Board): $($d.BiosVer) fra $(if ($d.BiosDate) { $d.BiosDate.ToString('dd-MM-yyyy') } else { '?' }) ($(Fmt-Age $d.BiosDays) gammel)."
+    $parts += "Datoen alene siger ikke, om der findes en relevant opdatering. Det kan kun producenten svare på. Tryk på knapperne for at tjekke hos dem."
     $ui.DrvText.Text = $parts -join "`n`n"
-    if ($oldDrv) { $tips++; Set-Badge 'Drv' 'tip' '💡 Kan opdateres' } elseif ($oldBios) { Set-Badge 'Drv' 'info' 'ℹ BIOS er ældre' } else { Set-Badge 'Drv' 'good' '✓ Alt godt' }
+    if ($oldDrv -or $oldBios) { Set-Badge 'Drv' 'info' 'ℹ Tjek hos producenten' } else { Set-Badge 'Drv' 'good' '✓ Ret nye versioner' }
     if ($oldDrv) { $ui.DrvNow.Foreground = $Brush.ConvertFromString('#F6C344') }
     $ui.DrvStepsText.Text = "Grafikdriver:`n1.  Tryk på 'Opdatér grafikdriver'. Det åbner NVIDIA App / AMD Software (eller Windows Update).`n2.  Gå til Drivere, og tryk Hent/Installér.`n`nBIOS (kun hvis du vil):`n1.  Tryk på 'Find BIOS-opdatering', og åbn producentens side for $($d.Board).`n2.  Læs producentens vejledning grundigt. Sluk ALDRIG pc'en under en BIOS-opdatering.`n3.  Efter opdateringen skal $(if ($t.Ram) { $t.Ram.Prof } else { 'XMP' }) ofte slås til igen."
     $ui.DrvAction.Content = '⬇  Opdatér grafikdriver'; $ui.DrvAction.Visibility = 'Visible'
@@ -2750,7 +2759,16 @@ function Save-VagtCfg {
 function Load-Vagt {
   if (Test-Path $VagtCfg) { try { $j = Get-Content $VagtCfg -Raw | ConvertFrom-Json; $script:VagtLoading = $true; $ui.ChkDl.IsChecked = [bool]$j.Downloads; $ui.ChkWd.IsChecked = [bool]$j.Watchdog; $script:VagtLoading = $false } catch {} }
   $task = Get-VagtTask; $running = (Get-VagtProc).Count -gt 0
-  if ($task -and $running) {
+  $stat = $null; try { $stat = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw | ConvertFrom-Json } catch {}
+  $fmtT = { param($t) if ($t) { $d = [datetime]$t; if ($d.Date -eq (Get-Date).Date) { 'kl. ' + $d.ToString('HH:mm') } else { $d.ToString('dd-MM HH:mm') } } else { 'endnu ikke' } }
+  $dlOn = [bool]$ui.ChkDl.IsChecked; $wdOn = [bool]$ui.ChkWd.IsChecked
+  $ui.VagtDlInfo.Text = if (-not $dlOn) { 'Slået fra' } elseif ($running -and $stat) { "● Aktiv · senest kontrolleret $(& $fmtT $stat.DownloadsChecked)" } else { 'Venter på, at vagten kører' }
+  $ui.VagtWdInfo.Text = if (-not $wdOn) { 'Slået fra' } elseif ($running -and $stat) { "● Aktiv · senest kontrolleret $(& $fmtT $stat.WatchdogChecked)" } else { 'Venter på, at vagten kører' }
+  if ($task -and $running -and -not ($dlOn -or $wdOn)) {
+    $ui.VagtStatus.Text = 'Vagten kører, men begge tjek er slået fra'; $ui.VagtSub.Text = 'Slå mindst ét af tjekkene herunder til.'
+    $ui.VagtIconBg.Background = $Brush.ConvertFromString('#6B5313'); $ui.BtnVagtToggle.Content = 'Slå vagten fra'; $ui.BtnVagtToggle.Style = $win.FindResource([Windows.Controls.Button])
+    $ui.BtnVagtTest.IsEnabled = $true
+  } elseif ($task -and $running) {
     $ui.VagtStatus.Text = 'Vagten passer på din pc ✓'; $ui.VagtSub.Text = 'Kører i baggrunden og starter automatisk, når du logger ind.'
     $ui.VagtIconBg.Background = $Brush.ConvertFromString('#1E5A3A'); $ui.BtnVagtToggle.Content = 'Slå vagten fra'; $ui.BtnVagtToggle.Style = $win.FindResource([Windows.Controls.Button])
     $ui.BtnVagtTest.IsEnabled = $true
@@ -2787,8 +2805,8 @@ $ui.BtnVagtToggle.Add_Click({
   Load-Vagt
   $st = Get-Step 'vagt'; if ($st -and (Get-VagtTask)) { Set-StepState 'vagt' 'done' 'Slået til' }
 })
-$ui.ChkDl.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg } })
-$ui.ChkWd.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg } })
+$ui.ChkDl.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg; Load-Vagt } })
+$ui.ChkWd.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg; Load-Vagt } })
 $ui.BtnVagtRefresh.Add_Click({ Load-Vagt })
 $ui.BtnVagtTest.Add_Click({ try { [IO.File]::WriteAllText((Join-Path $JobBase 'vagt-test.flag'), 'test'); $ui.StatusText.Text = 'Kig nederst til højre om et par sekunder 👀' } catch {} })
 

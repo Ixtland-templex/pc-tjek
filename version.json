@@ -1,19 +1,20 @@
 {
-  "version": "2.14",
+  "version": "2.15",
   "date": "2026-11-24",
   "notes": [
-    "Ny: 🛡 Vagt med Download-vagt og Vagthund",
-    "Advarer, hvis du henter en farlig fil",
-    "Giver besked, når noget nyt sætter sig fast i opstarten"
+    "Ærlige Defender-resultater: \"intet fundet\", \"fundet\" eller \"kunne ikke verificeres\"",
+    "Scanningen ændrer nu intet. Defender-tjekket kører kun læsning",
+    "Vagthunden opdager også, når en kendt post pludselig peger på et nyt program",
+    "Vagt-siden viser, hvornår hvert tjek sidst kørte"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "061C8C4CF3E62C49352A26FFF8290B776E03AA0500DB8CADF3B55A8B10458FFD"
+      "sha256": "CCE11FDF7670FC7CDDF00FC373446B17FEEF2982867C92C7D0CF28581CDE823B"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "99C1CD9E99EFF4C2C4C708997EA2A2363DDE9ECF3C5F81C73ABB69D82B4394FB"
+      "sha256": "E2499AB8A465117F289FAAE5A204559B47B6DBAC4DE1ABD2A19D40F69E3E66E4"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
