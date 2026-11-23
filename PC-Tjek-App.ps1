@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.11'
+$AppVersion = '2.13'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -47,6 +47,7 @@ if (-not ('PcTjek.Row' -as [type])) { Add-Type -Language CSharp -TypeDefinition 
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
 namespace PcTjek {
   public class Row : INotifyPropertyChanged {
     public event PropertyChangedEventHandler PropertyChanged;
@@ -68,6 +69,51 @@ namespace PcTjek {
     public static void Dark(IntPtr h) {
       int on = 1; DwmSetWindowAttribute(h, 20, ref on, 4);           // mørk titellinje
       int col = 0x00140F0D; DwmSetWindowAttribute(h, 35, ref col, 4);  // titellinjefarve (#0D0F14)
+    }
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+    public short dmSpecVersion; public short dmDriverVersion; public short dmSize; public short dmDriverExtra; public int dmFields;
+    public int dmPositionX; public int dmPositionY; public int dmDisplayOrientation; public int dmDisplayFixedOutput;
+    public short dmColor; public short dmDuplex; public short dmYResolution; public short dmTTOption; public short dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+    public short dmLogPixels; public int dmBitsPerPel; public int dmPelsWidth; public int dmPelsHeight;
+    public int dmDisplayFlags; public int dmDisplayFrequency;
+    public int dmICMMethod; public int dmICMIntent; public int dmMediaType; public int dmDitherType;
+    public int dmReserved1; public int dmReserved2; public int dmPanningWidth; public int dmPanningHeight;
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DISPLAY_DEVICE {
+    public int cb;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+    public int StateFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+  }
+  public static class Screens {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplayDevices(string dev, uint i, ref DISPLAY_DEVICE dd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+    // Returnerer "enhed|skærmnavn|bredde|højde|nuværende Hz|max Hz ved samme opløsning" for hver aktiv skærm
+    public static string[] List() {
+      var list = new List<string>();
+      for (uint i = 0; i < 16; i++) {
+        var d = new DISPLAY_DEVICE(); d.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        if (!EnumDisplayDevices(null, i, ref d, 0)) break;
+        if ((d.StateFlags & 1) == 0) continue;
+        var cur = new DEVMODE(); cur.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        if (!EnumDisplaySettings(d.DeviceName, -1, ref cur)) continue;
+        int max = cur.dmDisplayFrequency;
+        var m = new DEVMODE(); m.dmSize = cur.dmSize;
+        for (int k = 0; k < 5000 && EnumDisplaySettings(d.DeviceName, k, ref m); k++) {
+          if (m.dmPelsWidth == cur.dmPelsWidth && m.dmPelsHeight == cur.dmPelsHeight && m.dmDisplayFrequency > max) max = m.dmDisplayFrequency;
+        }
+        var mon = new DISPLAY_DEVICE(); mon.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        string monName = EnumDisplayDevices(d.DeviceName, 0, ref mon, 0) ? mon.DeviceString : "";
+        list.Add(d.DeviceName + "|" + monName + "|" + cur.dmPelsWidth + "|" + cur.dmPelsHeight + "|" + cur.dmDisplayFrequency + "|" + max);
+      }
+      return list.ToArray();
     }
   }
 }
@@ -347,7 +393,7 @@ $ScanScript = {
   Phase 7 "Tjekker signaturer på $($files.Count) nye filer"
   $n = 0
   foreach ($f in $files) {
-    $n++; if ($n % 10 -eq 0) { Sub ($n / [math]::Max(1, $files.Count)) "$n af $($files.Count) filer tjekket" }
+    $n++; if ($n % 10 -eq 0) { Sub (0.7 * $n / [math]::Max(1, $files.Count)) "$n af $($files.Count) filer tjekket" }
     $isBin = $f.Extension.ToLower() -in '.exe', '.dll', '.msi', '.scr'
     $sg = if ($isBin) { Sig $f.FullName } else { 'script' }
     if ($sg -like 'Signeret*') { continue }
@@ -363,7 +409,9 @@ $ScanScript = {
     }
     # Kun "Bør gennemgås" (2) for de klassiske gemmesteder; resten er info (1)
     $rel = $f.FullName
-    $risky = ($f.Extension.ToLower() -in '.vbs', '.js', '.hta', '.scr', '.jar') -or
+    $hideout = $rel -match '(?i)\\(Temp|Users\\Public|Start Menu\\Programs\\Startup)\\' -or $rel -match '(?i)\\AppData\\(Roaming|Local)\\[^\\]+$' -or $rel -match '(?i)^C:\\ProgramData\\[^\\]+$'
+    $risky = ($f.Extension.ToLower() -in '.hta', '.scr') -or
+             ($f.Extension.ToLower() -in '.vbs', '.js', '.jar', '.ps1', '.bat', '.cmd' -and $hideout) -or
              ($rel -match '(?i)\\Users\\Public\\') -or
              ($rel -match '(?i)\\AppData\\(Roaming|Local)\\[^\\]+\.(exe|dll|scr)$') -or
              ($rel -match '(?i)^C:\\ProgramData\\[^\\]+\.(exe|dll|scr)$') -or
@@ -373,6 +421,29 @@ $ScanScript = {
     Add-Find $risk 'Ny fil' $f.Name "$([math]::Round($f.Length / 1KB)) KB · oprettet $($f.CreationTime) · $sg" `
       'Usigneret programfil oprettet for nylig et sted, hvor malware ofte lægger sig. Mange er ufarlige (spil, værktøjer). Brug "Tjek på VirusTotal" ved tvivl.' $f.FullName 'file' $null
     $AllFinds[$AllFinds.Count - 1].SHA256 = $sha
+  }
+
+  # Lad Defender selv tjekke de markerede filer (bruger også Microsofts cloud-database). Rene filer nedgraderes.
+  $mpcmd = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+  $toCheck = @($AllFinds | Where-Object { $_.Kategori -eq 'Ny fil' -and $_.Niveau -ge 2 -and $_.Sti } | Select-Object -First 80)
+  if ($toCheck.Count -and (Test-Path $mpcmd)) {
+    Status "Defender tjekker $($toCheck.Count) markerede filer"
+    $ci = 0
+    foreach ($x in $toCheck) {
+      $ci++; Sub (0.7 + 0.3 * $ci / $toCheck.Count) "Defender tjekker fil $ci af $($toCheck.Count)"
+      if (-not (Test-Path -LiteralPath $x.Sti)) { continue }
+      $null = & $mpcmd -Scan -ScanType 3 -File $x.Sti 2>&1
+      $code = $LASTEXITCODE
+      if ($code -eq 0) {
+        $x.Niveau = 1; $x.Risiko = 'Lav'; $x.Detalje = '✓ Tjekket af Defender: ren · ' + $x.Detalje
+        $x.Raad = 'Defender har tjekket filen og fandt intet. Du behøver ikke gøre noget.'
+      } elseif ($code -eq 2) {
+        $x.Niveau = 4; $x.Risiko = 'Kritisk'; $x.Kategori = 'Trussel'; $x.Titel = "Defender fandt malware: $(Split-Path $x.Sti -Leaf)"
+        $x.Hvorfor = 'Defender fandt malware i filen under tjekket og har forsøgt at fjerne den.'
+        $x.Raad = 'Kør trinnet "Fjern virus" på Overblik for at være sikker på, at alt er væk.'
+        Add-Time (Get-Date) 'Defender' "Malware fundet ved tjek: $(Split-Path $x.Sti -Leaf)" $x.Sti
+      }
+    }
   }
 
   # ---------- 6. Browser ----------
@@ -864,6 +935,7 @@ $SysInfoScript = {
         </StackPanel>
         <StackPanel Grid.Row="1">
           <RadioButton Name="NavHome"    Style="{StaticResource Nav}" GroupName="nav" IsChecked="True" Content="🏠   Overblik"/>
+          <RadioButton Name="NavTweaks"  Style="{StaticResource Nav}" GroupName="nav" Content="⚡   Optimering"/>
           <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
           <RadioButton Name="NavTime"    Style="{StaticResource Nav}" GroupName="nav" Content="🕒   Hændelsesforløb"/>
           <RadioButton Name="NavStart"   Style="{StaticResource Nav}" GroupName="nav" Content="🚀   Opstart"/>
@@ -1006,6 +1078,112 @@ $SysInfoScript = {
                    Text="Analysen vises her efter scanningen: hvad der er fundet, hvad en evt. falsk installer gjorde, og hvad du bør gøre."/>
         </Border>
         </Grid>
+      </Grid>
+
+      <!-- OPTIMERING -->
+      <Grid Name="PageTweaks" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,16">
+          <Button Name="BtnTweakRefresh" DockPanel.Dock="Right" Content="⟳  Tjek igen" VerticalAlignment="Center" Margin="0"/>
+          <StackPanel>
+            <TextBlock Style="{StaticResource H1}" Text="Optimering"/>
+            <TextBlock Name="TweakSummary" Style="{StaticResource Sub}" Text="Gratis ydelse, der ofte bliver glemt. Intet ændres, uden at du selv gør det."/>
+          </StackPanel>
+        </DockPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🧠" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Hukommelse (RAM)" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="RamBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="RamBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="RamNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="RamNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="RamArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="RamCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="RamCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="RamText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="RamSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="RamStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="RamAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="RamAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="RamHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🖥" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Skærmens opdateringshastighed" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="HzBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="HzBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="HzNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="HzNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="HzArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="HzCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="HzCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="HzText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="HzSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="HzStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="HzAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="HzAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="HzHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🔧" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Drivere og BIOS" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="DrvBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="DrvBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="DrvNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="DrvNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="DrvArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="DrvCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="DrvCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="DrvText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="DrvSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="DrvStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="DrvAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="DrvAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="DrvHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+          </StackPanel>
+        </ScrollViewer>
       </Grid>
 
       <!-- FUND -->
@@ -1349,12 +1527,13 @@ function With-RestorePoint($why, $ctx, [scriptblock]$then) {
 # =====================================================================
 #  Navigation
 # =====================================================================
-$pages = @{ NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
+$pages = @{ NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
 foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
     foreach ($k in $pages.Keys) { $ui[$pages[$k]].Visibility = $(if ($ui[$k].IsChecked) { 'Visible' } else { 'Collapsed' }) }
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health }
+    if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
   })
 }
 
@@ -2101,6 +2280,15 @@ function Build-Plan($r) {
   $cs = New-Step 'clean' 'Ryd op i midlertidige filer' 'Måler, hvor meget der kan ryddes...' 'Ryd op' $null
   $cs.Valgt = $false
   [void]$steps.Add($cs)
+  try { if (-not $script:TweaksLoaded) { Show-Tweaks } } catch { Log "Tweak-fejl: $_" }
+  if ($script:TweakTips) {
+    $bits = @()
+    if ($script:Tweaks.Ram -and $script:Tweaks.Ram.Gain) { $bits += "RAM kører $($script:Tweaks.Ram.Cfg) i stedet for $($script:Tweaks.Ram.Rated) MT/s" }
+    $lowHz = @($script:Tweaks.Hz | Where-Object { $_.Max -gt $_.Cur + 1 }) | Select-Object -First 1
+    if ($lowHz) { $bits += "skærmen kører $($lowHz.Cur) Hz, men kan $($lowHz.Max) Hz" }
+    if ($script:Tweaks.Drv -and $script:Tweaks.Drv.DrvDays -gt 120) { $bits += 'grafikdriveren er gammel' }
+    [void]$steps.Add((New-Step 'tweaks' 'Få gratis ydelse' (($bits -join ' · ') + '. Se hvordan under Optimering.') 'Vis mig hvordan' $null))
+  }
   [void]$steps.Add((New-Step 'update' 'Opdatér dine programmer' 'Gamle programmer er en af de mest almindelige måder, virus kommer ind på. Opdateringen kører i baggrunden.' 'Opdatér alt' $null))
   $ext = @($f | Where-Object { $_.Kategori -eq 'Browser' -and $_.Niveau -ge 2 })
   if ($ext.Count) {
@@ -2243,6 +2431,7 @@ function Run-Step($id, [bool]$auto) {
       $ok = 0; foreach ($b in $st.Tag) { try { Remove-AppxPackage -Package $b.Data.Package -ErrorAction Stop; $ok++ } catch {} }
       Set-StepState 'bloat' 'done' "$ok fjernet"; Log "Plan: bloat $ok"
     }
+    'tweaks' { $ui.NavTweaks.IsChecked = $true; Set-StepState 'tweaks' 'done' 'Åbnet' }
     { $_ -like 'review*' } {
       $ui.NavFind.IsChecked = $true
       $ui.FilterText.Text = ''
@@ -2285,6 +2474,168 @@ $ui.BtnDetails.Add_Click({
   $ui.PlanCard.Visibility = $(if ($script:ShowDetails) { 'Collapsed' } else { 'Visible' })
   $ui.BtnDetails.Content = $(if ($script:ShowDetails) { '← Tilbage til planen' } else { 'Vis detaljer' })
 })
+
+# =====================================================================
+#  OPTIMERING: RAM (XMP/EXPO), skærm-Hz, driver- og BIOS-alder
+# =====================================================================
+$script:Tweaks = $null
+function Get-RamRated([string]$pn) {
+  $pn = $pn.Trim().ToUpper()
+  $v = $null
+  if ($pn -match 'F[45]-(\d{4})[A-Z]') { $v = [int]$matches[1] }                     # G.Skill: F5-6000J3038...
+  elseif ($pn -match '^KF\d(\d{2})C\d') { $v = [int]$matches[1] * 100 }              # Kingston Fury: KF560C36 -> 6000
+  elseif ($pn -match '^C[TP]\d+G(\d{2})C\d') { $v = [int]$matches[1] * 100 }         # Crucial: CP16G60C36 -> 6000
+  elseif ($pn -match '(\d{4})H?C\d{2}') { $v = [int]$matches[1] }                    # Corsair/TeamGroup: ...B6000C36 / 6000HC38
+  if ($v -and ($v -lt 1600 -or $v -gt 9600)) { $v = $null }
+  return $v
+}
+function Get-TweakResults {
+  $t = @{}
+  # ---- RAM ----
+  try {
+    $mods = @(Get-CimInstance Win32_PhysicalMemory)
+    $cfg = [int](($mods | Measure-Object ConfiguredClockSpeed -Maximum).Maximum)
+    $spd = [int](($mods | Measure-Object Speed -Maximum).Maximum)
+    $pn = [string]$mods[0].PartNumber
+    $type = switch ([int]$mods[0].SMBIOSMemoryType) { 26 { 'DDR4' } 34 { 'DDR5' } default { '' } }
+    $rated = Get-RamRated $pn
+    if (-not $rated -or $rated -lt $spd) { $rated = $spd }
+    $board = (Get-CimInstance Win32_BaseBoard).Manufacturer
+    $amd = (Get-CimInstance Win32_Processor | Select-Object -First 1).Manufacturer -match 'AMD'
+    $prof = if ($amd -and $type -eq 'DDR5') { 'EXPO' } else { 'XMP' }
+    $t.Ram = @{ Cfg = $cfg; Rated = $rated; Type = $type; Count = $mods.Count; Pn = $pn.Trim(); Board = $board; Prof = $prof
+                Gain = ($rated -gt $cfg + 150); Single = ($mods.Count -eq 1) }
+  } catch { $t.Ram = $null }
+  # ---- Skærme ----
+  try {
+    $t.Hz = @([PcTjek.Screens]::List() | ForEach-Object {
+      $p = $_ -split '\|'
+      [pscustomobject]@{ Dev = $p[0]; Name = $p[1]; W = [int]$p[2]; H = [int]$p[3]; Cur = [int]$p[4]; Max = [int]$p[5] }
+    })
+    $friendly = @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object { (($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join '').Trim() })
+    for ($i = 0; $i -lt $t.Hz.Count; $i++) { if (($t.Hz[$i].Name -match '(?i)generic|generisk|pnp|^$') -and $friendly[$i]) { $t.Hz[$i].Name = $friendly[$i] } }
+  } catch { $t.Hz = @() }
+  # ---- Driver og BIOS ----
+  try {
+    $g = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage' } | Select-Object -First 1
+    $bios = Get-CimInstance Win32_BIOS
+    $mb = Get-CimInstance Win32_BaseBoard
+    $t.Drv = @{ Gpu = $g.Name; DrvDate = $g.DriverDate; DrvVer = $g.DriverVersion
+                DrvDays = $(if ($g.DriverDate) { [int]((Get-Date) - $g.DriverDate).TotalDays } else { $null })
+                BiosVer = $bios.SMBIOSBIOSVersion; BiosDate = $bios.ReleaseDate
+                BiosDays = $(if ($bios.ReleaseDate) { [int]((Get-Date) - $bios.ReleaseDate).TotalDays } else { $null })
+                Board = "$($mb.Manufacturer) $($mb.Product)".Trim() }
+  } catch { $t.Drv = $null }
+  $script:Tweaks = $t
+  return $t
+}
+function Set-Badge($p, $state, $text) {
+  $c = switch ($state) { 'good' { @('#173325', '#4ADE80') } 'tip' { @('#3A2E12', '#F6C344') } default { @('#1D2433', '#8AB4FF') } }
+  $ui["${p}Badge"].Background = $Brush.ConvertFromString($c[0])
+  $ui["${p}BadgeText"].Foreground = $Brush.ConvertFromString($c[1])
+  $ui["${p}BadgeText"].Text = $text
+}
+function Fmt-Age($days) {
+  if ($null -eq $days) { return 'ukendt' }
+  if ($days -lt 31) { return "$days dage" }
+  if ($days -lt 365) { return "$([math]::Round($days / 30.4)) mdr." }
+  return "$([math]::Round($days / 365.0, 1).ToString('0.#')) år"
+}
+function Show-Tweaks {
+  $t = Get-TweakResults
+  $tips = 0
+  # ---- RAM-kort ----
+  $r = $t.Ram
+  if ($r) {
+    $ui.RamNow.Text = "$($r.Cfg) MT/s"
+    if ($r.Gain) {
+      $tips++
+      Set-Badge 'Ram' 'tip' '💡 Gratis ydelse'
+      $ui.RamCan.Text = "$($r.Rated) MT/s"; $ui.RamArrow.Visibility = 'Visible'; $ui.RamCan.Visibility = 'Visible'; $ui.RamCanLbl.Visibility = 'Visible'
+      $pct = [math]::Round(($r.Rated - $r.Cfg) / $r.Cfg * 100)
+      $ui.RamText.Text = "Din $($r.Type) RAM ($($r.Pn)) er bygget til $($r.Rated) MT/s, men kører kun $($r.Cfg). Det er ca. $pct % langsommere end muligt. Det skyldes næsten altid, at $($r.Prof) ikke er slået til i BIOS. Det er en indstilling, som RAM-producenten selv har testet, så det er sikkert."
+    } else {
+      Set-Badge 'Ram' 'good' '✓ Alt godt'
+      $ui.RamArrow.Visibility = 'Collapsed'; $ui.RamCan.Visibility = 'Collapsed'; $ui.RamCanLbl.Visibility = 'Collapsed'
+      $ui.RamText.Text = "Din $($r.Type) RAM kører med sin fulde hastighed ($($r.Cfg) MT/s, $($r.Count) moduler). Der er ikke mere at hente her."
+    }
+    if ($r.Single) { $ui.RamText.Text += "`n`n💡 Du har kun ét RAM-modul. Med to moduler (dual channel) får processoren næsten dobbelt så hurtig adgang til hukommelsen. Det kan mærkes i spil." }
+    $bios = if ($r.Board -match '(?i)gigabyte') { "I GIGABYTE-BIOS: Tweaker (eller Easy Mode) → Extreme Memory Profile (X.M.P.) → vælg Profile 1." }
+            elseif ($r.Board -match '(?i)asus') { "I ASUS-BIOS: Ai Tweaker (eller tryk F7 for Advanced) → Ai Overclock Tuner → $($r.Prof) I." }
+            elseif ($r.Board -match '(?i)micro-star|msi') { "I MSI-BIOS: øverst til venstre findes en $($r.Prof)-knap. Slå den til (Profile 1)." }
+            elseif ($r.Board -match '(?i)asrock') { "I ASRock-BIOS: OC Tweaker → DRAM Configuration → Load $($r.Prof) Setting → Profile 1." }
+            else { "Find indstillingen $($r.Prof) (eller 'Memory Profile') i BIOS, og vælg Profile 1." }
+    $ui.RamStepsText.Text = "1.  Tryk på 'Genstart til BIOS' (eller genstart, og tryk gentagne gange på Del, mens pc'en starter).`n2.  $bios`n3.  Tryk F10 for at gemme og genstarte.`n4.  Åbn PC-Tjek igen, og tryk 'Tjek igen'. Nu bør der stå $($r.Rated) MT/s.`n`nStarter pc'en ikke bagefter, venter den typisk lidt og nulstiller selv. Ellers så slå $($r.Prof) fra igen."
+    $ui.RamAction.Content = '🔁  Genstart til BIOS'; $ui.RamAction.Visibility = $(if ($r.Gain) { 'Visible' } else { 'Collapsed' })
+  } else { Set-Badge 'Ram' 'info' 'Kunne ikke læses'; $ui.RamText.Text = 'Windows ville ikke oplyse RAM-hastigheden.' }
+
+  # ---- Skærm-kort ----
+  $hz = @($t.Hz)
+  if ($hz.Count) {
+    $low = @($hz | Where-Object { $_.Max -gt $_.Cur + 1 })
+    $first = if ($low.Count) { $low[0] } else { $hz[0] }
+    $ui.HzNow.Text = "$($first.Cur) Hz"
+    $lines = ($hz | ForEach-Object { "•  $(if ($_.Name) { $_.Name } else { $_.Dev }): $($_.W)×$($_.H) på $($_.Cur) Hz$(if ($_.Max -gt $_.Cur + 1) { "  →  kan køre $($_.Max) Hz" } else { '  ✓' })" }) -join "`n"
+    if ($low.Count) {
+      $tips++
+      Set-Badge 'Hz' 'tip' '💡 Gratis ydelse'
+      $ui.HzCan.Text = "$($first.Max) Hz"; $ui.HzArrow.Visibility = 'Visible'; $ui.HzCan.Visibility = 'Visible'; $ui.HzCanLbl.Visibility = 'Visible'
+      $ui.HzText.Text = "Din skærm kan vise $($first.Max) billeder i sekundet, men Windows bruger kun $($first.Cur). Alt føles mere flydende, når den kører fuld hastighed, også musen og scrolling.`n`n$lines"
+    } else {
+      Set-Badge 'Hz' 'good' '✓ Alt godt'
+      $ui.HzArrow.Visibility = 'Collapsed'; $ui.HzCan.Visibility = 'Collapsed'; $ui.HzCanLbl.Visibility = 'Collapsed'
+      $ui.HzText.Text = "Dine skærme kører allerede med den højeste hastighed, de understøtter.`n`n$lines"
+    }
+    $ui.HzStepsText.Text = "1.  Tryk på 'Åbn skærmindstillinger'.`n2.  Vælg skærmen øverst (hvis du har flere).`n3.  Under 'Vælg en opdateringshastighed' vælger du den højeste værdi$(if ($low.Count) { " ($($first.Max) Hz)" }).`n4.  Tryk 'Behold ændringer'.`n`nTip: brug DisplayPort-kablet til skærme over 144 Hz. Gamle HDMI-kabler kan begrænse hastigheden."
+    $ui.HzAction.Content = '🖥  Åbn skærmindstillinger'; $ui.HzAction.Visibility = 'Visible'
+  } else { Set-Badge 'Hz' 'info' 'Kunne ikke læses'; $ui.HzText.Text = 'Kunne ikke læse skærmens indstillinger.' }
+
+  # ---- Driver/BIOS-kort ----
+  $d = $t.Drv
+  if ($d) {
+    $ui.DrvNowLbl.Text = 'GRAFIKDRIVER'; $ui.DrvCanLbl.Text = 'BIOS'; $ui.DrvArrow.Text = '·'
+    $ui.DrvNow.Text = Fmt-Age $d.DrvDays; $ui.DrvCan.Text = Fmt-Age $d.BiosDays
+    $ui.DrvCan.Foreground = $ui.DrvNow.Foreground
+    $oldDrv = $d.DrvDays -gt 120; $oldBios = $d.BiosDays -gt 730
+    $parts = @()
+    $parts += "Grafikdriveren til $($d.Gpu) er fra $(if ($d.DrvDate) { $d.DrvDate.ToString('dd-MM-yyyy') } else { '?' })." + $(if ($oldDrv) { ' Nyere drivere giver ofte bedre ydelse i nye spil og retter fejl.' } else { ' Den er ret ny. 👍' })
+    $parts += "BIOS'en ($($d.BiosVer)) på dit $($d.Board) er fra $(if ($d.BiosDate) { $d.BiosDate.ToString('dd-MM-yyyy') } else { '?' })." + $(if ($oldBios) { ' En nyere BIOS kan give bedre stabilitet, RAM-kompatibilitet og sikkerhedsrettelser. Det er dog en større operation, så kun hvis du er tryg ved det.' } else { ' Den er fin.' })
+    $ui.DrvText.Text = $parts -join "`n`n"
+    if ($oldDrv) { $tips++; Set-Badge 'Drv' 'tip' '💡 Kan opdateres' } elseif ($oldBios) { Set-Badge 'Drv' 'info' 'ℹ BIOS er ældre' } else { Set-Badge 'Drv' 'good' '✓ Alt godt' }
+    if ($oldDrv) { $ui.DrvNow.Foreground = $Brush.ConvertFromString('#F6C344') }
+    $ui.DrvStepsText.Text = "Grafikdriver:`n1.  Tryk på 'Opdatér grafikdriver'. Det åbner NVIDIA App / AMD Software (eller Windows Update).`n2.  Gå til Drivere, og tryk Hent/Installér.`n`nBIOS (kun hvis du vil):`n1.  Tryk på 'Find BIOS-opdatering', og åbn producentens side for $($d.Board).`n2.  Læs producentens vejledning grundigt. Sluk ALDRIG pc'en under en BIOS-opdatering.`n3.  Efter opdateringen skal $(if ($t.Ram) { $t.Ram.Prof } else { 'XMP' }) ofte slås til igen."
+    $ui.DrvAction.Content = '⬇  Opdatér grafikdriver'; $ui.DrvAction.Visibility = 'Visible'
+    $ui.DrvAction2.Content = '🔎  Find BIOS-opdatering'; $ui.DrvAction2.Visibility = 'Visible'
+  } else { Set-Badge 'Drv' 'info' 'Kunne ikke læses' }
+
+  $ui.TweakSummary.Text = if ($tips) { "💡 $tips gratis forbedring$(if ($tips -gt 1) { 'er' }) fundet. Intet ændres, uden at du selv gør det." } else { '✓ Din pc er sat godt op. Der er ingen gratis ydelse at hente lige nu.' }
+  $script:TweakTips = $tips
+  $script:TweaksLoaded = $true
+}
+foreach ($p in 'Ram', 'Hz', 'Drv') {
+  $ui["${p}How"].Tag = $p
+  $ui["${p}How"].Add_Click({ param($sender, $e)
+    $q = $sender.Tag; $b = $ui["${q}Steps"]
+    $b.Visibility = $(if ($b.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' })
+    $sender.Content = $(if ($b.Visibility -eq 'Visible') { '✕  Skjul guiden' } else { '📖  Sådan gør du' })
+  })
+}
+$ui.RamAction.Add_Click({
+  if ((Msg "Pc'en genstarter om 10 sekunder og åbner BIOS'en direkte.`n`nGem dit arbejde først. Guiden står i PC-Tjek under 'Sådan gør du'. Tag gerne et billede af den med telefonen.`n`nGenstart nu?" 'Genstart til BIOS' 'YesNo' 'Question') -ne 'Yes') { return }
+  $o = & shutdown.exe /r /fw /t 10 2>&1
+  if ($LASTEXITCODE -ne 0) { Msg "Din pc understøtter ikke genstart direkte til BIOS fra Windows.`n`nGenstart i stedet, og tryk gentagne gange på Del-tasten, mens pc'en starter." 'Genstart til BIOS' | Out-Null }
+})
+$ui.HzAction.Add_Click({ Start-Process 'ms-settings:display-advanced' })
+$ui.DrvAction.Add_Click({
+  $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  $amd = "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe"
+  if ($nv) { Start-Process $nv } elseif (Test-Path $amd) { Start-Process $amd } else { Start-Process 'ms-settings:windowsupdate-optionalupdates' }
+})
+$ui.DrvAction2.Add_Click({
+  $b = if ($script:Tweaks -and $script:Tweaks.Drv) { $script:Tweaks.Drv.Board } else { 'bundkort' }
+  Start-Process ("https://www.google.com/search?q=" + [Uri]::EscapeDataString("$b BIOS download support"))
+})
+$ui.BtnTweakRefresh.Add_Click({ Show-Tweaks })
 
 # =====================================================================
 #  Eksport

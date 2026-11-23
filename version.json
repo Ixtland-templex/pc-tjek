@@ -1,15 +1,15 @@
 {
-  "version": "2.11",
+  "version": "2.13",
   "date": "2026-11-24",
   "notes": [
-    "Hvert fund siger nu, hvad du skal gøre",
-    "Ny knap: Markér som OK, så fundet ikke vises igen",
-    "Færre falske alarmer: Windows-kernen, Store-apps og trafik på dit eget netværk"
+    "Ny side: ⚡ Optimering",
+    "Tjekker om din RAM kører med fuld hastighed (XMP/EXPO)",
+    "Tjekker skærmens Hz og alderen på driver og BIOS"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "376AEC37BEE3FC103F60738E2989BDFC56D80DB6343B6F261AFB7643EB41C18B"
+      "sha256": "9CC4F3B5C6C328DB24DF31B32AFF87A2F74D3A03E9DDAE7BA71D4CACE23A4F6F"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
