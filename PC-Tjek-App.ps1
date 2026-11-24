@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.55'
+$AppVersion = '2.56'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -4419,6 +4419,54 @@ $ui.BtnUpdRun.Add_Click({
 #  Ydelse og helbred
 # =====================================================================
 function HRow($ok, $name, $val, $note) { $r = New-Object PcTjek.Row; $r.Status = $(switch ($ok) { 2 { '🟢' } 1 { '🟡' } 0 { '🔴' } default { 'ℹ' } }); $r.Navn = $name; $r.Info = [string]$val; $r.Note = $note; $r }
+$HagsSource = @'
+using System;
+using System.Runtime.InteropServices;
+namespace PcTjek {
+  public static class Hags {
+    [StructLayout(LayoutKind.Sequential)] struct AdapterInfo { public uint hAdapter; public uint LuidLow; public int LuidHigh; public uint NumOfSources; public int Precise; }
+    [StructLayout(LayoutKind.Sequential)] struct EnumAdapters2 { public uint NumAdapters; public IntPtr pAdapters; }
+    [StructLayout(LayoutKind.Sequential)] struct QueryInfo { public uint hAdapter; public int Type; public IntPtr pData; public uint DataSize; }
+    [StructLayout(LayoutKind.Sequential)] struct CloseAdapter { public uint hAdapter; }
+    [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref EnumAdapters2 e);
+    [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QueryInfo q);
+    [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CloseAdapter c);
+    // -1 = ukendt, 0 = understøttes ikke, 1 = understøttet men slået fra, 2 = slået til
+    public static int State() {
+      int best = -1;
+      EnumAdapters2 e = new EnumAdapters2();
+      if (D3DKMTEnumAdapters2(ref e) != 0 || e.NumAdapters == 0) return -1;
+      int sz = Marshal.SizeOf(typeof(AdapterInfo));
+      IntPtr buf = Marshal.AllocHGlobal(sz * (int)e.NumAdapters);
+      IntPtr caps = Marshal.AllocHGlobal(4);
+      try {
+        e.pAdapters = buf;
+        if (D3DKMTEnumAdapters2(ref e) != 0) return -1;
+        for (int i = 0; i < e.NumAdapters; i++) {
+          AdapterInfo a = (AdapterInfo)Marshal.PtrToStructure(new IntPtr(buf.ToInt64() + i * sz), typeof(AdapterInfo));
+          Marshal.WriteInt32(caps, 0);
+          QueryInfo q = new QueryInfo(); q.hAdapter = a.hAdapter; q.Type = 70; q.pData = caps; q.DataSize = 4;
+          if (D3DKMTQueryAdapterInfo(ref q) == 0) {
+            int v = Marshal.ReadInt32(caps);
+            int st = (v & 1) == 0 ? 0 : ((v & 2) != 0 ? 2 : 1);
+            if (st > best) best = st;
+          }
+          CloseAdapter c = new CloseAdapter(); c.hAdapter = a.hAdapter; D3DKMTCloseAdapter(ref c);
+        }
+      } finally { Marshal.FreeHGlobal(buf); Marshal.FreeHGlobal(caps); }
+      return best;
+    }
+  }
+}
+'@
+# Spørger grafikdriveren direkte (samme kilde som Windows' egen indstilling). Registret mangler ofte værdien, når Windows selv har slået det til
+function Get-HagsState {
+  $reg = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
+  $live = -1
+  try { Import-OpticonType 'PcTjek.Hags' $HagsSource; $live = [PcTjek.Hags]::State() } catch { Log "GPU-planlægning: $_" }
+  [pscustomobject]@{ Live = $live; Reg = $reg }
+}
+
 function Load-Health {
   $rows = New-Object System.Collections.ArrayList
   foreach ($d in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
@@ -4452,8 +4500,15 @@ function Load-Health {
   $gm = (Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -ErrorAction SilentlyContinue).AutoGameModeEnabled
   $script:GameModeOn = ($null -eq $gm) -or ($gm -eq 1)
   [void]$rows.Add((HRow $(if ($script:GameModeOn) { 2 } else { 1 }) 'Spiltilstand' $(if ($script:GameModeOn) { 'Til' } else { 'Fra' }) $(if ($script:GameModeOn) { 'Windows prioriterer spil' } else { 'Slå den til: Windows prioriterer spil og pauser opdateringer under spil' })))
-  $hags = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
-  [void]$rows.Add((HRow $(if ($hags -eq 2) { 2 } else { 3 }) 'Hardware-accelereret GPU-planlægning' $(if ($hags -eq 2) { 'Til' } else { 'Fra' }) 'Kan slås til i Indstillinger → Skærm → Grafik (kræver genstart). Giver lavere latens i nogle spil'))
+  $hg = Get-HagsState
+  $hTip = 'Kan slås til i Indstillinger → System → Skærm → Grafik (kræver genstart). Giver lavere latens i nogle spil'
+  $hRow = switch ($hg.Live) {
+    2 { if ($hg.Reg -eq 1) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Til (slås fra ved genstart)' 'Du har slået den fra i Indstillinger. Det sker, når pc''en genstarter' } else { HRow 2 'Hardware-accelereret GPU-planlægning' 'Til' 'Lavere latens i spil, der kan bruge det' } }
+    1 { if ($hg.Reg -eq 2) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Til efter genstart' 'Den er slået til, men virker først, når pc''en har været genstartet' } else { HRow 3 'Hardware-accelereret GPU-planlægning' 'Fra' $hTip } }
+    0 { HRow 3 'Hardware-accelereret GPU-planlægning' 'Understøttes ikke' 'Grafikkortet eller driveren kan ikke bruge funktionen. Det er helt fint' }
+    default { if ($hg.Reg -eq 2) { HRow 2 'Hardware-accelereret GPU-planlægning' 'Til' 'Lavere latens i spil, der kan bruge det' } elseif ($hg.Reg -eq 1) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Fra' $hTip } else { HRow 3 'Hardware-accelereret GPU-planlægning' 'Windows bestemmer' 'Se status i Indstillinger → System → Skærm → Grafik' } }
+  }
+  [void]$rows.Add($hRow)
   $script:DvrOn = Test-BgRecording
   [void]$rows.Add((HRow $(if ($script:DvrOn) { 1 } else { 2 }) 'Optagelse i baggrunden (Game Bar)' $(if ($script:DvrOn) { 'Til' } else { 'Fra' }) $(if ($script:DvrOn) { 'Optager hele tiden de sidste minutter af dine spil. Det holder grafikkortets videochip i gang og kan give små hak. Slå den fra, hvis du ikke bruger "Optag hvad der skete"' } else { 'Godt: intet optages i baggrunden, mens du spiller' })))
   $boot = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 -ErrorAction SilentlyContinue |

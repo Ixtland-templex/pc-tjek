@@ -1,14 +1,16 @@
 {
-  "version": "2.55",
+  "version": "2.57",
   "date": "2026-11-24",
   "notes": [
-    "Grafiktest: knap til at stoppe testen i hjørnet (Esc og Q virker også), og testen stopper altid selv, hvis den tager for lang tid",
-    "Rettet: på nogle bærbare (fx Snapdragon) kunne målingen af batteri og GPU-belastning få testen til at hænge. Langsomme målinger springes nu over"
+    "Strømtesten kan ikke længere hænge: Opticon holder selv øje med testen og lukker den, hvis den går i stå, og sætter strømtilstanden tilbage",
+    "Målinger af batteri og GPU-belastning og skift af strømtilstand kører nu ved siden af testen, så et langsomt Windows-kald ikke kan låse den",
+    "Testvinduet siger til, hvis Opticon ikke svarer (luk med Alt+F4)",
+    "Rettet: Hardware-accelereret GPU-planlægning vises nu korrekt"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "B606265E04B5DB45E728FFD18941F11DB8566DE77B660F6327399EB21E8F9F43"
+      "sha256": "0790AA416E6763A162BC8806F864CEB013B7F607B7C8CCF3B2A697ABF54F7275"
     },
     {
       "name": "PC-Tjek-Start.ps1",
