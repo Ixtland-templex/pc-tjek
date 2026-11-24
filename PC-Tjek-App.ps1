@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.40'
+$AppVersion = '2.41'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1285,78 +1285,6 @@ $SecFixScript = {
 }
 
 # =====================================================================
-#  Farlige drivere: sammenlign med LOLDrivers (github.com/magicsword-io/LOLDrivers)
-# =====================================================================
-$DrvScanScript = {
-  param($sync, $arg)
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-  $cache = [string]$arg.Cache
-  if (-not (Test-Path $cache)) { New-Item -ItemType Directory -Force $cache | Out-Null }
-  $base = 'https://raw.githubusercontent.com/magicsword-io/LOLDrivers/main/detections/hashes/'
-  $sets = @{}; $listAge = 0
-  foreach ($k in 'malicious', 'vulnerable') {
-    $f = Join-Path $cache "loldrivers-$k.sha256"
-    $fresh = (Test-Path $f) -and (((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays -lt 3)
-    if (-not $fresh) {
-      $sync.Status = 'Henter den nyeste liste over farlige drivere...'
-      try {
-        $ProgressPreference = 'SilentlyContinue'
-        $t = [string](Invoke-WebRequest -Uri ($base + "samples_$k.sha256") -UseBasicParsing -TimeoutSec 30 -UserAgent 'Opticon').Content
-        if ($t -match '(?m)^[0-9a-fA-F]{64}\s*$') { [IO.File]::WriteAllText($f, $t) }
-      } catch {}
-    }
-    if (-not (Test-Path $f)) { throw 'Kunne ikke hente listen over farlige drivere. Tjek internetforbindelsen, og prøv igen.' }
-    $listAge = [math]::Max($listAge, [int]((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays)
-    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach ($l in [IO.File]::ReadAllLines($f)) { $h = $l.Trim(); if ($h.Length -eq 64) { [void]$set.Add($h) } }
-    $sets[$k] = $set
-  }
-
-  # Hvilke drivere er installeret (og kører)?
-  $sync.Status = 'Finder dine drivere...'
-  $sysRoot = $env:SystemRoot
-  $svc = @{}
-  foreach ($d in @(Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue)) {
-    $p = [string]$d.PathName
-    if (-not $p) { continue }
-    $p = $p.Trim('"') -replace '^\\\?\?\\', '' -replace '(?i)^\\SystemRoot\\', "$sysRoot\" -replace '(?i)^system32\\', "$sysRoot\System32\"
-    if ($p -notmatch '^[A-Za-z]:\\') { $p = Join-Path $sysRoot $p }
-    $svc[$p.ToLowerInvariant()] = $d
-  }
-  $files = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-  foreach ($p in $svc.Keys) { [void]$files.Add($p) }
-  foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\drivers", '*.sys')) { [void]$files.Add($f) }
-  try { foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\DriverStore\FileRepository", '*.sys', 'AllDirectories')) { [void]$files.Add($f) } } catch {}
-
-  $sha = [Security.Cryptography.SHA256]::Create()
-  $hits = New-Object System.Collections.ArrayList
-  $n = 0; $total = $files.Count; $checked = 0
-  foreach ($f in $files) {
-    $n++
-    if ($n % 40 -eq 0) { $sync.Progress = [double]($n / [math]::Max(1, $total)); $sync.Status = "Tjekker drivere ($n af $total)..." }
-    try {
-      $fi = New-Object IO.FileInfo $f
-      if (-not $fi.Exists -or $fi.Length -gt 40MB) { continue }
-      $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
-      try { $h = [BitConverter]::ToString($sha.ComputeHash($fs)).Replace('-', '') } finally { $fs.Dispose() }
-      $checked++
-      $kind = if ($sets['malicious'].Contains($h)) { 'malicious' } elseif ($sets['vulnerable'].Contains($h)) { 'vulnerable' } else { $null }
-      if (-not $kind) { continue }
-      $vi = $null; try { $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($f) } catch {}
-      $d = $svc[$f.ToLowerInvariant()]
-      [void]$hits.Add([pscustomobject]@{
-        Kind = $kind; Path = $f; File = $fi.Name; Sha256 = $h
-        Company = $(if ($vi) { [string]$vi.CompanyName } else { '' }); Product = $(if ($vi) { [string]$vi.ProductName } else { '' })
-        Service = $(if ($d) { [string]$d.Name } else { '' }); Running = [bool]($d -and $d.State -eq 'Running')
-        InStore = ($f -match '(?i)\\DriverStore\\FileRepository\\')
-      })
-    } catch {}
-  }
-  $sync.Progress = 1.0
-  return [pscustomobject]@{ Hits = @($hits); Checked = $checked; ListAge = $listAge; Lists = ($sets['malicious'].Count + $sets['vulnerable'].Count) }
-}
-
-# =====================================================================
 #  Mål i mit spil: Intel PresentMon (github.com/GameTechDev/PresentMon, MIT)
 # =====================================================================
 $GameMeasureScript = {
@@ -1814,6 +1742,7 @@ $GpuBenchScript = {
   $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false; Res = $(if ($resList.Count) { [string]$resList[0] } else { '' }) }
   $script:BFps = New-Object System.Collections.ArrayList
   $script:BAbort = $false; $script:BErr = $null; $script:BLost = $false; $script:BJsErr = ''; $script:BRenderer = ''
+  $script:BCur = -1; $script:BMeas = $false; $script:BDiag = New-Object System.Collections.ArrayList
   $script:BStepStart = $null; $script:BLeftAfter = 0; $script:BPerStep = 5 + [double]$arg.StepSec
   function Remain { if (-not $script:BStepStart) { return [int]((@($arg.Steps).Count) * $script:BPerStep) }; [int][math]::Max(0, $script:BLeftAfter + $script:BPerStep - ((Get-Date) - $script:BStepStart).TotalSeconds) }
   function Fmt-Rem([int]$x) { '{0}:{1:00}' -f [math]::Floor($x / 60), ($x % 60) }
@@ -1830,7 +1759,7 @@ $GpuBenchScript = {
       switch ($path) {
         '/'      { $out = $htmlBytes; $type = 'text/html; charset=utf-8' }
         '/state' { $script:BState.Remain = Remain; $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
-        '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = Get-Date; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch {} }
+        '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = [datetime]::Now; Step = [int]$script:BCur; Meas = [bool]$script:BMeas; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch { $script:BJsErr = 'fps-svar: ' + $_.Exception.Message } }
         '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
         '/abort' { $script:BAbort = $true }
         '/lost'  { $script:BLost = $true; $script:BAbort = $true }
@@ -1884,6 +1813,8 @@ $GpuBenchScript = {
       }
       $sync.Status = "$($script:BState.Label): stabiliserer... · ⏱ $(Fmt-Rem (Remain)) tilbage"
       WaitPump 5
+      Pump   # alt, der kom under stabiliseringen, tæller ikke med
+      $script:BCur = $i; $script:BMeas = $true
       $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
       while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
         Pump
@@ -1898,8 +1829,12 @@ $GpuBenchScript = {
         }
         Start-Sleep -Milliseconds 80
       }
+      Pump; $script:BMeas = $false
       $t1 = Get-Date
-      $fw = @($script:BFps | Where-Object { $_.Time -ge $t0 -and $_.Time -le $t1 })
+      # Målingerne fra dette trin (mærket med trinnummer, ikke tid, så urets opløsning ikke kan drille)
+      $fw = @($script:BFps | Where-Object { $_.Meas -and $_.Step -eq $i -and $_.Ms -gt 0 })
+      if (-not $fw.Count) { $fw = @($script:BFps | Where-Object { $_.Time -ge $t0.AddSeconds(-1) -and $_.Ms -gt 0 }) }   # reserve
+      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek")
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
@@ -1921,7 +1856,7 @@ $GpuBenchScript = {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
     try { $listener.Stop(); $listener.Close() } catch {}
   }
-  return @{ Steps = @($results); FpsPosts = $script:BFps.Count; Renderer = $script:BRenderer; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
+  return @{ Steps = @($results); Diag = (@($script:BDiag) -join ' · ') + " · trin i alt: $(@($arg.Steps).Count)"; FpsPosts = $script:BFps.Count; Renderer = $script:BRenderer; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
 # =====================================================================
@@ -2822,21 +2757,11 @@ $BenchScript = {
               <StackPanel>
                 <DockPanel>
                   <TextBlock Name="DrvBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center" Text="–"/>
-                  <StackPanel><TextBlock Text="🧩  Farlige drivere" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="DrvSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Sammenligner dine drivere med LOLDrivers, en åben liste over drivere, som angribere misbruger. Tager typisk under et minut."/></StackPanel>
+                  <StackPanel><TextBlock Text="🧩  Sårbare drivere" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="DrvSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Tjekker..."/></StackPanel>
                 </DockPanel>
-                <DataGrid Name="GridDrv" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="300" SelectionMode="Single" Visibility="Collapsed">
-                  <DataGrid.Columns>
-                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
-                    <DataGridTextColumn Header="DRIVER" Binding="{Binding Navn}" Width="2*"/>
-                    <DataGridTextColumn Header="FRA" Binding="{Binding Info}" Width="2*"/>
-                    <DataGridTextColumn Header="HVAD SKAL JEG GØRE" Binding="{Binding Note}" Width="4*"/>
-                  </DataGrid.Columns>
-                </DataGrid>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,10,0,0" LineHeight="20" Text="Angribere misbruger gamle drivere med kendte huller til at slå antivirus fra. Microsoft vedligeholder selv en liste over dem, og Windows kan blokere dem automatisk. Med Hukommelsesintegritet slået til stopper Windows også ukendte, farlige drivere. Det er den sikreste løsning, fordi den virker hele tiden og ikke kun, når du scanner."/>
                 <WrapPanel Margin="0,12,0,0">
-                  <Button Name="BtnDrvScan" Content="🔎  Scan drivere" Style="{StaticResource Primary}"/>
-                  <Button Name="BtnDrvShow" Content="📂  Vis filen" IsEnabled="False"/>
-                  <Button Name="BtnDrvApps" Content="🗑  Afinstallér programmer"/>
-                  <Button Name="BtnDrvInfo" Content="ℹ  Om LOLDrivers"/>
+                  <Button Name="BtnDrvOpen" Content="⚙  Åbn Kerneisolering"/>
                 </WrapPanel>
               </StackPanel>
             </Border>
@@ -3629,7 +3554,7 @@ foreach ($nav in $pages.Keys) {
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
     if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {}; try { Show-VendorCard } catch { Log "Producent-fejl: $_" } }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
-    if ($sender.Name -eq 'NavSecure') { try { Load-DriversCache; Show-MbState; if (-not $script:SecLoaded) { Load-Secure } } catch { Log "Sikkerhed-fejl: $_" } }
+    if ($sender.Name -eq 'NavSecure') { try { Show-MbState; if (-not $script:SecLoaded) { Load-Secure } } catch { Log "Sikkerhed-fejl: $_" } }
     if ($sender.Name -eq 'NavHelped') { try { Update-Changes; Show-Changes } catch { Log "Hjalp det-fejl: $_" } }
     if ($sender.Name -eq 'NavBench') { try { Load-Bench } catch { Log "Benchmark-fejl: $_" } }
     if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
@@ -4346,8 +4271,8 @@ $ui.BtnOfflineScan.Add_Click({ Start-Process 'windowsdefender://threatsettings' 
 #  Sikkerhedstjek
 # =====================================================================
 $script:SecLoaded = $false
-$DrvCache = Join-Path $JobBase 'loldrivers'
-$DrvLast  = Join-Path $JobBase 'drivers-last.xml'
+# Gammel driver-scanning er fjernet (antivirus forvekslede den med et angrebsværktøj): ryd dens filer op
+foreach ($old in (Join-Path $JobBase 'loldrivers'), (Join-Path $JobBase 'drivers-last.xml')) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
 function Load-Secure {
   $ui.WinSecSub.Text = 'Tjekker Windows-beskyttelse...'; $ui.WinSecBig.Text = '…'
   $ui.BtnSecRefresh.IsEnabled = $false
@@ -4361,6 +4286,7 @@ function Load-Secure {
       $r.Id = $x.Id; $r.Tag = $x; $r
     }
     $ui.GridSecure.ItemsSource = @($rows)
+    try { Show-DriverProtection @($res.Rows) } catch {}
     $counted = @($res.Rows | Where-Object { [int]$_.Ok -ne 3 })
     $good = @($counted | Where-Object { [int]$_.Ok -eq 2 }).Count
     $bad = @($counted | Where-Object { [int]$_.Ok -eq 0 }).Count
@@ -4408,54 +4334,15 @@ $ui.BtnSecFix.Add_Click({
   } @{ Fix = $x.Fix; How = $x.How }
 })
 
-# ---------- Farlige drivere ----------
-function Show-Drivers($res, [bool]$fromCache) {
-  $hits = @($res.Hits)
-  $mal = @($hits | Where-Object Kind -eq 'malicious')
-  $vulnOn = @($hits | Where-Object { $_.Kind -eq 'vulnerable' -and ($_.Running -or -not $_.InStore) })
-  $rows = foreach ($h in @($hits | Sort-Object @{ e = { if ($_.Kind -eq 'malicious') { 0 } elseif ($_.Running) { 1 } elseif (-not $_.InStore) { 2 } else { 3 } } }, File)) {
-    $from = (@($h.Product, $h.Company) | Where-Object { $_ } | Select-Object -First 2) -join ' · '
-    if (-not $from) { $from = '(ukendt program)' }
-    $what = if ($h.Kind -eq 'malicious') { 'KENDT ONDSINDET. Kør en Defender Offline-scanning (under Ydelse og helbred), og afinstallér det program, den kom med.' }
-            elseif ($h.Running) { 'Kører nu og har et kendt sikkerhedshul. Opdatér eller afinstallér programmet. Slå "Blokér sårbare drivere" til ovenfor.' }
-            elseif (-not $h.InStore) { 'Installeret, men kører ikke lige nu. Opdatér eller afinstallér programmet, hvis du ikke bruger det.' }
-            else { 'Kun en gammel kopi i Windows'' driverlager. Lav risiko: den kører ikke.' }
-    $lvl = if ($h.Kind -eq 'malicious') { 0 } elseif ($h.Running -or -not $h.InStore) { 1 } else { 3 }
-    $r = HRow $lvl $h.File $from $what
-    $r.Sti = $h.Path; $r.Tag = $h; $r
-  }
-  $ui.GridDrv.ItemsSource = @($rows)
-  $ui.GridDrv.Visibility = $(if ($hits.Count) { 'Visible' } else { 'Collapsed' })
-  $when = if ($fromCache) { try { ' Sidst tjekket ' + (Get-Item $DrvLast).LastWriteTime.ToString('d. MMM HH:mm') + '.' } catch { '' } } else { '' }
-  if ($mal.Count) {
-    $ui.DrvBig.Text = "⚠ $($mal.Count)"; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F87171')
-    $ui.DrvSub.Text = "Fandt $($mal.Count) kendt ondsindet driver. Tag det alvorligt: se hvad du skal gøre herunder.$when"
-  } elseif ($vulnOn.Count) {
-    $ui.DrvBig.Text = "$($vulnOn.Count)"; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F6C344')
-    $ui.DrvSub.Text = "Ingen ondsindede drivere. $($vulnOn.Count) driver$(if ($vulnOn.Count -ne 1) { 'e' }) har et kendt sikkerhedshul. Typisk fra RGB-, blæser- eller overclock-værktøjer, ikke virus. Opdatér eller afinstallér dem.$when"
-  } else {
-    $ui.DrvBig.Text = '✓'; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#34D399')
-    $extra = if ($hits.Count) { " ($($hits.Count) gammel kopi i driverlageret, men den kører ikke)" } else { '' }
-    $ui.DrvSub.Text = "Ingen farlige drivere i brug$extra. Tjekkede $($res.Checked) drivere mod $($res.Lists) kendte.$when"
-  }
+# ---------- Sårbare drivere: Windows' egen beskyttelse ----------
+function Show-DriverProtection($rows) {
+  $bl = @($rows | Where-Object { $_.Id -eq 'blocklist' })[0]; $hv = @($rows | Where-Object { $_.Id -eq 'hvci' })[0]
+  $blOn = $bl -and [int]$bl.Ok -eq 2; $hvOn = $hv -and [int]$hv.Ok -eq 2
+  if ($blOn -and $hvOn) { $ui.DrvBig.Text = '✓'; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#34D399'); $ui.DrvSub.Text = 'Fuld beskyttelse: Windows blokerer kendte sårbare drivere, og Hukommelsesintegritet er slået til.' }
+  elseif ($blOn) { $ui.DrvBig.Text = '½'; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F6C344'); $ui.DrvSub.Text = 'Kendte sårbare drivere blokeres. Slå også Hukommelsesintegritet til for fuld beskyttelse (se listen ovenfor).' }
+  else { $ui.DrvBig.Text = '!'; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F87171'); $ui.DrvSub.Text = 'Windows blokerer ikke kendte sårbare drivere. Vælg "Blokér sårbare drivere" i listen ovenfor, og tryk Ret det for mig.' }
 }
-$ui.BtnDrvScan.Add_Click({
-  $ui.BtnDrvScan.IsEnabled = $false; $ui.DrvBig.Text = '…'
-  $ui.DrvSub.Text = 'Scanner dine drivere. Tager typisk under et minut...'
-  Invoke-Bg $DrvScanScript @{ Cache = $DrvCache } {
-    param($res, $err, $c)
-    $ui.BtnDrvScan.IsEnabled = $true
-    if ($res -is [array]) { $res = @($res | Where-Object { $null -ne $_.Checked })[-1] }
-    if ($err -or -not $res) { $ui.DrvBig.Text = '–'; $ui.DrvSub.Text = "Scanningen lykkedes ikke: $err"; Log "Driver-scan FEJL: $err"; return }
-    try { Export-Clixml -InputObject $res -Path $DrvLast -Depth 4 } catch {}
-    Log "Driver-scan: $($res.Checked) tjekket, $(@($res.Hits).Count) fund"
-    Show-Drivers $res $false
-  } $null
-})
-$ui.GridDrv.Add_SelectionChanged({ $ui.BtnDrvShow.IsEnabled = [bool]$ui.GridDrv.SelectedItem })
-$ui.BtnDrvShow.Add_Click({ $p = $ui.GridDrv.SelectedItem.Sti; if ($p) { Start-Process explorer.exe "/select,`"$p`"" } })
-$ui.BtnDrvApps.Add_Click({ Start-Process 'ms-settings:appsfeatures' })
-$ui.BtnDrvInfo.Add_Click({ Start-Process 'https://www.loldrivers.io/' })
+$ui.BtnDrvOpen.Add_Click({ Start-Process 'windowsdefender://coreisolation' })
 # ---------- MalwareBazaar-nøgle (valgfri, gemt krypteret med Windows DPAPI for denne bruger) ----------
 $MbKeyFile = Join-Path $JobBase 'abusech-key.dat'
 function Get-MbKey {
@@ -4482,7 +4369,8 @@ function Invoke-MbLookup($key, [string[]]$hashes, [scriptblock]$then, $ctx) {
   Invoke-Bg $MbLookupScript @{ Key = $key; Hashes = $hashes } {
     param($res, $err, $c)
     if ($res -is [array]) { $res = @($res | Where-Object { $_.Results })[-1] }
-    & $c.Then $(if ($res) { @($res.Results) } else { @() }) $err $c.Ctx
+    $list = @(); if ($res) { $list = @($res.Results) }
+    & $c.Then $list $err $c.Ctx
   } @{ Then = $then; Ctx = $ctx }
 }
 $ui.BtnMbOpen.Add_Click({ Start-Process 'https://auth.abuse.ch/' })
@@ -4495,7 +4383,8 @@ $ui.BtnMbSave.Add_Click({
   Invoke-MbLookup $plain @($probe) {
     param($results, $err, $ctx)
     $ui.BtnMbSave.IsEnabled = $true
-    $st = if ($results.Count) { [string]$results[0].Status } else { "fejl: $err" }
+    $results = @($results)
+    $st = if ($results.Count) { [string]$results[0].Status } elseif ($err) { "fejl: $err" } else { 'intet svar' }
     if ($st -eq 'hash_not_found' -or $st -eq 'ok') {
       try {
         $enc = ConvertFrom-SecureString $ui.MbKeyBox.SecurePassword
@@ -4528,6 +4417,7 @@ $ui.BtnMbFile.Add_Click({
   $ui.MbSub.Text = "Tjekker $(Split-Path $f -Leaf)..."; $script:MbMsg = $true
   Invoke-MbLookup (Get-MbKey) @($sha) {
     param($results, $err, $ctx)
+    $results = @($results)
     $r = if ($results.Count) { $results[0] } else { $null }
     $name = Split-Path $ctx.File -Leaf
     $signed = if ($ctx.Sig -and $ctx.Sig.Status -eq 'Valid') { "Signeret af: $(([string]$ctx.Sig.SignerCertificate.Subject -replace '^CN=([^,]+).*$', '$1'))" } else { 'Ikke digitalt signeret' }
@@ -4545,11 +4435,6 @@ $ui.BtnMbFile.Add_Click({
     Show-MbState
   } @{ File = $f; Sig = $sig }
 })
-function Load-DriversCache {
-  if ($script:DrvShown) { return }
-  $script:DrvShown = $true
-  if (Test-Path $DrvLast) { try { Show-Drivers (Import-Clixml $DrvLast) $true } catch {} }
-}
 
 # =====================================================================
 #  DIN PLAN: få, simple trin med én knap hver
@@ -5358,7 +5243,7 @@ function Start-GpuBench($mode) {
     param($res, $err, $c)
     $script:GpuMeasuring = $false
     try { $win.WindowState = 'Normal' } catch {}
-    if ($res -and -not ($res -is [array])) { Log "GPU-test ($($c.GpuMode)): fps-målinger=$($res.FpsPosts) · kalibreret=$($res.Calib) · stoppet=$($res.Aborted) · driver nulstillet=$($res.Lost) · browser=$($res.Browser) · grafik=$($res.Renderer)$(if ($res.JsErr) { " · sidefejl: $($res.JsErr)" })" }
+    if ($res -and -not ($res -is [array])) { Log "GPU-test ($($c.GpuMode)): fps-målinger=$($res.FpsPosts) · kalibreret=$($res.Calib) · stoppet=$($res.Aborted) · driver nulstillet=$($res.Lost) · browser=$($res.Browser) · grafik=$($res.Renderer) · $($res.Diag)$(if ($res.JsErr) { " · sidefejl: $($res.JsErr)" })" }
     $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork; $ui.BtnGpuRes.IsEnabled = $true; $ui.BtnOcBase.IsEnabled = $true; $ui.BtnOcCheck.IsEnabled = [bool]$script:OcBase
     $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'; $ui.GpuOcBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}

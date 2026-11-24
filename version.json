@@ -1,7 +1,10 @@
 {
-  "version": "2.40",
+  "version": "2.41",
   "date": "2026-11-24",
   "notes": [
+    "Sårbare drivere: bruger nu Windows' egen beskyttelse (Microsofts blokeringsliste + Hukommelsesintegritet) i stedet for en scanning, som antivirus forvekslede med et angrebsværktøj",
+    "Rettet: MalwareBazaar-nøglen kunne ikke testes (svaret blev læst forkert)",
+    "Grafiktesten tæller nu målingerne pr. trin, så de ikke kan falde udenfor, og logger hvad der skete",
     "Endnu venligere for antivirus: disktesten bruger almindelig hukommelse, downloads sker med Windows' standardværktøj, og C#-hjælpere oversættes kun én gang pr. version",
     "Venligere for antivirus (fx Bitdefender): ingen ekstra PowerShell-processer, ingen kodede kommandoer og ingen skjulte omveje ved start",
     "Baggrundsopgaver kører nu inde i selve appen, så de er hurtigere at starte",
@@ -13,7 +16,6 @@
     "Sikkerhedstjek: 3 ekstra Defender-regler (ASR), som Microsoft anbefaler alle at slå til",
     "Ydelse og helbred: tjekker om Game Bar optager i baggrunden, og kan slå det fra med ét klik",
     "Ny: 🔐 Sikkerhedstjek – er Windows' beskyttelser slået til? Røde og gule punkter med en forklaring, og knappen Ret det for mig, hvor det er sikkert",
-    "Ny: 🧩 Farlige drivere – sammenligner dine drivere med LOLDrivers' liste over drivere, som angribere misbruger",
     "Disk-helbred: fejl der ikke kunne rettes, temperatur mod diskens maks., og hvor længe den har været tændt. Overblik advarer, hvis disken er ved at gå i stykker",
     "Grafiktest giver nu rigtige FPS uden skærmens Hz-loft (testversion 3)",
     "Rettet: grafikdelen af benchmark og opløsningstest gav ingen målinger",
@@ -63,7 +65,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "BE72A7EA1AB38C614D83F46BA391A60C16DBF23F11C353237BF39D93AB82D980"
+      "sha256": "AEF19F3BE8DBD7D2177C42649A56767972C0EFAE16045753D06BD9D88B74BA1A"
     },
     {
       "name": "PC-Tjek-Start.ps1",
