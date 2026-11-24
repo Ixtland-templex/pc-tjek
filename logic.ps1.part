@@ -1891,6 +1891,7 @@ function Start-GpuBench($mode) {
       if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -like 'oc*') { $ui.GpuOcInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
       return
     }
+    if ($res -and $res.Timeout -and -not $steps.Count) { $err = 'Testen tog for lang tid og blev stoppet automatisk. Grafikken er måske for langsom til testscenen, eller noget i baggrunden bremser.' }
     if ($err -or -not $steps.Count) {
       $msg = if ($err) { $err } elseif ($res -and $res.Lost) { 'Grafikdriveren nulstillede testscenen undervejs.' } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } elseif ($res -and -not $res.FpsPosts) { "Testscenen tegnede ingen billeder. Det sker typisk, hvis testvinduet lå bag et andet vindue. Prøv igen, og klik på testscenen, hvis den ikke kommer forrest.$(if ($res.JsErr) { " (Sidefejl: $($res.JsErr))" })" } else { 'Testscenen gav ingen målinger.' }
       if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -like 'oc*') { $ui.GpuOcInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }

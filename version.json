@@ -1,14 +1,14 @@
 {
-  "version": "2.54",
+  "version": "2.55",
   "date": "2026-11-24",
   "notes": [
-    "Rettet: 'Find den bedste strømtilstand' og Mål FØR/EFTER kunne gå i stå på nogle pc'er (fx Snapdragon). De bruger nu samme måling som Benchmark",
-    "Snapdragon-pc'er: Opticon anbefaler og åbner Snapdragon Control Panel til grafikdriveren (Adreno)"
+    "Grafiktest: knap til at stoppe testen i hjørnet (Esc og Q virker også), og testen stopper altid selv, hvis den tager for lang tid",
+    "Rettet: på nogle bærbare (fx Snapdragon) kunne målingen af batteri og GPU-belastning få testen til at hænge. Langsomme målinger springes nu over"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "A49B37FCC29F3D1FAC29992CC28348FFFB96D9A20D85DD410D033E5F69000F38"
+      "sha256": "B606265E04B5DB45E728FFD18941F11DB8566DE77B660F6327399EB21E8F9F43"
     },
     {
       "name": "PC-Tjek-Start.ps1",
