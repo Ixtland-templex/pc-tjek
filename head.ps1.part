@@ -1,0 +1,123 @@
+<#
+  PC-Tjek 2.0  –  sikkerhed, oprydning og optimering til Windows 11
+  ------------------------------------------------------------------
+  * Scanninger LÆSER kun. Intet ændres, før du selv trykker på en handling og bekræfter.
+  * Før større ændringer oprettes et gendannelsespunkt (hvis systembeskyttelse er slået til).
+  * Filer, du sletter fra Filer-siden, flyttes til papirkurven.
+  * Rapporter, snapshots, fortryd-log og fejl-log ligger i  Overførsler\PC-Tjek-rapport\
+  Installation: kør "Installer PC-Tjek.cmd" én gang. Derefter starter appen fra ikonet uden UAC og uden konsol.
+#>
+param([switch]$RestoreOnly)   # bruges af afinstalleren: sæt alt tilbage og afslut
+
+# ---------- Elevering + STA (bruges kun, hvis appen startes uden installeren) ----------
+$me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File `"$PSCommandPath`""
+  return
+}
+if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+  Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File `"$PSCommandPath`""
+  return
+}
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
+
+$AppVersion = '2.20'
+$AppName = 'PC-Tjek'   # visningsnavn (sættes af build-scriptet)
+$OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
+$SnapDir  = Join-Path $OutDir 'snapshots'
+New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
+$UndoFile = Join-Path $OutDir 'fortryd-log.json'
+$LogFile  = Join-Path $OutDir 'pc-tjek.log'
+$TimesFile = Join-Path $OutDir 'scan-tider.json'
+$IgnoreFile = Join-Path $OutDir 'markeret-ok.txt'
+# Baggrundsjob kører som administrator, så deres filer må IKKE ligge et sted, almindelige programmer kan ændre (fx Temp).
+# C:\ProgramData\PC-Tjek låses til kun Administratorer og SYSTEM.
+$JobBase = Join-Path $env:ProgramData 'PC-Tjek'
+$JobRoot = Join-Path $JobBase 'jobs'
+New-Item -ItemType Directory -Force $JobRoot | Out-Null
+try { & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /T /C /Q | Out-Null } catch {}
+Get-ChildItem $JobRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+$ConfigFile = Join-Path $PSScriptRoot 'pc-tjek.config.json'
+$UpdateUrl = $null
+if (Test-Path $ConfigFile) { try { $UpdateUrl = ([string](Get-Content $ConfigFile -Raw | ConvertFrom-Json).UpdateUrl).TrimEnd('/') } catch {} }
+if ($UpdateUrl -notmatch '^https://raw\.githubusercontent\.com/[\w\-]+/[\w\-.]+/[\w\-./]+$' -or $UpdateUrl -match 'DIT-BRUGERNAVN') { $UpdateUrl = $null }
+function Log($m) { try { [IO.File]::AppendAllText($LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} }
+Log "Start v$AppVersion"
+
+# ---------- Lille C#-hjælper: rækker med afkrydsning + mørk titellinje ----------
+if (-not ('PcTjek.Row' -as [type])) { Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+namespace PcTjek {
+  public class Row : INotifyPropertyChanged {
+    public event PropertyChangedEventHandler PropertyChanged;
+    void N(string p) { var h = PropertyChanged; if (h != null) h(this, new PropertyChangedEventArgs(p)); }
+    bool _v; string _navn, _info, _note, _gruppe, _status; double _tal;
+    public bool Valgt { get { return _v; } set { _v = value; N("Valgt"); } }
+    public string Navn { get { return _navn; } set { _navn = value; N("Navn"); } }
+    public string Info { get { return _info; } set { _info = value; N("Info"); } }
+    public string Note { get { return _note; } set { _note = value; N("Note"); } }
+    public string Gruppe { get { return _gruppe; } set { _gruppe = value; N("Gruppe"); } }
+    public string Status { get { return _status; } set { _status = value; N("Status"); } }
+    public double Tal { get { return _tal; } set { _tal = value; N("Tal"); } }
+    public string Sti { get; set; }
+    public string Id { get; set; }
+    public object Tag { get; set; }
+  }
+  public static class Win {
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int a, ref int v, int s);
+    public static void Dark(IntPtr h) {
+      int on = 1; DwmSetWindowAttribute(h, 20, ref on, 4);           // mørk titellinje
+      int col = 0x00140F0D; DwmSetWindowAttribute(h, 35, ref col, 4);  // titellinjefarve (#0D0F14)
+    }
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+    public short dmSpecVersion; public short dmDriverVersion; public short dmSize; public short dmDriverExtra; public int dmFields;
+    public int dmPositionX; public int dmPositionY; public int dmDisplayOrientation; public int dmDisplayFixedOutput;
+    public short dmColor; public short dmDuplex; public short dmYResolution; public short dmTTOption; public short dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+    public short dmLogPixels; public int dmBitsPerPel; public int dmPelsWidth; public int dmPelsHeight;
+    public int dmDisplayFlags; public int dmDisplayFrequency;
+    public int dmICMMethod; public int dmICMIntent; public int dmMediaType; public int dmDitherType;
+    public int dmReserved1; public int dmReserved2; public int dmPanningWidth; public int dmPanningHeight;
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct DISPLAY_DEVICE {
+    public int cb;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+    public int StateFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+  }
+  public static class Screens {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplayDevices(string dev, uint i, ref DISPLAY_DEVICE dd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+    // Returnerer "enhed|skærmnavn|bredde|højde|nuværende Hz|max Hz ved samme opløsning" for hver aktiv skærm
+    public static string[] List() {
+      var list = new List<string>();
+      for (uint i = 0; i < 16; i++) {
+        var d = new DISPLAY_DEVICE(); d.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        if (!EnumDisplayDevices(null, i, ref d, 0)) break;
+        if ((d.StateFlags & 1) == 0) continue;
+        var cur = new DEVMODE(); cur.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        if (!EnumDisplaySettings(d.DeviceName, -1, ref cur)) continue;
+        int max = cur.dmDisplayFrequency;
+        var m = new DEVMODE(); m.dmSize = cur.dmSize;
+        for (int k = 0; k < 5000 && EnumDisplaySettings(d.DeviceName, k, ref m); k++) {
+          if (m.dmPelsWidth == cur.dmPelsWidth && m.dmPelsHeight == cur.dmPelsHeight && m.dmDisplayFrequency > max) max = m.dmDisplayFrequency;
+        }
+        var mon = new DISPLAY_DEVICE(); mon.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        string monName = EnumDisplayDevices(d.DeviceName, 0, ref mon, 0) ? mon.DeviceString : "";
+        list.Add(d.DeviceName + "|" + monName + "|" + cur.dmPelsWidth + "|" + cur.dmPelsHeight + "|" + cur.dmDisplayFrequency + "|" + max);
+      }
+      return list.ToArray();
+    }
+  }
+}
+'@ }
+

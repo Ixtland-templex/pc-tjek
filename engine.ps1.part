@@ -190,11 +190,11 @@ $ScanScript = {
       if (-not $a.Execute) { continue }
       $exe = ExePath $a.Execute; $sg = Sig $exe; $full = "$($a.Execute) $($a.Arguments)".Trim()
       # PC-Tjeks egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
-      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek Vagt' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Vagt.ps1*") {
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek Vagt' -and ($exe -ieq "$env:SystemRoot\System32\conhost.exe" -or $exe -ieq "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe") -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Vagt.ps1*") {
         Add-Find 0 'Planlagt opgave' 'PC-Tjek Vagt (denne app)' 'Starter vagten, når du logger ind' 'Oprettet af PC-Tjek.' $full 'self' $null
         continue
       }
-      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and ($a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*" -or $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Start.ps1*")) {
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and ($exe -ieq "$env:SystemRoot\System32\conhost.exe" -or $exe -ieq "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe") -and ($a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*" -or $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Start.ps1*")) {
         Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter PC-Tjek, når du klikker på ikonet' 'Oprettet af PC-Tjeks installer.' $full 'self' $null
         continue
       }

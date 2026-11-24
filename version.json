@@ -1,7 +1,10 @@
 {
-  "version": "2.38",
+  "version": "2.39",
   "date": "2026-11-24",
   "notes": [
+    "Venligere for antivirus (fx Bitdefender): ingen ekstra PowerShell-processer, ingen kodede kommandoer og ingen skjulte omveje ved start",
+    "Baggrundsopgaver kører nu inde i selve appen, så de er hurtigere at starte",
+    "Eksisterende genveje og planlagte opgaver flyttes automatisk over på den nye startmåde",
     "Ny (valgfri): 🦠 Ekstra virustjek med MalwareBazaar – over 1 million kendte malware-filer. Indsæt din egen gratis nøgle under Sikkerhedstjek (guide inde i appen)",
     "Med nøgle: nye usignerede filer tjekkes ved hver scanning, og du kan tjekke en enkelt fil. Kun fingeraftrykket sendes, aldrig filen",
     "Ny: 🎮 Mål i mit spil (under Benchmark) – rigtig FPS, 1 % low og hak i dit eget spil med Intel PresentMon, og om det er grafikkort, processor eller et FPS-loft, der bremser",
@@ -59,7 +62,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "F83BD7B171C4838F42496F79B560DE1C73CBD20B1906B753415DFB45DF9E0902"
+      "sha256": "C74D06C925548CCCE04F4A63F9E458F195A70709A23ECE4FF9B4D31BFB6441E7"
     },
     {
       "name": "PC-Tjek-Start.ps1",
@@ -67,11 +70,11 @@
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "373180DB44C04575125F358E8C298B5B2818B4816D5D16DBB6DE8A276BF227D4"
+      "sha256": "3BB33B4690FDCB81D46297D56028F77349CCF89521D86AB561B084D115EF010C"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
-      "sha256": "C19A066A392787263BF34E898B01A241A7F18E176F0FAAE6C9C9F7BAEF251D9F"
+      "sha256": "EA26B474D06B4751CFC88C4A607C4341BD887A45DD69E0BA225D3359D5938BC5"
     },
     {
       "name": "PC-Tjek.ico",

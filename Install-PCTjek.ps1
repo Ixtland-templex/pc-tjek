@@ -9,7 +9,7 @@
 $ErrorActionPreference = 'Stop'
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+  Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -File `"$PSCommandPath`""
   return
 }
 $Host.UI.RawUI.WindowTitle = 'Opticon installation'
@@ -37,8 +37,9 @@ try {
     Start-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue
   }
   Write-Host "  • Opretter den planlagte opgave 'PC-Tjek' (kører som $user, kun når du starter den)"
-  $appArgs = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$dest\PC-Tjek-Start.ps1`""
-  $action    = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $appArgs -WorkingDirectory $dest
+  # Start PowerShell direkte med RemoteSigned (venligt for antivirus som Bitdefender)
+  $appArgs = "-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File `"$dest\PC-Tjek-Start.ps1`""
+  $action    = New-ScheduledTaskAction -Execute "$sys\WindowsPowerShell\v1.0\powershell.exe" -Argument $appArgs -WorkingDirectory $dest
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
   $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable:$false
   Register-ScheduledTask -TaskName 'PC-Tjek' -TaskPath '\' -Action $action -Principal $principal -Settings $settings `
@@ -52,15 +53,15 @@ try {
     $l.IconLocation = "$dest\PC-Tjek.ico,0"; $l.Description = $desc; $l.WindowStyle = 7
     $l.Save()
   }
-  $runArgs = "--headless `"$sys\schtasks.exe`" /run /tn `"\PC-Tjek`""
+  $runArgs = "/run /tn `"\PC-Tjek`""
   $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Opticon'
   $old = 'PC' + '-Tjek'   # gammelt navn: fjern gamle genveje
   Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Desktop')) "$old.lnk")
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Programs')) $old)
   New-Item -ItemType Directory -Force $menu | Out-Null
-  New-Link (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Opticon.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
-  New-Link (Join-Path $menu 'Opticon.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
-  New-Link (Join-Path $menu 'Afinstallér Opticon.lnk') "$sys\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File `"$dest\Uninstall-PCTjek.ps1`"" 'Fjerner Opticon'
+  New-Link (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Opticon.lnk') "$sys\schtasks.exe" $runArgs 'Sikkerhed, oprydning og optimering'
+  New-Link (Join-Path $menu 'Opticon.lnk') "$sys\schtasks.exe" $runArgs 'Sikkerhed, oprydning og optimering'
+  New-Link (Join-Path $menu 'Afinstallér Opticon.lnk') "$sys\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy RemoteSigned -File `"$dest\Uninstall-PCTjek.ps1`"" 'Fjerner Opticon'
 
   Write-Host ''
   Write-Host '  ✓ Færdig! Start Opticon fra ikonet på skrivebordet.' -ForegroundColor Green

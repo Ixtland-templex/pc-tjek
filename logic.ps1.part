@@ -28,104 +28,60 @@ function Fmt-GB($bytes) { if ($bytes -ge 1GB) { '{0:N1} GB' -f ($bytes / 1GB) } 
 # =====================================================================
 #  Baggrundsjob: én timer holder øje med alle job
 # =====================================================================
-# Hvert job kører som sin egen PowerShell-proces (arver administratorrettigheder).
-# Fremdrift skrives til progress.txt, resultatet til out.xml (Export-Clixml bevarer typer som datoer).
-$JobRunnerText = @'
-param([string]$Dir)
-$ErrorActionPreference = 'SilentlyContinue'
-$logFile = [IO.File]::ReadAllText((Join-Path $Dir 'log.txt')).Trim()
-function JLog($m) { try { [IO.File]::AppendAllText($logFile, ("{0:yyyy-MM-dd HH:mm:ss}  {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} }
-JLog "Job-proces kører (PID $PID)"
-if (-not ('PcTjekSyncTable' -as [type])) {
-Add-Type -TypeDefinition @"
-using System; using System.Collections; using System.IO; using System.Text; using System.Globalization;
-public class PcTjekSyncTable : Hashtable {
-  string path; DateTime last = DateTime.MinValue;
-  public PcTjekSyncTable(string p) { path = p; }
-  public override object this[object key] { get { return base[key]; } set { base[key] = value; Flush(false); } }
-  public void Flush(bool force) {
-    if (!force && (DateTime.Now - last).TotalMilliseconds < 200) return;
-    last = DateTime.Now;
-    var sb = new StringBuilder();
-    foreach (DictionaryEntry e in this) {
-      object v = e.Value;
-      if (v is string || v is double || v is int || v is long || v is bool || v is decimal)
-        sb.Append(e.Key).Append('\t').Append(Convert.ToString(v, CultureInfo.InvariantCulture).Replace('\n', ' ').Replace('\r', ' ').Replace('\t', ' ')).Append('\n');
-    }
-    try { File.WriteAllText(path + ".tmp", sb.ToString(), Encoding.UTF8); File.Copy(path + ".tmp", path, true); } catch { }
-  }
-}
-"@
-}
-$sync = New-Object PcTjekSyncTable (Join-Path $Dir 'progress.txt')
-$sync['Progress'] = -1.0
-try {
-  $arg = Import-Clixml (Join-Path $Dir 'in.xml')
-  $work = [scriptblock]::Create([IO.File]::ReadAllText((Join-Path $Dir 'work.ps1')))
-  $result = & $work $sync $arg
-  Export-Clixml -InputObject $result -Path (Join-Path $Dir 'out.xml') -Depth 8
-  JLog 'Job-proces færdig'
-} catch {
-  [IO.File]::WriteAllText((Join-Path $Dir 'error.txt'), [string]$_.Exception.Message, [Text.Encoding]::UTF8)
-  JLog "Job-proces FEJL: $($_.Exception.Message)"
-}
-$sync.Flush($true)
-'@
-
+# Baggrundsjob kører i en separat runspace INDE i appen (ingen ekstra PowerShell-processer).
+# Det er både hurtigere og ser ikke mistænkeligt ud for antivirus.
 $script:Jobs = New-Object System.Collections.ArrayList
 function Invoke-Bg([scriptblock]$Work, $Arg, [scriptblock]$Done, $Ctx) {
   try {
-    $dir = Join-Path $JobRoot ('job-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force $dir | Out-Null
-    $utf8 = New-Object Text.UTF8Encoding $true
-    [IO.File]::WriteAllText((Join-Path $dir 'work.ps1'), $Work.ToString(), $utf8)
-    [IO.File]::WriteAllText((Join-Path $dir 'runner.ps1'), $JobRunnerText, $utf8)
-    [IO.File]::WriteAllText((Join-Path $dir 'log.txt'), $LogFile, $utf8)
     if ($null -eq $Arg) { $Arg = @{} }
-    Export-Clixml -InputObject $Arg -Path (Join-Path $dir 'in.xml') -Depth 6
-    $p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -PassThru `
-         -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\runner.ps1`" -Dir `"$dir`""
-    $s = @{ Status = ''; Detail = ''; Progress = -1.0 }
-    [void]$script:Jobs.Add(@{ S = $s; P = $p; Dir = $dir; Done = $Done; Ctx = $Ctx })
+    $s = [hashtable]::Synchronized(@{ Status = ''; Detail = ''; Progress = -1.0 })
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.ApartmentState = 'STA'; $rs.ThreadOptions = 'ReuseThread'
+    $rs.Open()
+    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    [void]$ps.AddScript($Work.ToString()).AddArgument($s).AddArgument($Arg)
+    $h = $ps.BeginInvoke()
+    [void]$script:Jobs.Add(@{ S = $s; PS = $ps; RS = $rs; H = $h; Done = $Done; Ctx = $Ctx; T0 = Get-Date })
     $ui.Busy.Visibility = 'Visible'
-    Log "Job startet (proces $($p.Id))"
+    Log 'Job startet'
   } catch {
     Log "Invoke-Bg FEJL: $($_.Exception.Message)"
     Msg "Kunne ikke starte baggrundsjob:`n$($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null
   }
 }
-function Read-JobProgress($j) {
-  $f = Join-Path $j.Dir 'progress.txt'
-  if (-not (Test-Path $f)) { return }
-  try { $lines = [IO.File]::ReadAllLines($f, [Text.Encoding]::UTF8) } catch { return }
-  foreach ($l in $lines) {
-    $kv = $l -split "`t", 2
-    if ($kv.Count -ne 2) { continue }
-    $num = 0.0
-    if ([double]::TryParse($kv[1], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$num) -and $kv[0] -ne 'Status' -and $kv[0] -ne 'Detail') { $j.S[$kv[0]] = $num }
-    else { $j.S[$kv[0]] = $kv[1] }
+function Get-JobResult($j) {
+  $res = $null; $err = $null
+  try {
+    $out = $j.PS.EndInvoke($j.H)
+    $items = @(foreach ($o in $out) {
+      if ($null -eq $o) { continue }
+      if ($o -is [psobject] -and $null -ne $o.BaseObject -and $o.BaseObject -isnot [Management.Automation.PSCustomObject]) { $o.BaseObject } else { $o }
+    })
+    if ($items.Count -eq 1) { $res = $items[0] } elseif ($items.Count -gt 1) { $res = $items }
+  } catch {
+    $e = $_.Exception
+    while ($e.InnerException -and ($e -is [Management.Automation.MethodInvocationException] -or $e -is [Management.Automation.CmdletInvocationException] -or $e.Message -match '^Exception calling')) { $e = $e.InnerException }
+    $err = [string]$e.Message
+    if (-not $err) { $err = 'Jobbet stoppede uventet.' }
   }
+  try { $j.PS.Dispose() } catch {}; try { $j.RS.Dispose() } catch {}
+  return @{ Res = $res; Err = $err }
 }
 $jobTimer = New-Object Windows.Threading.DispatcherTimer
 $jobTimer.Interval = [TimeSpan]::FromMilliseconds(250)
 $jobTimer.Add_Tick({
   if ($script:Jobs.Count -eq 0) { return }
-  foreach ($j in @($script:Jobs)) { Read-JobProgress $j }
   $last = $script:Jobs[$script:Jobs.Count - 1]
   if ($last.S.Status) { $ui.StatusText.Text = $last.S.Status }
   if ([double]$last.S.Progress -ge 0) { $ui.Busy.IsIndeterminate = $false; $ui.Busy.Value = [double]$last.S.Progress } else { $ui.Busy.IsIndeterminate = $true }
   $sj = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.Kind -eq 'scan' } | Select-Object -First 1
   if ($sj) { try { Update-ScanProgress $sj.S } catch { if (-not $script:ProgErrLogged) { Log "Fremdrift-fejl: $_"; $script:ProgErrLogged = $true } } }
   foreach ($j in @($script:Jobs)) {
-    if (-not $j.P.HasExited) { continue }
+    if (-not $j.H.IsCompleted) { continue }
     [void]$script:Jobs.Remove($j)
-    $res = $null; $err = $null
-    $out = Join-Path $j.Dir 'out.xml'; $ef = Join-Path $j.Dir 'error.txt'
-    if (Test-Path $ef) { $err = [IO.File]::ReadAllText($ef) }
-    elseif (Test-Path $out) { try { $res = Import-Clixml $out } catch { $err = "Kunne ikke læse resultatet: $($_.Exception.Message)" } }
-    else { $err = "Jobbet stoppede uventet (kode $($j.P.ExitCode))." }
+    $r = Get-JobResult $j
+    $res = $r.Res; $err = $r.Err
     if ($err) { Log "Job-fejl: $err" }
-    Remove-Item -Recurse -Force $j.Dir -ErrorAction SilentlyContinue
     try { & $j.Done $res $err $j.Ctx } catch { Log "Done-fejl: $_"; Msg "Fejl: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
   }
   if ($script:Jobs.Count -eq 0) { $ui.Busy.Visibility = 'Hidden' }
@@ -133,7 +89,7 @@ $jobTimer.Add_Tick({
 $jobTimer.Start()
 # Luk evt. kørende job-processer, når appen lukkes
 $win.Add_Closed({
-  foreach ($j in @($script:Jobs)) { try { if (-not $j.P.HasExited) { $j.P.Kill(); [void]$j.P.WaitForExit(3000) } } catch {} }
+  foreach ($j in @($script:Jobs)) { try { if (-not $j.H.IsCompleted) { $st = $j.PS.BeginStop($null, $null); [void]$st.AsyncWaitHandle.WaitOne(3000) } } catch {} }
   try { if (Repair-GpuRestore) { Log 'GPU-test afbrudt ved lukning: strømgrænsen er gendannet' } } catch {}   # en afbrudt GPU-test må aldrig efterlade kortet ændret
 })
 
@@ -1557,14 +1513,35 @@ function Test-VagtAlive {
   if ($script:LastVagtWhy -ne ($why -join ', ')) { $script:LastVagtWhy = ($why -join ', '); Log "Vagt ikke fundet: $($script:LastVagtWhy)" }
   return $false
 }
+# Opgaver starter PowerShell direkte og med RemoteSigned,
+# så antivirus som Bitdefender ikke forveksler Opticon med et angreb.
+function New-PsTaskAction([string]$file) {
+  $sys = Join-Path $env:SystemRoot 'System32'
+  New-ScheduledTaskAction -Execute "$sys\WindowsPowerShell\v1.0\powershell.exe" -Argument "-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File `"$file`"" -WorkingDirectory $PSScriptRoot
+}
+function New-VagtAction { New-PsTaskAction $VagtScript }
+function Test-OldTaskAction($t) {
+  $a = @($t.Actions)[0]
+  return ($a -and (([string]$a.Execute) -match '(?i)conhost' -or ([string]$a.Arguments) -notmatch '(?i)RemoteSigned'))
+}
+# Flyt eksisterende opgaver over på den nye, rolige startmåde (én gang)
+function Update-TaskActions {
+  if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { return }
+  try {
+    $vt = Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue
+    if ($vt -and (Test-OldTaskAction $vt) -and (Test-Path $VagtScript)) {
+      Set-ScheduledTask -TaskName 'PC-Tjek Vagt' -TaskPath '\' -Action (New-VagtAction) -ErrorAction Stop | Out-Null
+      Log 'Vagtens opgave bruger nu den nye startmåde'
+    }
+  } catch { Log "Kunne ikke opdatere Vagtens opgave: $_" }
+}
 function Install-Vagt {
   if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når PC-Tjek er installeret med installeren (i Program Files).`n`nKør 'Installer PC-Tjek.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
   if (-not (Test-Path $VagtScript)) { Msg "Filen PC-Tjek-Vagt.ps1 mangler. Opdatér PC-Tjek, eller kør installeren igen." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
   try {
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $sys = Join-Path $env:SystemRoot 'System32'
-    $args2 = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$VagtScript`""
-    $action = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $args2 -WorkingDirectory $PSScriptRoot
+    $action = New-VagtAction
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -3194,7 +3171,7 @@ function Go {
   try { Start-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop }
   catch {
     $f = Join-Path $dest 'PC-Tjek-Start.ps1'; if (-not (Test-Path $f)) { $f = Join-Path $dest 'PC-Tjek-App.ps1' }
-    Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList ('--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "' + $f + '"')
+    Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList ('-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File "' + $f + '"')
   }
 }
 $t0 = (Get-Date).AddSeconds(-2); Go
@@ -3213,8 +3190,10 @@ if (-not $ok -and (Test-Path -LiteralPath $bk)) {
 }
 '@
     $cmd = $tpl.Replace('__PID__', [string]$PID).Replace('__LOG__', $LogFile.Replace("'", "''")).Replace('__DEST__', $PSScriptRoot.Replace("'", "''")).Replace('__BK__', $bk.Replace("'", "''")).Replace('__NEW__', [string]$c.Version).Replace('__OLD__', $AppVersion)
-    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $enc"
+    # Hjælperen gemmes som en almindelig, læsbar .ps1-fil (ingen kodet kommando)
+    $helper = Join-Path $JobRoot 'opdater-genstart.ps1'
+    [IO.File]::WriteAllText($helper, $cmd, (New-Object Text.UTF8Encoding $true))
+    Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File `"$helper`""
     $win.Close()
   } @{ Version = $v.version }
 })
@@ -3250,12 +3229,9 @@ function Ensure-Launcher {
   try {
     $t = Get-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop
     $a = @($t.Actions)[0]
-    if ($a.Arguments -like '*PC-Tjek-Start.ps1*') { return }
-    $sys = Join-Path $env:SystemRoot 'System32'
-    $args2 = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$launcher`""
-    $na = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $args2 -WorkingDirectory $PSScriptRoot
-    Set-ScheduledTask -TaskName 'PC-Tjek' -TaskPath '\' -Action $na -ErrorAction Stop | Out-Null
-    Log 'Ikonet starter nu via starteren (selvreparation)'
+    if ($a.Arguments -like '*PC-Tjek-Start.ps1*' -and -not (Test-OldTaskAction $t)) { return }
+    Set-ScheduledTask -TaskName 'PC-Tjek' -TaskPath '\' -Action (New-PsTaskAction $launcher) -ErrorAction Stop | Out-Null
+    Log 'Ikonet bruger nu den nye startmåde'
   } catch { Log "Kunne ikke sætte starteren op: $_" }
 }
 # Navneskift: omdøb gamle genveje til det nye navn (én gang)
@@ -3276,11 +3252,26 @@ function Update-Shortcuts {
   } catch { Log "Genveje kunne ikke omdøbes: $_" }
   if ($changed) { Log "Genveje omdøbt til $AppName"; try { Start-Process "$env:SystemRoot\System32\ie4uinit.exe" '-show' -WindowStyle Hidden } catch {} }
 }
+# Genveje fra ældre versioner startede via conhost. Peg dem direkte på schtasks.
+function Update-ShortcutTargets {
+  try {
+    $sh = New-Object -ComObject WScript.Shell
+    $sys = Join-Path $env:SystemRoot 'System32'
+    foreach ($lp in @((Join-Path ([Environment]::GetFolderPath('Desktop')) "$AppName.lnk"), (Join-Path (Join-Path ([Environment]::GetFolderPath('Programs')) $AppName) "$AppName.lnk"))) {
+      if (-not (Test-Path $lp)) { continue }
+      $l = $sh.CreateShortcut($lp)
+      if ([string]$l.TargetPath -match '(?i)conhost\.exe$') {
+        $l.TargetPath = "$sys\schtasks.exe"; $l.Arguments = '/run /tn "\PC-Tjek"'; $l.WindowStyle = 7
+        $l.Save(); Log "Genvej opdateret (uden conhost): $lp"
+      }
+    }
+  } catch { Log "Genveje kunne ikke opdateres: $_" }
+}
 $win.Add_ContentRendered({
   Log "Vindue vist v$AppVersion"   # bekræftelse til opdateringens sikkerhedsnet: præcis denne version kom helt frem til vinduet
   Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false
   Update-Shortcuts
-  Ensure-Launcher
+  Ensure-Launcher; Update-TaskActions; Update-ShortcutTargets
   try { $r = Repair-Modes; if ($r) { Log "Tilstand ryddet op ved start: $($r.Mode) ($($r.Reason))" } } catch { Log "Tilstand-oprydning fejlede: $_" }
   try { Update-ModeUi } catch {}; $modeTimer.Start()
   try { Update-Changes } catch { Log "Hjalp det-fejl: $_" }
@@ -3289,3 +3280,5 @@ Log 'UI klar'
 [void]$win.ShowDialog()
 $jobTimer.Stop()
 Log 'Lukket'
+# Sørg for at ingen hængende baggrundsjob holder processen i live
+if (-not $RestoreOnly) { [Environment]::Exit(0) }

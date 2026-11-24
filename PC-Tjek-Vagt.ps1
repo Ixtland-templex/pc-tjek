@@ -282,7 +282,7 @@ function Restore-Everything($reason) {
   return $s
 }
 
-function Open-App { try { Start-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop } catch { Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(if (Test-Path "$AppDir\PC-Tjek-Start.ps1") { "$AppDir\PC-Tjek-Start.ps1" } else { "$AppDir\PC-Tjek-App.ps1" })`"" } }
+function Open-App { try { Start-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop } catch { Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -STA -WindowStyle Hidden -File `"$(if (Test-Path "$AppDir\PC-Tjek-Start.ps1") { "$AppDir\PC-Tjek-Start.ps1" } else { "$AppDir\PC-Tjek-App.ps1" })`"" } }
 
 # =====================================================================
 #  POPUPS (eget design, nederst til højre)
