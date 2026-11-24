@@ -1,7 +1,9 @@
 {
-  "version": "2.28",
+  "version": "2.29",
   "date": "2026-11-24",
   "notes": [
+    "Rettet: 2.28 kunne ikke starte (et forkert anførselstegn)",
+    "Sikring: opdateringer bliver tjekket for skrivefejl, før de installeres",
     "GPU-funktionerne virker nu også på AMD og Intel (fx Radeon 860M)",
     "AMD/Intel: Find den bedste strømtilstand afprøver Windows' 3 strømtilstande",
     "Watt for hele pc'en måles på batteri, belastning måles altid",
@@ -31,7 +33,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "143C514180F2E9C9925307AC35AD86874380CBFBB01A4E2F7C2ADDFFC5E9DE10"
+      "sha256": "5F24C08AFBE96FACFCD81BFC3E50256F3B91B898EDD7C89631E63D2058015330"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",

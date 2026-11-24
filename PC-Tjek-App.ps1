@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.28'
+$AppVersion = '2.29'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1000,6 +1000,11 @@ $UpdateApplyScript = {
     Invoke-WebRequest -Uri ("{0}/{1}?t={2}" -f $arg.Url, [Uri]::EscapeDataString($f.name), [DateTime]::UtcNow.Ticks) -OutFile $out -UseBasicParsing -TimeoutSec 60
     $h = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash
     if ($h -ne ([string]$f.sha256).ToUpper()) { throw "Fingeraftrykket for $($f.name) passer ikke (forventet $($f.sha256), fik $h). Opdateringen er afbrudt, og intet er ændret." }
+    # Sikring: et script med en skrivefejl kan slet ikke starte. Tjek, at PowerShell kan læse det, FØR det installeres.
+    if ($f.name -like '*.ps1') {
+      $perr = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($out, [ref]$null, [ref]$perr)
+      if ($perr -and $perr.Count) { throw "Den nye version af $($f.name) indeholder en fejl (linje $($perr[0].Extent.StartLineNumber): $($perr[0].Message)). Opdateringen er afbrudt, og intet er ændret." }
+    }
   }
   $sync.Status = 'Installerer opdatering...'
   $backup = Join-Path $arg.Dest ("backup-v" + $arg.OldVersion)
@@ -4327,7 +4332,7 @@ function Show-PowerModes($res, $steps) {
   $ui.GridGpuAuto.ItemsSource = $rows; $ui.GridGpuAuto.Visibility = 'Visible'
   $ui.GpuRecBox.Visibility = 'Visible'; $ui.GpuAbBox.Visibility = 'Collapsed'; $ui.BtnGpuAbHow.Visibility = 'Collapsed'
   $script:GpuRec = $null; $script:GpuRecMode = $null
-  if (-not $rec) { $ui.GpuRecTitle.Text = 'Testen gav ingen klare tal'; $ui.GpuRecText.Text = 'Kør testen igen, og rør ikke pc’en imens.'; $ui.BtnGpuApply.Visibility = 'Collapsed'; return }
+  if (-not $rec) { $ui.GpuRecTitle.Text = 'Testen gav ingen klare tal'; $ui.GpuRecText.Text = "Kør testen igen, og rør ikke pc'en imens."; $ui.BtnGpuApply.Visibility = 'Collapsed'; return }
   $best = $st | Sort-Object Fps -Descending | Select-Object -First 1
   $script:GpuRecMode = $rec.Mode
   $name = PowerMode-Name $rec.Mode
