@@ -1,19 +1,20 @@
 {
-  "version": "2.18",
+  "version": "2.20",
   "date": "2026-11-24",
   "notes": [
-    "Ny: 🎮 GPU-tuning i Optimering med live-data for effekt, temperatur, blæser og clock",
-    "Mål før og efter en ændring, og se om den var det værd",
-    "Testet på min pc + eksempler fra andre (TechFuelHQ, CC BY 4.0)"
+    "Ny: 🚀 Find det bedste punkt automatisk med indbygget 3D-testscene",
+    "Afprøver selv 4 strømgrænser og anbefaler den bedste",
+    "Brug anbefalingen med ét klik. Vagten sætter den igen ved opstart",
+    "Før/efter-test bruger nu testscenen i stedet for et spil"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "4CFD5F6B43937968E256F8BE0AF633DD7114E3E0CD0511FCB2743CC52716A5CB"
+      "sha256": "8FCC7F429A2770C233967EEF79363D5349F089EF5A8CD79DE7F8BC3F9C31AFF0"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "57E3FD74946C7DAB95180EADB02981E4B48973E2372361DA1F728296AD2AD69F"
+      "sha256": "6A53FDAB9775A6E3427E2A069A33881737973FA0695488721C76204C89FBCDBA"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

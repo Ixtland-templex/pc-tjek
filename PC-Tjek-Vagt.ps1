@@ -372,6 +372,15 @@ function Write-Status {
   try { [IO.File]::WriteAllText($StatusFile, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
 }
 VLog 'Vagt' 'info' 'Vagten er startet' "Overvåger $DlDir" ''
+# Grafikkortets strømgrænse fra PC-Tjeks GPU-test (Windows nulstiller den ved genstart)
+$GpuPlFile = Join-Path $Base 'gpu-pl.json'
+if (Test-Path $GpuPlFile) {
+  try {
+    $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json
+    $smi = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+    if ((Test-Path $smi) -and [int]$g.Watts -gt 0) { $null = & $smi -pl ([int]$g.Watts) 2>&1; VLog 'Vagt' 'info' "Grafikkortets strømgrænse sat til $($g.Pct) % ($($g.Watts) W)" '' '' }
+  } catch {}
+}
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(3)
 $timer.Add_Tick({

@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.18'
+$AppVersion = '2.20'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -851,38 +851,195 @@ $CrashScript = {
 }
 
 
-$GpuMeasureScript = {
-  param($sync, $arg)
-  $ErrorActionPreference = 'SilentlyContinue'
-  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
-  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
-  if (-not (Test-Path $smi)) { throw 'nvidia-smi blev ikke fundet. Måling kræver et NVIDIA-kort med driver.' }
-  $dur = [int]$arg.Seconds
-  $inv = [Globalization.CultureInfo]::InvariantCulture
-  $samples = New-Object System.Collections.ArrayList
-  $t0 = Get-Date
-  for ($i = 0; $i -lt $dur; $i++) {
-    $q = & $smi --query-gpu=power.draw,power.limit,temperature.gpu,fan.speed,clocks.gr,utilization.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1
-    $p = @($q -split ',\s*')
-    $num = { param($x) $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
-    $s = [pscustomobject]@{ W = (& $num $p[0]); Lim = (& $num $p[1]); T = (& $num $p[2]); F = (& $num $p[3]); C = (& $num $p[4]); U = (& $num $p[5]) }
-    [void]$samples.Add($s)
-    $sync.Progress = [double](100 * ($i + 1) / $dur)
-    $sync.Status = "Måler... $($dur - $i - 1) sek tilbage · $([int]$s.W) W · $([int]$s.T) °C · $([int]$s.U) % belastning"
-    $next = $t0.AddSeconds($i + 1); $wait = ($next - (Get-Date)).TotalMilliseconds; if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]$wait) }
-  }
-  $load = @($samples | Where-Object { $_.U -ge 60 })
-  $use = if ($load.Count -ge 10) { $load } else { @($samples) }
-  $avg = { param($prop) $v = @($use | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($v.Count) { [math]::Round(($v | Measure-Object -Average).Average, 1) } else { $null } }
-  return @{ W = (& $avg 'W'); Lim = (& $avg 'Lim'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U')
-            LowLoad = ($load.Count -lt 10); N = $use.Count; Time = (Get-Date) }
-}
 $GpuLibScript = {
   param($sync, $arg)
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   $sync.Status = 'Henter GPU-eksempler...'
   $j = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/iBlessi/gpu-undervolt-db/main/data/undervolt_results.json' -UseBasicParsing -TimeoutSec 15
   return @($j.results)
+}
+
+
+$GpuBenchHtml = @'
+<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><title>PC-Tjek GPU-test</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}
+canvas{width:100vw;height:100vh;display:block}
+#o{position:fixed;left:28px;top:22px;font:600 17px "Segoe UI",sans-serif;color:#fff;text-shadow:0 0 8px #000;opacity:.9;line-height:1.5}
+#o small{font-weight:400;opacity:.75}
+#f{position:fixed;inset:0;display:none;align-items:center;justify-content:center;font:600 30px "Segoe UI",sans-serif;color:#fff;background:#0D0F14}
+</style></head>
+<body><canvas id="c"></canvas><div id="o">PC-Tjek GPU-test<br><small>Starter…</small></div><div id="f">✓ Færdig. Du kan gå tilbage til PC-Tjek.</div>
+<script>
+const q = new URLSearchParams(location.search);
+let work = parseFloat(q.get('work')) || 0;
+const fixed = work > 0; if (!fixed) work = 1.0;
+const post = (p, d) => fetch(p, { method: 'POST', body: JSON.stringify(d || {}) }).catch(() => {});
+const c = document.getElementById('c'), o = document.getElementById('o');
+const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
+if (!gl) { post('/error', { e: 'WebGL2 er ikke tilgængeligt' }); }
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
+const fs = `#version 300 es
+precision highp float; uniform vec2 R; uniform float T; out vec4 col;
+mat2 rot(float a){ float s = sin(a), c = cos(a); return mat2(c, -s, s, c); }
+float map(vec3 p){
+  p.xz *= rot(T * .21); p.xy *= rot(T * .13);
+  float d = length(max(abs(p) - 1., 0.)); float s = 1.;
+  for (int i = 0; i < 5; i++) {
+    vec3 a = mod(p * s, 2.) - 1.; s *= 3.;
+    vec3 r = abs(1. - 3. * abs(a));
+    float da = max(r.x, r.y), db = max(r.y, r.z), dc = max(r.z, r.x);
+    d = max(d, (min(da, min(db, dc)) - 1.) / s);
+  }
+  return d;
+}
+vec3 nrm(vec3 p){ vec2 e = vec2(.0007, 0.); return normalize(vec3(map(p+e.xyy)-map(p-e.xyy), map(p+e.yxy)-map(p-e.yxy), map(p+e.yyx)-map(p-e.yyx))); }
+float shadow(vec3 ro, vec3 rd){ float r = 1., t = .02; for (int i = 0; i < 48; i++) { float h = map(ro + rd * t); r = min(r, 10. * h / t); t += clamp(h, .01, .2); if (h < .0005 || t > 6.) break; } return clamp(r, 0., 1.); }
+void main(){
+  vec2 uv = (gl_FragCoord.xy * 2. - R) / R.y;
+  vec3 ro = vec3(0., 0., 3.0 + sin(T * .3) * .5), rd = normalize(vec3(uv, -1.7));
+  float t = 0.; int i;
+  for (i = 0; i < 220; i++) { float d = map(ro + rd * t); if (d < .0004 || t > 12.) break; t += d; }
+  vec3 c = mix(vec3(.05, .06, .09), vec3(.02, .02, .03), uv.y * .5 + .5);
+  if (t < 12.) {
+    vec3 p = ro + rd * t, n = nrm(p), l = normalize(vec3(.6, .8, .5));
+    float dif = clamp(dot(n, l), 0., 1.) * shadow(p + n * .002, l);
+    float ao = 1. - float(i) / 220.;
+    vec3 base = mix(vec3(.55, .36, .96), vec3(.23, .62, 1.), .5 + .5 * n.y);
+    c = base * (.18 + .82 * dif) * ao + pow(clamp(dot(reflect(rd, n), l), 0., 1.), 24.) * .4;
+  }
+  col = vec4(pow(c, vec3(.4545)), 1.);
+}`;
+function sh(t, s){ const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) post('/error', { e: gl.getShaderInfoLog(x) }); return x; }
+const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
+const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
+function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRatio * work)); c.height = Math.max(180, Math.round(innerHeight * devicePixelRatio * work)); gl.viewport(0, 0, c.width, c.height); }
+resize(); addEventListener('resize', resize);
+addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
+let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
+// Kalibrering: juster belastningen, så FPS ligger under skærmens Hz (ellers begrænser vsync målingen)
+function calibrate(fps){ if (fps > 55) work = Math.min(3.0, work * 1.3); else if (fps < 25) work = Math.max(0.4, work * 0.85); resize(); }
+function frame(now){
+  if (done) return;
+  const dt = now - last; last = now; frames++; win.push(dt);
+  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (now - winStart >= 1000) {
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
+    const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
+    if (calibUntil && now < calibUntil) { calibrate(fps); }
+    else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
+    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label} · Esc for at stoppe</small>`;
+    win = []; winStart = now;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+setInterval(() => fetch('/state').then(r => r.json()).then(s => {
+  label = s.Label || ''; if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+}).catch(() => {}), 1000);
+</script></body></html>
+'@
+# Indbygget GPU-test: lokal webside med 3D-scene (WebGL2) i fuld skærm + målinger via nvidia-smi.
+# arg: Html, Steps (watt pr. trin, eller $null = rør ikke strømgrænsen), Work (0 = kalibrer), StepSec, Dir
+$GpuBenchScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'Stop'
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  if (-not (Test-Path $smi)) { throw 'nvidia-smi blev ikke fundet. Testen kræver et NVIDIA-grafikkort.' }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  function Num($x) { $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
+  function Q($fields) { @((& $smi "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
+  $lim = Q 'power.limit,power.default_limit,power.min_limit,power.max_limit'
+  $orig = $lim[0]; $def = $lim[1]
+  $browser = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+               "$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $browser) { throw 'Hverken Edge eller Chrome blev fundet.' }
+  $listener = New-Object Net.HttpListener
+  $port = 8760
+  while ($true) { try { $listener.Prefixes.Clear(); $listener.Prefixes.Add("http://localhost:$port/"); $listener.Start(); break } catch { $port++; if ($port -gt 8799) { throw 'Ingen ledig port til testen.' } } }
+  $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false }
+  $script:BFps = New-Object System.Collections.ArrayList
+  $script:BAbort = $false; $script:BErr = $null
+  $script:BWork = [double]$arg.Work; $script:BCalib = ($script:BWork -gt 0)
+  $script:BTask = $listener.GetContextAsync()
+  $htmlBytes = [Text.Encoding]::UTF8.GetBytes([string]$arg.Html)
+  function Pump {
+    while ($script:BTask.IsCompleted) {
+      $ctx = $script:BTask.Result
+      $script:BTask = $listener.GetContextAsync()
+      $path = $ctx.Request.Url.AbsolutePath; $body = ''
+      if ($ctx.Request.HasEntityBody) { $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8); $body = $sr.ReadToEnd(); $sr.Close() }
+      $out = [Text.Encoding]::UTF8.GetBytes('ok'); $type = 'text/plain'
+      switch ($path) {
+        '/'      { $out = $htmlBytes; $type = 'text/html; charset=utf-8' }
+        '/state' { $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
+        '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = Get-Date; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch {} }
+        '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
+        '/abort' { $script:BAbort = $true }
+        '/error' { try { $script:BErr = [string]($body | ConvertFrom-Json).e } catch { $script:BErr = 'Fejl i testsiden' }; $script:BAbort = $true }
+      }
+      try { $ctx.Response.ContentType = $type; $ctx.Response.Headers.Add('Cache-Control', 'no-store'); $ctx.Response.OutputStream.Write($out, 0, $out.Length); $ctx.Response.Close() } catch {}
+    }
+  }
+  function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 80 } }
+  $prof = Join-Path $arg.Dir 'browser'
+  $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))"
+  $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate" }
+           else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check `"$url`"" }
+  $results = New-Object System.Collections.ArrayList
+  $changedPl = $false
+  try {
+    $sync.Status = 'Starter testscenen...'
+    Start-Process -FilePath $browser -ArgumentList $bargs | Out-Null
+    $tw = (Get-Date).AddSeconds(25)
+    while ($script:BFps.Count -eq 0 -and -not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 }
+    if (-not $script:BCalib) { $sync.Status = 'Kalibrerer belastning...'; $tw = (Get-Date).AddSeconds(15); while (-not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 } }
+    if ($script:BErr) { throw "Testsiden fejlede: $($script:BErr)" }
+    if (-not $script:BCalib -and $script:BFps.Count -eq 0) { throw 'Testscenen startede ikke. Er Edge eller Chrome blokeret?' }
+    $steps = @($arg.Steps); $total = $steps.Count
+    for ($i = 0; $i -lt $total; $i++) {
+      if ($script:BAbort) { break }
+      $pl = $steps[$i]
+      $script:BState.Step = $i + 1
+      $script:BState.Label = if ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
+      if ($pl) { & $smi -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true }
+      $sync.Status = "$($script:BState.Label): stabiliserer..."
+      WaitPump 5
+      $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
+      while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
+        Pump
+        if ((Get-Date) -ge $nextS) {
+          $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'
+          [void]$samples.Add([pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] })
+          $nextS = $nextS.AddSeconds(1)
+          $el = ((Get-Date) - $t0).TotalSeconds
+          $sync.Progress = [double](100 * ($i + [math]::Min(1, $el / [double]$arg.StepSec)) / $total)
+          $lastF = $script:BFps | Select-Object -Last 1
+          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps · $([int]$v[0]) W · $([int]$v[1]) °C"
+        }
+        Start-Sleep -Milliseconds 80
+      }
+      $t1 = Get-Date
+      $fw = @($script:BFps | Where-Object { $_.Time -ge $t0 -and $_.Time -le $t1 })
+      $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
+      $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
+      $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
+      [void]$results.Add([pscustomobject]@{ Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
+    }
+  } finally {
+    if ($changedPl -and $orig) { & $smi -pl ([math]::Round($orig)) 2>&1 | Out-Null }   # gendan altid den oprindelige strømgrænse
+    $script:BState.Done = $true
+    try { WaitPump 1.5 } catch {}
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
+    try { $listener.Stop(); $listener.Close() } catch {}
+  }
+  return @{ Steps = @($results); Work = $script:BWork; Aborted = $script:BAbort; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
 # =====================================================================
@@ -1361,25 +1518,70 @@ $GpuLibScript = {
               <StackPanel><TextBlock Text="CLOCK" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveC" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
               <StackPanel><TextBlock Text="BELASTNING" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveU" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
             </UniformGrid>
-            <!-- mål før/efter -->
-            <Border Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,16,0,0">
+            <!-- automatisk test -->
+            <Border Background="#10131A" BorderBrush="#3B2C6E" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,16,0,0">
               <StackPanel>
-                <TextBlock Text="📏  Mål før og efter" FontSize="15" FontWeight="SemiBold"/>
-                <TextBlock Name="GpuMeasureInfo" Style="{StaticResource Sub}" Margin="0,4,0,10" Text="1) Start et spil, og stil dig samme sted med samme indstillinger. 2) Tryk 'Mål FØR', og spil i 2 minutter. 3) Lav ÉN ændring i tuningværktøjet. 4) Tryk 'Mål EFTER', og spil samme sekvens igen."/>
+                <DockPanel>
+                  <Button Name="BtnGpuAuto" DockPanel.Dock="Right" Content="🚀  Find det bedste punkt (ca. 4 min)" Style="{StaticResource Primary}" Padding="16,9" Margin="0"/>
+                  <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="🚀  Automatisk: mindre strøm, næsten samme ydelse" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="GpuAutoInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="PC-Tjek viser en 3D-testscene i fuld skærm og prøver selv 4 strømgrænser (100, 90, 80 og 70 %). Bagefter får du en anbefaling. Den oprindelige indstilling gendannes altid."/>
+                  </StackPanel>
+                </DockPanel>
+                <ProgressBar Name="GpuAutoBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <DataGrid Name="GridGpuAuto" IsReadOnly="True" Margin="0,12,0,0" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="34"/>
+                    <DataGridTextColumn Header="STRØMGRÆNSE" Binding="{Binding Navn}" Width="1.4*"/>
+                    <DataGridTextColumn Header="EFFEKT" Binding="{Binding Info}" Width="1.2*"/>
+                    <DataGridTextColumn Header="FPS" Binding="{Binding Note}" Width="1.3*"/>
+                    <DataGridTextColumn Header="TEMP · BLÆSER · CLOCK" Binding="{Binding Gruppe}" Width="2.4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <Border Name="GpuRecBox" Visibility="Collapsed" CornerRadius="10" Background="#173325" BorderBrush="#22C55E" BorderThickness="1" Padding="14,12" Margin="0,12,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuRecTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="GpuRecText" Foreground="#C3E8D0" TextWrapping="Wrap" Margin="0,4,0,10"/>
+                    <WrapPanel>
+                      <Button Name="BtnGpuApply" Content="✅  Brug anbefalingen" Style="{StaticResource Primary}"/>
+                      <Button Name="BtnGpuReset" Content="↩  Tilbage til standard"/>
+                      <Button Name="BtnGpuAbHow" Content="🎚  Hellere med Afterburner?"/>
+                    </WrapPanel>
+                    <!-- illustration af Afterburner-skyderen (egen tegning) -->
+                    <Border Name="GpuAbBox" Visibility="Collapsed" Background="#0B0D12" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                      <StackPanel>
+                        <TextBlock Text="Sådan i MSI Afterburner:" FontWeight="SemiBold"/>
+                        <Grid Margin="0,10,0,4" Width="340" HorizontalAlignment="Left">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="50"/></Grid.ColumnDefinitions>
+                          <TextBlock Text="Power Limit (%)" Foreground="#AEB6C6" VerticalAlignment="Center"/>
+                          <Grid Grid.Column="1" Height="10" VerticalAlignment="Center">
+                            <Border Background="#242A39" CornerRadius="5"/>
+                            <Border Name="GpuAbFill" Background="{StaticResource Accent}" CornerRadius="5" HorizontalAlignment="Left" Width="120"/>
+                          </Grid>
+                          <TextBlock Name="GpuAbVal" Grid.Column="2" Text="80" FontWeight="Bold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                        <TextBlock Name="GpuAbSteps" Foreground="#AEB6C6" TextWrapping="Wrap" LineHeight="21" Margin="0,6,0,0"/>
+                      </StackPanel>
+                    </Border>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+            </Border>
+            <!-- mål før/efter (egne indstillinger) -->
+            <Border Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="📏  Test dine egne indstillinger (før/efter)" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Name="GpuMeasureInfo" Style="{StaticResource Sub}" Margin="0,4,0,10" Text="Til undervolt i fx Afterburner: 1) Tryk 'Mål FØR'. Testscenen kører 1 minut. 2) Lav ÉN ændring i Afterburner. 3) Tryk 'Mål EFTER'. Begge målinger bruger præcis samme belastning."/>
                 <WrapPanel>
-                  <Button Name="BtnGpuBefore" Content="①  Mål FØR (2 min)" Style="{StaticResource Primary}"/>
-                  <Button Name="BtnGpuAfter" Content="②  Mål EFTER (2 min)" IsEnabled="False"/>
-                  <TextBlock Text="FPS før:" VerticalAlignment="Center" Margin="10,0,6,0" Foreground="{StaticResource Muted}"/>
-                  <TextBox Name="TxtFpsBefore" Width="60" ToolTip="Valgfrit: læs FPS i spillet eller i NVIDIA-overlay (Alt+R)"/>
-                  <TextBlock Text="efter:" VerticalAlignment="Center" Margin="8,0,6,0" Foreground="{StaticResource Muted}"/>
-                  <TextBox Name="TxtFpsAfter" Width="60"/>
+                  <Button Name="BtnGpuBefore" Content="①  Mål FØR (1 min)" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnGpuAfter" Content="②  Mål EFTER (1 min)" IsEnabled="False"/>
                 </WrapPanel>
                 <ProgressBar Name="GpuMeasureBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
                 <TextBlock Name="GpuResult" TextWrapping="Wrap" FontSize="15" FontWeight="SemiBold" Margin="0,12,0,0"/>
                 <TextBlock Name="GpuVerdict" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="#AEB6C6"/>
                 <DockPanel Name="GpuSavePanel" Margin="0,10,0,0" Visibility="Collapsed">
                   <Button Name="BtnGpuSave" DockPanel.Dock="Right" Content="💾  Gem som 'Testet på min pc'" Margin="8,0,0,0"/>
-                  <TextBox Name="TxtGpuNote" ToolTip="Hvad ændrede du? Fx 'Afterburner: 900 mV @ 2600 MHz' eller 'NVIDIA App: auto-tuning'"/>
+                  <TextBox Name="TxtGpuNote" ToolTip="Hvad ændrede du? Fx 'Afterburner: 900 mV @ 2600 MHz'"/>
                 </DockPanel>
               </StackPanel>
             </Border>
@@ -3193,68 +3395,139 @@ $gpuTimer = New-Object Windows.Threading.DispatcherTimer
 $gpuTimer.Interval = [TimeSpan]::FromSeconds(3)
 $gpuTimer.Add_Tick({ if ($ui.PageTweaks.Visibility -eq 'Visible' -and -not $script:GpuMeasuring) { try { Update-GpuLive } catch {} } })
 
-function Fmt-Delta($a, $b, $unit, [switch]$Pct) {
-  if ($null -eq $a -or $null -eq $b) { return $null }
-  $s = "$([math]::Round($a)) → $([math]::Round($b))$unit"
-  if ($Pct -and $a -gt 0) { $d = [math]::Round(($b - $a) / $a * 100); $s += " ($(if ($d -gt 0) { '+' })$d %)" }
-  return $s
+$GpuPlFile = Join-Path $JobBase 'gpu-pl.json'
+function Smi-Q($fields) {
+  $smi = Get-Smi; if (-not $smi) { return @() }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  @((& $smi "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { $v = 0.0; if ([double]::TryParse(([string]$_).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } })
+}
+function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
+function Start-GpuBench($mode) {
+  if (-not (Get-Smi)) { Msg 'Testen kræver et NVIDIA-grafikkort (nvidia-smi). Til AMD: brug Auto Undervolt i AMD Adrenalin.' 'GPU' | Out-Null; return }
+  if ($mode -eq 'auto') {
+    $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'
+    $def = $l[0]; $min = $l[1]
+    if (-not $def) { Msg 'Dit grafikkort tillader ikke, at strømgrænsen ændres (det er fx tilfældet på mange bærbare). Brug i stedet "Test dine egne indstillinger".' 'GPU' | Out-Null; return }
+    $steps = @(100, 90, 80, 70 | ForEach-Object { [math]::Max($min, $def * $_ / 100) } | Select-Object -Unique)
+    if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
+    $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))) }
+    $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
+  } else {
+    if ($mode -eq 'after' -and -not $script:GpuWork) { Msg 'Mål FØR først.' 'GPU' | Out-Null; return }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Work = $(if ($mode -eq 'after') { $script:GpuWork } else { 0 }); StepSec = 45; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))) }
+    $ui.GpuMeasureBar.Visibility = 'Visible'; $ui.GpuMeasureBar.Value = 0
+    $ui.GpuResult.Text = "Måler $(if ($mode -eq 'before') { 'FØR' } else { 'EFTER' })... Testscenen åbner i fuld skærm om et øjeblik. Rør ikke musen."
+    $ui.GpuVerdict.Text = ''
+  }
+  $script:GpuMeasuring = $true
+  $ui.BtnGpuAuto.IsEnabled = $false; $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false
+  Invoke-Bg $GpuBenchScript $arg {
+    param($res, $err, $c)
+    $script:GpuMeasuring = $false
+    $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork
+    $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'
+    try { $win.Activate() | Out-Null } catch {}
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
+    $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
+    if ($err -or -not $steps.Count) {
+      $msg = if ($err) { $err } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } else { 'Testscenen gav ingen målinger.' }
+      if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
+      return
+    }
+    try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
+    if ($c.GpuMode -eq 'auto') { Show-GpuAuto $res $steps }
+    elseif ($c.GpuMode -eq 'before') {
+      $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $res.Work
+      $b = $steps[0]
+      $ui.GpuResult.Text = "FØR: $($b.Fps) fps · $([math]::Round($b.W)) W · $([math]::Round($b.T)) °C · blæser $(if ($null -ne $b.F) { "$([math]::Round($b.F)) %" } else { 'n/a' }) · $([math]::Round($b.C)) MHz"
+      $ui.GpuVerdict.Text = "Lav nu ÉN ændring i Afterburner (fx en spændingskurve eller et lavere power limit), og tryk så 'Mål EFTER'."
+      $ui.BtnGpuAfter.IsEnabled = $true
+    } else { $script:GpuAfter = $steps[0]; Show-GpuCompare }
+  } @{ GpuMode = $mode }
+  if (-not $script:GpuProgTimer) {
+    $script:GpuProgTimer = New-Object Windows.Threading.DispatcherTimer
+    $script:GpuProgTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+    $script:GpuProgTimer.Add_Tick({
+      if (-not $script:GpuMeasuring) { $script:GpuProgTimer.Stop(); return }
+      $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.GpuMode } | Select-Object -First 1
+      if (-not $j) { return }
+      $p = [double]$j.S.Progress
+      if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
+      else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
+    })
+  }
+  $script:GpuProgTimer.Start()
+}
+function Show-GpuAuto($res, $steps) {
+  $base = $steps[0]
+  $rec = $base
+  foreach ($s in $steps) { if ($s.Fps -ge 0.97 * $base.Fps -and $s.W -lt $rec.W) { $rec = $s } }
+  $ui.GridGpuAuto.ItemsSource = @($steps | ForEach-Object {
+    $r = New-Object PcTjek.Row
+    $r.Status = $(if ($_ -eq $rec -and $rec -ne $base) { '⭐' } else { '' })
+    $r.Navn = "$($_.Pct) %  ·  $([math]::Round($_.Pl)) W"
+    $r.Info = "$([math]::Round($_.W)) W$(if ($_ -ne $base) { Pct-Str $base.W $_.W })"
+    $r.Note = "$($_.Fps) fps$(if ($_ -ne $base) { Pct-Str $base.Fps $_.Fps })"
+    $r.Gruppe = "$([math]::Round($_.T)) °C · $(if ($null -ne $_.F) { "$([math]::Round($_.F)) %" } else { 'n/a' }) · $([math]::Round($_.C)) MHz"
+    $r })
+  $ui.GridGpuAuto.Visibility = 'Visible'; $ui.GpuRecBox.Visibility = 'Visible'; $ui.GpuAbBox.Visibility = 'Collapsed'
+  $script:GpuRec = $rec
+  if ($rec -eq $base) {
+    $ui.GpuRecTitle.Text = '👍 Dit grafikkort er allerede effektivt'
+    $ui.GpuRecText.Text = "Selv en lavere strømgrænse kostede mere end 3 % FPS i testen. Der er ikke meget at hente her uden at miste ydelse."
+    $ui.BtnGpuApply.Visibility = 'Collapsed'; $ui.BtnGpuAbHow.Visibility = 'Collapsed'
+  } else {
+    $dW = [math]::Round(($rec.W - $base.W) / $base.W * 100); $dF = [math]::Round(($rec.Fps - $base.Fps) / $base.Fps * 100)
+    $dT = [math]::Round($base.T - $rec.T)
+    $ui.GpuRecTitle.Text = "⭐ Anbefalet: $($rec.Pct) % strømgrænse ($([math]::Round($rec.Pl)) W)"
+    $fan = if ($null -ne $base.F -and $null -ne $rec.F) { ", blæser $([math]::Round($base.F)) → $([math]::Round($rec.F)) %" } else { '' }
+    $ui.GpuRecText.Text = "$([math]::Abs($dW)) % mindre strøm ($([math]::Round($base.W)) → $([math]::Round($rec.W)) W), $(if ($dF -le 0) { "$([math]::Abs($dF)) % lavere FPS" } else { "$dF % højere FPS" }), $dT °C køligere$fan. Det er den laveste grænse, hvor du beholdt mindst 97 % af ydelsen i testen."
+    $ui.BtnGpuApply.Content = "✅  Brug $($rec.Pct) % fremover"; $ui.BtnGpuApply.Visibility = 'Visible'; $ui.BtnGpuAbHow.Visibility = 'Visible'
+    $ui.GpuAbVal.Text = "$($rec.Pct)"; $ui.GpuAbFill.Width = [math]::Round(230 * $rec.Pct / 120)
+    $ui.GpuAbSteps.Text = "1.  Åbn MSI Afterburner.`n2.  Træk 'Power Limit' ned til $($rec.Pct).`n3.  Tryk ✓ (Apply).`n4.  Slå 'Startup' til (Windows-ikonet), så den bruges ved opstart.`n`nBrug enten Afterburner ELLER PC-Tjeks knap, ikke begge."
+  }
+  $ui.GpuAutoInfo.Text = "Test færdig $(Get-Date -Format 'HH:mm'). Samme 3D-scene og belastning ved alle trin$(if ($res.Aborted) { ' (stoppet før tid, så ikke alle trin blev målt)' })."
+  Log "GPU-test: anbefalet $($rec.Pct) %"
 }
 function Show-GpuCompare {
   $a = $script:GpuBefore; $b = $script:GpuAfter
-  $parts = @()
-  $x = Fmt-Delta $a.W $b.W ' W' -Pct; if ($x) { $parts += "Effekt $x" }
-  $x = Fmt-Delta $a.T $b.T ' °C'; if ($x) { $parts += "Temp $x" }
-  $x = Fmt-Delta $a.F $b.F ' %'; if ($x) { $parts += "Blæser $x" }
-  $x = Fmt-Delta $a.C $b.C ' MHz' -Pct; if ($x) { $parts += "Clock $x" }
-  $fb = 0.0; $fa = 0.0
-  $hasFps = [double]::TryParse($ui.TxtFpsBefore.Text, [ref]$fb) -and [double]::TryParse($ui.TxtFpsAfter.Text, [ref]$fa) -and $fb -gt 0
-  if ($hasFps) { $parts += "FPS $(Fmt-Delta $fb $fa '' -Pct)" }
+  $parts = @("FPS $($a.Fps) → $($b.Fps)$(Pct-Str $a.Fps $b.Fps)", "Effekt $([math]::Round($a.W)) → $([math]::Round($b.W)) W$(Pct-Str $a.W $b.W)", "Temp $([math]::Round($a.T)) → $([math]::Round($b.T)) °C")
+  if ($null -ne $a.F -and $null -ne $b.F) { $parts += "Blæser $([math]::Round($a.F)) → $([math]::Round($b.F)) %" }
+  $parts += "Clock $([math]::Round($a.C)) → $([math]::Round($b.C)) MHz"
   $ui.GpuResult.Text = $parts -join '  ·  '
-  $wPct = if ($a.W -gt 0 -and $null -ne $b.W) { ($b.W - $a.W) / $a.W * 100 } else { 0 }
-  $perfPct = if ($hasFps) { ($fa - $fb) / $fb * 100 } elseif ($a.C -gt 0 -and $null -ne $b.C) { ($b.C - $a.C) / $a.C * 100 } else { 0 }
-  $what = if ($hasFps) { 'FPS' } else { 'clock (FPS ikke indtastet)' }
-  $ui.GpuVerdict.Text = if ($wPct -le -8 -and $perfPct -ge -3) { "👍 Værd at beholde: $([math]::Abs([math]::Round($wPct))) % mindre strøm, og $what faldt kun $([math]::Abs([math]::Round($perfPct))) %. Spil et par timer i dine egne spil for at sikre, at det er stabilt. Går et spil ned, så skru lidt tilbage." }
-                        elseif ($perfPct -lt -5) { "⚠ Ydelsen faldt mærkbart ($([math]::Round($perfPct)) % $what). Prøv en mildere indstilling." }
-                        elseif ($wPct -gt -3) { "Næsten ingen forskel i strømforbrug. Ændringen gjorde ikke meget, eller kortet var ikke fuldt belastet." }
+  $wPct = ($b.W - $a.W) / [math]::Max(1, $a.W) * 100; $fPct = ($b.Fps - $a.Fps) / [math]::Max(1, $a.Fps) * 100
+  $ui.GpuVerdict.Text = if ($wPct -le -8 -and $fPct -ge -3) { "👍 Værd at beholde: $([math]::Abs([math]::Round($wPct))) % mindre strøm, og FPS ændrede sig kun $([math]::Round($fPct)) %. Spil et par timer i dine egne spil for at sikre, at det er stabilt." }
+                        elseif ($fPct -lt -5) { "⚠ Ydelsen faldt mærkbart ($([math]::Round($fPct)) % FPS). Prøv en mildere indstilling." }
+                        elseif ($wPct -gt -3) { 'Næsten ingen forskel i strømforbrug. Ændringen gjorde ikke meget.' }
                         else { "Lidt mindre strøm ($([math]::Round($wPct)) %). Sammenlign, om det er det værd for dig." }
-  if ($a.LowLoad -or $b.LowLoad) { $ui.GpuVerdict.Text += "`n⚠ Grafikkortet var ikke fuldt belastet under en af målingerne. Kørte spillet i forgrunden?" }
   $ui.GpuSavePanel.Visibility = 'Visible'
 }
-function Start-GpuMeasure($which) {
-  if (-not (Get-Smi)) { Msg 'Måling kræver et NVIDIA-grafikkort (nvidia-smi). Til AMD: brug målingerne i AMD Adrenalin.' 'GPU' | Out-Null; return }
-  $script:GpuMeasuring = $true
-  $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false
-  $ui.GpuMeasureBar.Visibility = 'Visible'; $ui.GpuMeasureBar.Value = 0
-  $ui.GpuResult.Text = "Måler $(if ($which -eq 'before') { 'FØR' } else { 'EFTER' })... Skift til spillet nu, og spil i 2 minutter."
-  $ui.GpuVerdict.Text = ''
-  Invoke-Bg $GpuMeasureScript @{ Seconds = 120 } {
-    param($res, $err, $c)
-    $script:GpuMeasuring = $false; $ui.GpuMeasureBar.Visibility = 'Collapsed'
-    $ui.BtnGpuBefore.IsEnabled = $true
-    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
-    if ($err -or -not $res) { $ui.GpuResult.Text = "Målingen fejlede: $err"; return }
-    if ($c.Which -eq 'before') {
-      $script:GpuBefore = $res; $script:GpuAfter = $null
-      $ui.GpuResult.Text = "FØR: $([math]::Round($res.W)) W · $([math]::Round($res.T)) °C · blæser $(if ($null -ne $res.F) { "$([math]::Round($res.F)) %" } else { 'n/a' }) · $([math]::Round($res.C)) MHz · $([math]::Round($res.U)) % belastning"
-      $ui.GpuVerdict.Text = "Lav nu ÉN ændring i tuningværktøjet (fx et lavere power limit, kortets Quiet-profil eller auto-tuning), og tryk så 'Mål EFTER'.$(if ($res.LowLoad) { "`n⚠ Kortet var ikke fuldt belastet. Kørte spillet?" })"
-      $ui.BtnGpuAfter.IsEnabled = $true
-    } else { $script:GpuAfter = $res; $ui.BtnGpuAfter.IsEnabled = $true; Show-GpuCompare }
-    try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
-  } @{ Which = $which }
-  # vis måle-fremdrift i bjælken
-  $script:GpuProgTimer = New-Object Windows.Threading.DispatcherTimer
-  $script:GpuProgTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-  $script:GpuProgTimer.Add_Tick({
-    if (-not $script:GpuMeasuring) { $script:GpuProgTimer.Stop(); return }
-    $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.Which } | Select-Object -First 1
-    if ($j -and [double]$j.S.Progress -ge 0) { $ui.GpuMeasureBar.Value = [double]$j.S.Progress; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
-  })
-  $script:GpuProgTimer.Start()
-}
-$ui.BtnGpuBefore.Add_Click({ Start-GpuMeasure 'before' })
-$ui.BtnGpuAfter.Add_Click({ Start-GpuMeasure 'after' })
-$ui.TxtFpsAfter.Add_TextChanged({ if ($script:GpuBefore -and $script:GpuAfter) { Show-GpuCompare } })
-$ui.TxtFpsBefore.Add_TextChanged({ if ($script:GpuBefore -and $script:GpuAfter) { Show-GpuCompare } })
+$ui.BtnGpuAuto.Add_Click({ Start-GpuBench 'auto' })
+$ui.BtnGpuBefore.Add_Click({ Start-GpuBench 'before' })
+$ui.BtnGpuAfter.Add_Click({ Start-GpuBench 'after' })
+$ui.BtnGpuAbHow.Add_Click({ $ui.GpuAbBox.Visibility = $(if ($ui.GpuAbBox.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }) })
+$ui.BtnGpuApply.Add_Click({
+  $r = $script:GpuRec; $smi = Get-Smi
+  if (-not $r -or -not $smi) { return }
+  $o = & $smi -pl ([math]::Round($r.Pl)) 2>&1
+  if ($LASTEXITCODE -ne 0) { Msg "Kunne ikke sætte strømgrænsen:`n$($o -join ' ')" 'GPU' 'OK' 'Error' | Out-Null; return }
+  $cfg = [ordered]@{ Watts = [math]::Round($r.Pl); Pct = $r.Pct; Gpu = (Get-GpuName); Date = (Get-Date).ToString('s') }
+  try { [IO.File]::WriteAllText($GpuPlFile, ($cfg | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
+  Log "GPU-strømgrænse sat til $($cfg.Watts) W"
+  if (Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue) {
+    Msg "✓ Strømgrænsen er sat til $($r.Pct) % ($($cfg.Watts) W).`n`nVagten sætter den automatisk igen, hver gang du logger ind. Du kan altid gå tilbage til standard." 'GPU' | Out-Null
+  } elseif ((Msg "✓ Strømgrænsen er sat til $($r.Pct) % nu.`n`nWindows nulstiller den ved genstart. Skal PC-Tjeks Vagt sætte den automatisk ved hvert login? (Vagten passer også på dine downloads.)" 'GPU' 'YesNo' 'Question') -eq 'Yes') { [void](Install-Vagt) }
+  Load-Gpu
+})
+$ui.BtnGpuReset.Add_Click({
+  $smi = Get-Smi; if (-not $smi) { return }
+  $def = (Smi-Q 'power.default_limit')[0]
+  if ($def) { & $smi -pl ([math]::Round($def)) 2>&1 | Out-Null }
+  Remove-Item $GpuPlFile -Force -ErrorAction SilentlyContinue
+  Log 'GPU-strømgrænse nulstillet'
+  Msg "Strømgrænsen er tilbage på standard ($([math]::Round($def)) W)." 'GPU' | Out-Null
+  Load-Gpu
+})
 
 function Load-GpuMine {
   $list = @(); if (Test-Path $GpuTestsFile) { try { $list = @((Get-Content $GpuTestsFile -Raw | ConvertFrom-Json) | ForEach-Object { $_ }) } catch {} }
@@ -3270,30 +3543,59 @@ $ui.BtnGpuSave.Add_Click({
   Load-GpuMine; $ui.GpuSavePanel.Visibility = 'Collapsed'; $ui.StatusText.Text = 'Gemt under "Testet på min pc".'
 })
 
+# Tolker et GPU-navn til producent-familie, nummer, endelse og generation (fx RTX 4080 Super -> RTX/4080/SUPER/4)
+function Parse-Gpu([string]$n) {
+  $n = ($n -replace '(?i)\(R\)|\(TM\)|nvidia|geforce|amd|radeon|intel|graphics|laptop gpu', '').Trim()
+  $m = [regex]::Match($n, '(?i)\b(RTX|GTX|RX|ARC\s*[AB]?)\s*([A-Z]?\d{3,4})\s*((?:TI\s*SUPER)|TI|SUPER|XTX|XT|GRE|S)?\b')
+  if (-not $m.Success) { return $null }
+  $fam = ($m.Groups[1].Value -replace '\s', '').ToUpper()
+  $num = $m.Groups[2].Value.ToUpper()
+  $suf = ($m.Groups[3].Value -replace '\s', '').ToUpper()
+  $digits = $num -replace '\D', ''
+  $gen = if ($digits.Length -eq 4) { $digits.Substring(0, 1) } elseif ($digits.Length -eq 3) { $digits.Substring(0, 1) } else { '' }
+  return [pscustomobject]@{ Fam = $fam; Num = $num; Suf = $suf; Gen = $gen; Key = "$fam $num $suf".Trim() }
+}
 function Load-GpuLib {
   Invoke-Bg $GpuLibScript $null {
     param($res, $err, $c)
     if ($err -or -not $res) { $ui.GpuLibInfo.Text = "Kunne ikke hente eksempler lige nu. $err"; return }
-    $mine = (Get-GpuName) -replace '(?i)nvidia|geforce|amd|radeon|\s', ''
+    $mineName = Get-GpuName
+    $mine = Parse-Gpu $mineName
+    $srcType = @{ 'editorial-firstparty' = 'Redaktionel'; 'review-measured' = 'Målt i test'; 'community-verified' = 'Bruger (verificeret)'; 'community-consensus' = 'Brugere (konsensus)' }
     $rows = @($res | ForEach-Object {
-      $g = [string]$_.gpu
-      $key = $g -replace '(?i)nvidia|geforce|amd|radeon|\s', ''
+      $it = $_
+      $pg = Parse-Gpu ([string]$it.gpu)
       $r = New-Object PcTjek.Row
-      $r.Navn = "$g$(if ($_.board) { " · $($_.board)" })"
-      $set = @($_.method, $_.setting) | Where-Object { $_ }
+      $r.Navn = "$($it.gpu)$(if ($it.board) { " · $($it.board)" })"
+      $set = @($it.method, $it.setting) | Where-Object { $_ }
       $r.Info = ($set -join ': ')
-      $res2 = @()
-      if ($_.power_saved_w) { $res2 += "−$($_.power_saved_w) W" }
-      if ($null -ne $_.fps_delta_pct -and "$($_.fps_delta_pct)" -ne '') { $res2 += "FPS $(if ([double]$_.fps_delta_pct -gt 0) { '+' })$($_.fps_delta_pct) %" }
-      if ($_.temp_drop_c) { $res2 += "−$($_.temp_drop_c) °C" }
-      $r.Note = ($res2 -join ' · ') + $(if ($_.test_method) { " ($($_.test_method))" })
-      $r.Gruppe = [string]$_.source_type
-      $r.Sti = [string]$_.source_url
-      $r.Valgt = ($mine -and $key -and ($mine -like "*$key*" -or $key -like "*$mine*"))
+      $bits = @()
+      if ($it.power_saved_w) { $bits += "−$($it.power_saved_w) W" }
+      if ("$($it.fps_delta_pct)" -ne '') { $bits += "FPS $(if ([double]$it.fps_delta_pct -gt 0) { '+' })$($it.fps_delta_pct) %" }
+      if ($it.temp_drop_c) { $bits += "−$($it.temp_drop_c) °C" }
+      if ($it.stability_hours) { $bits += "stabil $($it.stability_hours) t" }
+      $r.Note = $(if ($bits.Count) { $bits -join ' · ' } else { '(ingen tal)' })
+      $t = [string]$it.source_type; $r.Gruppe = $(if ($srcType.ContainsKey($t)) { $srcType[$t] } else { $t })
+      $r.Sti = [string]$it.source_url
+      $r.Status = ''
+      if ($mine -and $pg) {
+        if ($pg.Fam -eq $mine.Fam -and $pg.Num -eq $mine.Num -and $pg.Suf -eq $mine.Suf) { $r.Status = 'same' }
+        elseif ($pg.Fam -eq $mine.Fam -and $pg.Gen -and $pg.Gen -eq $mine.Gen) { $r.Status = 'similar' }
+      }
       $r })
-    $match = @($rows | Where-Object Valgt)
-    $ui.GridGpuLib.ItemsSource = $(if ($match.Count) { $match } else { $rows })
-    $ui.GpuLibInfo.Text = if ($match.Count) { "$($match.Count) eksempel$(if ($match.Count -ne 1) { 'er' }) med dit kort ($(Get-GpuName)). Brug dem som udgangspunkt, og mål selv." } else { "Ingen eksempler med dit kort endnu. Her er dem, der findes ($($rows.Count)), til inspiration." }
+    $same = @($rows | Where-Object { $_.Status -eq 'same' })
+    $sim  = @($rows | Where-Object { $_.Status -eq 'similar' })
+    if ($same.Count) {
+      $ui.GridGpuLib.ItemsSource = $same; $ui.GridGpuLib.Visibility = 'Visible'
+      $ui.GpuLibInfo.Text = "✓ $($same.Count) måling$(if ($same.Count -ne 1) { 'er' }) med dit kort ($($mine.Key)). Brug dem som udgangspunkt, men mål selv. Køler og chip varierer fra kort til kort."
+    } elseif ($sim.Count) {
+      foreach ($x in $sim) { $x.Navn = "≈ $($x.Navn)" }
+      $ui.GridGpuLib.ItemsSource = $sim; $ui.GridGpuLib.Visibility = 'Visible'
+      $ui.GpuLibInfo.Text = "Ingen har delt målinger med præcis dit kort ($($mine.Key)) endnu. Her er lignende kort fra samme generation. De er IKKE dit kort, så tallene giver kun en fornemmelse af, hvad der er muligt."
+    } else {
+      $ui.GridGpuLib.ItemsSource = @(); $ui.GridGpuLib.Visibility = 'Collapsed'
+      $ui.GpuLibInfo.Text = if ($mine) { "Ingen har delt målinger med dit kort ($($mine.Key)) eller lignende kort endnu. Din egen før/efter-måling ovenfor er den bedste guide. Datasættet har $($rows.Count) eksempler i alt." } else { "Kunne ikke genkende dit grafikkort ($mineName), så der vises ingen eksempler. Brug din egen før/efter-måling." }
+    }
   } $null
 }
 $ui.GridGpuLib.Add_SelectionChanged({ $ui.BtnGpuSrc.IsEnabled = [bool]($ui.GridGpuLib.SelectedItem -and $ui.GridGpuLib.SelectedItem.Sti) })
@@ -3319,6 +3621,9 @@ function Load-Gpu {
   $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $ui.BtnGpuAb.Content = $(if ($ab) { '🎚  Åbn MSI Afterburner' } else { '⬇  Hent MSI Afterburner' })
   try { Update-GpuLive } catch {}
+  if (-not $script:GpuMeasuring -and (Test-Path $GpuPlFile)) {
+    try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; $ui.GpuAutoInfo.Text = "✓ Aktiv: strømgrænse $($g.Pct) % ($($g.Watts) W) siden $(([datetime]$g.Date).ToString('dd-MM')). Kør testen igen for at genberegne, eller nulstil efter en test." } catch {}
+  }
   Load-GpuMine
   if (-not $script:GpuLibLoaded) { $script:GpuLibLoaded = $true; Load-GpuLib }
   $gpuTimer.Start()
