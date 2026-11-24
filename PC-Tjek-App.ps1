@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.47'
+$AppVersion = '2.49'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1673,9 +1673,10 @@ let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, cali
 // Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
 let fw = 0, fh = 0, warmUntil = 0;
 // Skærmen låser normalt billedet til sin Hz (fx 60). For at måle grafikkortet og ikke skærmen tegnes scenen K gange
-// i træk, og der ventes, til grafikkortet er færdigt (gl.finish). Tiden pr. billede giver FPS uden V-Sync, ligesom et
-// spil med V-Sync slået fra. K justeres, så hver omgang tager ca. 10 ms.
-let K = 1, rafs = 0, draws = 0, gpuMs = 0;
+// i træk, og der ventes, til grafikkortet er færdigt. (gl.finish venter ikke rigtigt i Edge, så vi læser én pixel
+// tilbage, hvilket tvinger browseren til at vente.) Tiden pr. billede giver FPS uden V-Sync, ligesom et spil med
+// V-Sync slået fra. K justeres, så hver omgang tager ca. 10 ms, så siden aldrig hænger.
+let K = 1, rafs = 0, draws = 0, gpuMs = 0; const px = new Uint8Array(4);
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
@@ -1697,10 +1698,10 @@ function frame(now){
   if (resMode) {
     const ts = performance.now();
     for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
-    gl.finish();                                    // vent, til grafikkortet har tegnet alle K billeder
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);   // venter, til grafikkortet har tegnet alle K billeder
     const g = Math.max(0.01, performance.now() - ts);
     draws += K; gpuMs += g; win.push(g / K);
-    if (g < 7 && K < 1024) K = Math.ceil(K * 1.4); else if (g > 16 && K > 1) K = Math.max(1, Math.floor(K * 0.7));
+    if (g < 6 && K < 64) K = Math.min(64, Math.ceil(K * 1.3)); else if (g > 14 && K > 1) K = Math.max(1, Math.floor(K * 0.6));
   } else {
     gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); win.push(dt);
   }
@@ -6618,7 +6619,7 @@ $ui.BtnCheckUpdate.Add_Click({ Check-AppUpdate $true })
 $ui.BtnUpdateApp.Add_Click({
   $v = $script:PendingUpdate
   if (-not $v) { return }
-  $notes = (@($v.notes) | ForEach-Object { "  • $_" }) -join "`n"
+  $notes = (@($v.notes) | Select-Object -First 4 | ForEach-Object { "  • $_" }) -join "`n"
   if ((Msg "Opdatér Opticon fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
   $ui.BtnUpdateApp.IsEnabled = $false
   Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion; JobRoot = $JobRoot } {

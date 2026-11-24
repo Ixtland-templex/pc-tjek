@@ -3158,7 +3158,7 @@ $ui.BtnCheckUpdate.Add_Click({ Check-AppUpdate $true })
 $ui.BtnUpdateApp.Add_Click({
   $v = $script:PendingUpdate
   if (-not $v) { return }
-  $notes = (@($v.notes) | ForEach-Object { "  • $_" }) -join "`n"
+  $notes = (@($v.notes) | Select-Object -First 4 | ForEach-Object { "  • $_" }) -join "`n"
   if ((Msg "Opdatér PC-Tjek fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
   $ui.BtnUpdateApp.IsEnabled = $false
   Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion; JobRoot = $JobRoot } {
