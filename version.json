@@ -1,7 +1,8 @@
 {
-  "version": "2.45",
+  "version": "2.46",
   "date": "2026-11-24",
   "notes": [
+    "Knappen Scan pc'en er flyttet ind på Overblik, hvor resultatet vises",
     "Grafiktesten måler nu direkte, hvor lang tid grafikkortet bruger pr. billede (FPS uden V-Sync). Mere stabilt, og virker også i din skærms opløsning",
     "Grafik-feltet viser FPS i din skærms opløsning (fx 2560×1440) som det store tal, og 1080p til sammenligning",
     "Grafiktal fra før 2.45 sammenlignes ikke med de nye (de var låst til skærmens Hz), og scoren er justeret til den nye måling",
@@ -73,7 +74,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "12E5AA23E8F0AAA90FFC6D59CFBD58C7C8D5551BE1FE902CD7AD2D05C9B1B87B"
+      "sha256": "7B00AF69EA40A1FC1581A4EEA738F2D11E6D02267597FC28D4BA5FBEDD237136"
     },
     {
       "name": "PC-Tjek-Start.ps1",
