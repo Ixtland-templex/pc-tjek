@@ -97,7 +97,36 @@ function Restore-GpuPl($w) {
 }
 
 # Windows' strømtilstand (Indstillinger > System > Strøm): virker på alle pc'er, også AMD og Intel
-if (-not ('PcTjek.PowerMode' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerMode -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+if (-not (Get-Command Import-OpticonType -ErrorAction SilentlyContinue)) {   # Vagten har ikke appens hoveddel
+  function Import-OpticonType([string]$TypeName, [string]$Source) {
+    if ($TypeName -as [type]) { return }
+    try {
+      $dir = Join-Path $env:ProgramData 'PC-Tjek\cache'
+      $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Source + [Environment]::Version))).Replace('-', '').Substring(0, 16)
+      $stem = $TypeName.Replace('.', '-')
+      $dll = Join-Path $dir "$stem-$hash.dll"
+      if (-not (Test-Path $dll)) {
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+        Get-ChildItem $dir -Filter "$stem-*.dll" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Add-Type -TypeDefinition $Source -Language CSharp -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+      }
+      Add-Type -Path $dll -ErrorAction Stop
+    } catch {
+      if (-not ($TypeName -as [type])) { Add-Type -TypeDefinition $Source -Language CSharp }
+    }
+  }
+}
+$PowerModeSource = @'
+using System;
+using System.Runtime.InteropServices;
+namespace PcTjek {
+  public static class PowerMode {
+    [DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g);
+    [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);
+  }
+}
+'@
+try { Import-OpticonType 'PcTjek.PowerMode' $PowerModeSource } catch {}
 $PowerModeList = @(
   [pscustomobject]@{ Key = 'eff';  Guid = '961cc777-2547-4f9d-8174-7d86181b8a7a'; Name = 'Bedste energieffektivitet' }
   [pscustomobject]@{ Key = 'bal';  Guid = '00000000-0000-0000-0000-000000000000'; Name = 'Balanceret' }

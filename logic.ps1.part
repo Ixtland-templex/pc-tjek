@@ -2854,7 +2854,8 @@ function Start-Bench {
   $script:BenchStart = Get-Date
   $ui.BtnBench.IsEnabled = $false; $ui.BenchBar.Visibility = 'Visible'; $ui.BenchBar.Value = 0; $ui.BenchStatus.Text = 'Starter...'
   Log 'Benchmark startet'
-  Invoke-Bg $BenchScript $null {
+  try { Import-OpticonType 'OptiBench.Cpu' $BenchCs } catch { Log "Benchmark-type: $_" }
+  Invoke-Bg $BenchScript @{ Code = $BenchCs } {
     param($res, $err, $c)
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
     if ($err -or -not $res) { $ui.BtnBench.IsEnabled = $true; $ui.BenchBar.Visibility = 'Collapsed'; $ui.BenchStatus.Text = "⚠ Testen fejlede: $err"; Log "Benchmark fejl: $err"; return }

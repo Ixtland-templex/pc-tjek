@@ -1,7 +1,8 @@
 {
-  "version": "2.39",
+  "version": "2.40",
   "date": "2026-11-24",
   "notes": [
+    "Endnu venligere for antivirus: disktesten bruger almindelig hukommelse, downloads sker med Windows' standardværktøj, og C#-hjælpere oversættes kun én gang pr. version",
     "Venligere for antivirus (fx Bitdefender): ingen ekstra PowerShell-processer, ingen kodede kommandoer og ingen skjulte omveje ved start",
     "Baggrundsopgaver kører nu inde i selve appen, så de er hurtigere at starte",
     "Eksisterende genveje og planlagte opgaver flyttes automatisk over på den nye startmåde",
@@ -62,7 +63,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "C74D06C925548CCCE04F4A63F9E458F195A70709A23ECE4FF9B4D31BFB6441E7"
+      "sha256": "BE72A7EA1AB38C614D83F46BA391A60C16DBF23F11C353237BF39D93AB82D980"
     },
     {
       "name": "PC-Tjek-Start.ps1",
@@ -70,7 +71,7 @@
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "3BB33B4690FDCB81D46297D56028F77349CCF89521D86AB561B084D115EF010C"
+      "sha256": "91A95A7050A8F0FAF2116B295D6EC39710BA9C9C8D4D7FE40781D278FE66E609"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

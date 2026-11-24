@@ -45,7 +45,26 @@ function Log($m) { try { [IO.File]::AppendAllText($LogFile, ("{0:yyyy-MM-dd HH:m
 Log "Start v$AppVersion"
 
 # ---------- Lille C#-hjælper: rækker med afkrydsning + mørk titellinje ----------
-if (-not ('PcTjek.Row' -as [type])) { Add-Type -Language CSharp -TypeDefinition @'
+# C#-hjælpere oversættes kun én gang pr. version og gemmes i C:\ProgramData\PC-Tjek\cache (kun administratorer kan skrive der).
+# Så starter Windows' C#-oversætter ikke hver gang appen eller Vagten starter, hvilket nogle antivirus reagerer på.
+function Import-OpticonType([string]$TypeName, [string]$Source) {
+  if ($TypeName -as [type]) { return }
+  try {
+    $dir = Join-Path $env:ProgramData 'PC-Tjek\cache'
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Source + [Environment]::Version))).Replace('-', '').Substring(0, 16)
+    $stem = $TypeName.Replace('.', '-')
+    $dll = Join-Path $dir "$stem-$hash.dll"
+    if (-not (Test-Path $dll)) {
+      if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+      Get-ChildItem $dir -Filter "$stem-*.dll" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+      Add-Type -TypeDefinition $Source -Language CSharp -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+    }
+    Add-Type -Path $dll -ErrorAction Stop
+  } catch {
+    if (-not ($TypeName -as [type])) { Add-Type -TypeDefinition $Source -Language CSharp }
+  }
+}
+$RowSource = @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -119,5 +138,6 @@ namespace PcTjek {
     }
   }
 }
-'@ }
+'@
+Import-OpticonType 'PcTjek.Row' $RowSource
 

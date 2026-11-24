@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.39'
+$AppVersion = '2.40'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -45,7 +45,26 @@ function Log($m) { try { [IO.File]::AppendAllText($LogFile, ("{0:yyyy-MM-dd HH:m
 Log "Start v$AppVersion"
 
 # ---------- Lille C#-hjælper: rækker med afkrydsning + mørk titellinje ----------
-if (-not ('PcTjek.Row' -as [type])) { Add-Type -Language CSharp -TypeDefinition @'
+# C#-hjælpere oversættes kun én gang pr. version og gemmes i C:\ProgramData\PC-Tjek\cache (kun administratorer kan skrive der).
+# Så starter Windows' C#-oversætter ikke hver gang appen eller Vagten starter, hvilket nogle antivirus reagerer på.
+function Import-OpticonType([string]$TypeName, [string]$Source) {
+  if ($TypeName -as [type]) { return }
+  try {
+    $dir = Join-Path $env:ProgramData 'PC-Tjek\cache'
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Source + [Environment]::Version))).Replace('-', '').Substring(0, 16)
+    $stem = $TypeName.Replace('.', '-')
+    $dll = Join-Path $dir "$stem-$hash.dll"
+    if (-not (Test-Path $dll)) {
+      if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+      Get-ChildItem $dir -Filter "$stem-*.dll" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+      Add-Type -TypeDefinition $Source -Language CSharp -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+    }
+    Add-Type -Path $dll -ErrorAction Stop
+  } catch {
+    if (-not ($TypeName -as [type])) { Add-Type -TypeDefinition $Source -Language CSharp }
+  }
+}
+$RowSource = @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -119,7 +138,8 @@ namespace PcTjek {
     }
   }
 }
-'@ }
+'@
+Import-OpticonType 'PcTjek.Row' $RowSource
 
 
 # =====================================================================
@@ -184,7 +204,36 @@ function Restore-GpuPl($w) {
 }
 
 # Windows' strømtilstand (Indstillinger > System > Strøm): virker på alle pc'er, også AMD og Intel
-if (-not ('PcTjek.PowerMode' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerMode -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+if (-not (Get-Command Import-OpticonType -ErrorAction SilentlyContinue)) {   # Vagten har ikke appens hoveddel
+  function Import-OpticonType([string]$TypeName, [string]$Source) {
+    if ($TypeName -as [type]) { return }
+    try {
+      $dir = Join-Path $env:ProgramData 'PC-Tjek\cache'
+      $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Source + [Environment]::Version))).Replace('-', '').Substring(0, 16)
+      $stem = $TypeName.Replace('.', '-')
+      $dll = Join-Path $dir "$stem-$hash.dll"
+      if (-not (Test-Path $dll)) {
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+        Get-ChildItem $dir -Filter "$stem-*.dll" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Add-Type -TypeDefinition $Source -Language CSharp -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+      }
+      Add-Type -Path $dll -ErrorAction Stop
+    } catch {
+      if (-not ($TypeName -as [type])) { Add-Type -TypeDefinition $Source -Language CSharp }
+    }
+  }
+}
+$PowerModeSource = @'
+using System;
+using System.Runtime.InteropServices;
+namespace PcTjek {
+  public static class PowerMode {
+    [DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g);
+    [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);
+  }
+}
+'@
+try { Import-OpticonType 'PcTjek.PowerMode' $PowerModeSource } catch {}
 $PowerModeList = @(
   [pscustomobject]@{ Key = 'eff';  Guid = '961cc777-2547-4f9d-8174-7d86181b8a7a'; Name = 'Bedste energieffektivitet' }
   [pscustomobject]@{ Key = 'bal';  Guid = '00000000-0000-0000-0000-000000000000'; Name = 'Balanceret' }
@@ -422,7 +471,7 @@ $ScanScript = {
   }
   $UserWritable = '\\(AppData|Temp|ProgramData|Users\\Public|Downloads)\\'
   $LolBins      = '(?i)\\(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin)\.exe'
-  $BadArgs      = '(?i)(-enc|-encodedcommand|frombase64string|-w(indowstyle)?\s+hidden|iex|invoke-expression|downloadstring|http[s]?://)'
+  $BadArgs      = '(?i)(\s-e(nc?|c)\b|-enc|base64|-w(indowstyle)?\s+hidden|\biex\b|invoke-ex|download|http[s]?://)'
 
   $AllFinds = New-Object System.Collections.ArrayList   # fund
   $AllTimes = New-Object System.Collections.ArrayList   # tidslinje
@@ -1251,8 +1300,8 @@ $DrvScanScript = {
     if (-not $fresh) {
       $sync.Status = 'Henter den nyeste liste over farlige drivere...'
       try {
-        $wc = New-Object Net.WebClient; $wc.Headers['User-Agent'] = 'Opticon'
-        $t = $wc.DownloadString($base + "samples_$k.sha256")
+        $ProgressPreference = 'SilentlyContinue'
+        $t = [string](Invoke-WebRequest -Uri ($base + "samples_$k.sha256") -UseBasicParsing -TimeoutSec 30 -UserAgent 'Opticon').Content
         if ($t -match '(?m)^[0-9a-fA-F]{64}\s*$') { [IO.File]::WriteAllText($f, $t) }
       } catch {}
     }
@@ -1334,8 +1383,8 @@ $GameMeasureScript = {
     } catch {}
     if (-not $url) { $url = 'https://github.com/GameTechDev/PresentMon/releases/download/v2.3.1/PresentMon-2.3.1-x64.exe' }
     $tmp = Join-Path $tools 'PresentMon-ny.exe'
-    $wc = New-Object Net.WebClient; $wc.Headers['User-Agent'] = 'Opticon'
-    $wc.DownloadFile($url, $tmp)
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 120 -UserAgent 'Opticon' -ErrorAction Stop
     if (-not (Test-IntelSigned $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw 'PresentMon-filen var ikke gyldigt signeret af Intel, så Opticon brugte den ikke.' }
     Move-Item $tmp $pm -Force
   }
@@ -1746,9 +1795,11 @@ $GpuBenchScript = {
     $w = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { $w = [math]::Round($bt.DischargeRate / 1000, 1) } } catch {}
     return [pscustomobject]@{ W = $w; T = $null; F = $null; C = $null; U = $u }
   }
-  if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
-  function Get-PM { try { $g = [guid]::Empty; if ([PcTjek.PowerModeB]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-  function Set-PM($g) { try { [void][PcTjek.PowerModeB]::PowerSetActiveOverlayScheme([guid]$g) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PM) -eq ([guid]$g).ToString()) }
+  # Appens egen PcTjek.PowerMode findes allerede (jobbet kører inde i appen), så der skal intet oversættes
+  $pmType = 'PcTjek.PowerMode' -as [type]
+  if (-not $pmType) { if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }; $pmType = 'PcTjek.PowerModeB' -as [type] }
+  function Get-PM { try { $g = [guid]::Empty; if ($pmType::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
+  function Set-PM($g) { try { [void]$pmType::PowerSetActiveOverlayScheme([guid]$g) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PM) -eq ([guid]$g).ToString()) }
   $modeNames = @{ '961cc777-2547-4f9d-8174-7d86181b8a7a' = 'Bedste energieffektivitet'; '00000000-0000-0000-0000-000000000000' = 'Balanceret'; 'ded574b5-45a0-4f42-8737-46345c09c238' = 'Bedste ydeevne' }
   $origMode = Get-PM; $changedMode = $false
   $lim = if ($hasSmi) { Q 'power.limit,power.default_limit,power.min_limit,power.max_limit' } else { @($null, $null, $null, $null) }
@@ -1880,10 +1931,7 @@ $GpuBenchScript = {
 # =====================================================================
 #  DEN STORE TEST (CPU, RAM, disk). Grafikdelen kører bagefter med testscenen.
 # =====================================================================
-$BenchScript = {
-  param($sync, $arg)
-  $ErrorActionPreference = 'Stop'
-  $code = @'
+$BenchCs = @'
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -1997,10 +2045,8 @@ namespace OptiBench
         static extern bool SetFilePointerEx(IntPtr h, long dist, out long newPos, uint method);
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool CloseHandle(IntPtr h);
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr VirtualAlloc(IntPtr addr, UIntPtr size, uint type, uint prot);
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool VirtualFree(IntPtr addr, UIntPtr size, uint type);
+        // Disktesten uden cache kræver sektor-justeret hukommelse: tag lidt ekstra og ret adressen op til 4 KB
+        static IntPtr Align4K(IntPtr p) { long v = p.ToInt64(); return new IntPtr((v + 4095) & ~4095L); }
 
         const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000, CREATE_ALWAYS = 2;
         const uint NO_BUFFERING = 0x20000000, WRITE_THROUGH = 0x80000000, DELETE_ON_CLOSE = 0x04000000;
@@ -2010,9 +2056,9 @@ namespace OptiBench
         {
             const uint chunk = 4 * 1024 * 1024;
             long size = sizeMB * 1024 * 1024;
-            IntPtr buf = VirtualAlloc(IntPtr.Zero, (UIntPtr)chunk, 0x3000, 4);
-            IntPtr small = VirtualAlloc(IntPtr.Zero, (UIntPtr)4096, 0x3000, 4);
-            if (buf == IntPtr.Zero || small == IntPtr.Zero) throw new Exception("Kunne ikke reservere hukommelse til disktesten.");
+            IntPtr bufRaw = Marshal.AllocHGlobal((int)chunk + 4096);
+            IntPtr smallRaw = Marshal.AllocHGlobal(8192);
+            IntPtr buf = Align4K(bufRaw), small = Align4K(smallRaw);
             byte[] rnd = new byte[chunk];
             new Random(42).NextBytes(rnd);
             Marshal.Copy(rnd, 0, buf, (int)chunk);
@@ -2049,14 +2095,17 @@ namespace OptiBench
             finally
             {
                 CloseHandle(h);
-                VirtualFree(buf, UIntPtr.Zero, 0x8000);
-                VirtualFree(small, UIntPtr.Zero, 0x8000);
+                Marshal.FreeHGlobal(bufRaw);
+                Marshal.FreeHGlobal(smallRaw);
             }
         }
     }
 }
 '@
-  if (-not ('OptiBench.Cpu' -as [type])) { Add-Type -TypeDefinition $code -Language CSharp }
+$BenchScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'Stop'
+  if (-not ('OptiBench.Cpu' -as [type])) { Add-Type -TypeDefinition $arg.Code -Language CSharp }
   $sync.Status = 'Læser hardware...'; $sync.Progress = 1
   $cpuO = Get-CimInstance Win32_Processor | Select-Object -First 1
   $cpuName = (([string]$cpuO.Name) -replace '\((R|TM|tm)\)', '' -replace '\s+CPU\s*@.*$', '' -replace '\s+\d+-Core Processor', '' -replace '\s+', ' ').Trim()
@@ -6315,7 +6364,8 @@ function Start-Bench {
   $script:BenchStart = Get-Date
   $ui.BtnBench.IsEnabled = $false; $ui.BenchBar.Visibility = 'Visible'; $ui.BenchBar.Value = 0; $ui.BenchStatus.Text = 'Starter...'
   Log 'Benchmark startet'
-  Invoke-Bg $BenchScript $null {
+  try { Import-OpticonType 'OptiBench.Cpu' $BenchCs } catch { Log "Benchmark-type: $_" }
+  Invoke-Bg $BenchScript @{ Code = $BenchCs } {
     param($res, $err, $c)
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
     if ($err -or -not $res) { $ui.BtnBench.IsEnabled = $true; $ui.BenchBar.Visibility = 'Collapsed'; $ui.BenchStatus.Text = "⚠ Testen fejlede: $err"; Log "Benchmark fejl: $err"; return }

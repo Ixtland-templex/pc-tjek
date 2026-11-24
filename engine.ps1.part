@@ -52,7 +52,7 @@ $ScanScript = {
   }
   $UserWritable = '\\(AppData|Temp|ProgramData|Users\\Public|Downloads)\\'
   $LolBins      = '(?i)\\(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin)\.exe'
-  $BadArgs      = '(?i)(-enc|-encodedcommand|frombase64string|-w(indowstyle)?\s+hidden|iex|invoke-expression|downloadstring|http[s]?://)'
+  $BadArgs      = '(?i)(\s-e(nc?|c)\b|-enc|base64|-w(indowstyle)?\s+hidden|\biex\b|invoke-ex|download|http[s]?://)'
 
   $AllFinds = New-Object System.Collections.ArrayList   # fund
   $AllTimes = New-Object System.Collections.ArrayList   # tidslinje
