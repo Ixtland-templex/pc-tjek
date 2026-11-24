@@ -1,9 +1,9 @@
 [
  {
-  "v": 1,
-  "id": 1,
+  "v": 3,
+  "id": 3,
   "date": "2026-11-24",
-  "app": "2.31",
+  "app": "2.42",
   "cpu": "13th Gen Intel Core i5-13600KF",
   "gpu": "NVIDIA GeForce RTX 3070 Ti",
   "cores": 14,
@@ -13,42 +13,17 @@
   "disk": "Samsung SSD 970 EVO 1TB",
   "laptop": false,
   "battery": false,
+  "power": "Balanceret",
   "scores": {
-   "cpu1": 1599,
-   "cpuN": 19554,
-   "sustain": 102,
-   "ram": 30.1,
-   "diskR": 2319,
-   "diskW": 2207,
-   "iops": 13073,
-   "gpu": null,
-   "total": 1737
-  }
- },
- {
-  "v": 1,
-  "id": 2,
-  "date": "2026-11-24",
-  "app": "2.31",
-  "cpu": "AMD Ryzen AI 7 350 w/ Radeon 860M",
-  "gpu": "AMD Radeon(TM) 860M Graphics",
-  "cores": 8,
-  "threads": 16,
-  "ramGB": 24,
-  "ramMHz": 7500,
-  "disk": "SAMSUNG MZAL8512HFLU-00BL2",
-  "laptop": true,
-  "battery": false,
-  "scores": {
-   "cpu1": 1064,
-   "cpuN": 8743,
-   "sustain": 83,
-   "ram": 32.3,
-   "diskR": 1950,
-   "diskW": 976,
-   "iops": 8088,
-   "gpu": null,
-   "total": 1250
+   "cpu1": 1522,
+   "cpuN": 19146,
+   "sustain": 101,
+   "ram": 29,
+   "diskR": 1606,
+   "diskW": 1892,
+   "iops": 5963,
+   "gpu": 59,
+   "total": 1409
   }
  }
 ]

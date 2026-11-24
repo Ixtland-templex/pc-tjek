@@ -1,0 +1,27 @@
+{
+ "v": 3,
+ "id": 3,
+ "date": "2026-11-24",
+ "app": "2.42",
+ "cpu": "13th Gen Intel Core i5-13600KF",
+ "gpu": "NVIDIA GeForce RTX 3070 Ti",
+ "cores": 14,
+ "threads": 20,
+ "ramGB": 32,
+ "ramMHz": 5067,
+ "disk": "Samsung SSD 970 EVO 1TB",
+ "laptop": false,
+ "battery": false,
+ "power": "Balanceret",
+ "scores": {
+  "cpu1": 1522,
+  "cpuN": 19146,
+  "sustain": 101,
+  "ram": 29,
+  "diskR": 1606,
+  "diskW": 1892,
+  "iops": 5963,
+  "gpu": 59,
+  "total": 1409
+ }
+}
