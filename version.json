@@ -1,20 +1,19 @@
 {
-  "version": "2.15",
+  "version": "2.18",
   "date": "2026-11-24",
   "notes": [
-    "Ærlige Defender-resultater: \"intet fundet\", \"fundet\" eller \"kunne ikke verificeres\"",
-    "Scanningen ændrer nu intet. Defender-tjekket kører kun læsning",
-    "Vagthunden opdager også, når en kendt post pludselig peger på et nyt program",
-    "Vagt-siden viser, hvornår hvert tjek sidst kørte"
+    "Ny: 🎮 GPU-tuning i Optimering med live-data for effekt, temperatur, blæser og clock",
+    "Mål før og efter en ændring, og se om den var det værd",
+    "Testet på min pc + eksempler fra andre (TechFuelHQ, CC BY 4.0)"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "CCE11FDF7670FC7CDDF00FC373446B17FEEF2982867C92C7D0CF28581CDE823B"
+      "sha256": "4CFD5F6B43937968E256F8BE0AF633DD7114E3E0CD0511FCB2743CC52716A5CB"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "E2499AB8A465117F289FAAE5A204559B47B6DBAC4DE1ABD2A19D40F69E3E66E4"
+      "sha256": "57E3FD74946C7DAB95180EADB02981E4B48973E2372361DA1F728296AD2AD69F"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

@@ -389,4 +389,7 @@ $timer.Add_Tick({
   } catch { VLog 'Fejl' 'info' 'Fejl i vagten' $_.Exception.Message '' }
 })
 $timer.Start()
-[Windows.Threading.Dispatcher]::Run()
+# Uventede fejl må ikke lukke vagten
+[Windows.Threading.Dispatcher]::CurrentDispatcher.Add_UnhandledException({ param($s, $e) $e.Handled = $true; VLog 'Fejl' 'info' 'Uventet fejl i vagten (fortsætter)' $e.Exception.Message '' })
+try { [Windows.Threading.Dispatcher]::Run() }
+finally { VLog 'Vagt' 'info' 'Vagten stoppede' '' '' }

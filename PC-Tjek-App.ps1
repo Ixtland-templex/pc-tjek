@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.15'
+$AppVersion = '2.18'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -816,6 +816,75 @@ $SysInfoScript = {
   return $o
 }
 
+
+$CrashScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $sync.Status = 'Læser nedbrud fra de seneste 14 dage...'
+  $since = (Get-Date).AddDays(-14)
+  $out = @{ Apps = @(); System = @(); Installs = @() }
+  $apps = @{}
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1002; StartTime = $since } -MaxEvents 2000)) {
+    if ($e.ProviderName -notin 'Application Error', 'Application Hang') { continue }
+    $name = [string]$e.Properties[0].Value
+    if (-not $name) { continue }
+    $key = $name.ToLower()
+    if (-not $apps.ContainsKey($key)) { $apps[$key] = @{ Name = $name; Crash = 0; Hang = 0; First = $e.TimeCreated; Last = $e.TimeCreated } }
+    $a = $apps[$key]
+    if ($e.Id -eq 1000) { $a.Crash++ } else { $a.Hang++ }
+    if ($e.TimeCreated -lt $a.First) { $a.First = $e.TimeCreated }
+    if ($e.TimeCreated -gt $a.Last) { $a.Last = $e.TimeCreated }
+  }
+  $out.Apps = @($apps.Values | ForEach-Object { [pscustomobject]$_ })
+  $sys = @()
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 41, 6008, 1001; StartTime = $since } -MaxEvents 500)) {
+    if ($e.Id -eq 41 -and $e.ProviderName -like '*Kernel-Power*') { $sys += [pscustomobject]@{ Kind = 'restart'; Time = $e.TimeCreated } }
+    elseif ($e.Id -eq 6008) { $sys += [pscustomobject]@{ Kind = 'shutdown'; Time = $e.TimeCreated } }
+    elseif ($e.Id -eq 1001 -and $e.ProviderName -like '*WER-SystemErrorReporting*') { $sys += [pscustomobject]@{ Kind = 'bsod'; Time = $e.TimeCreated } }
+  }
+  $out.System = $sys
+  $ins = @()
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; Id = 1033; StartTime = $since.AddDays(-3) } -MaxEvents 300)) { $ins += [pscustomobject]@{ Time = $e.TimeCreated; Name = [string]$e.Properties[0].Value } }
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'; Id = 19; StartTime = $since.AddDays(-3) } -MaxEvents 300)) { $ins += [pscustomobject]@{ Time = $e.TimeCreated; Name = "Windows-opdatering: $([string]$e.Properties[0].Value)" } }
+  $out.Installs = $ins
+  return $out
+}
+
+
+$GpuMeasureScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  if (-not (Test-Path $smi)) { throw 'nvidia-smi blev ikke fundet. Måling kræver et NVIDIA-kort med driver.' }
+  $dur = [int]$arg.Seconds
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $samples = New-Object System.Collections.ArrayList
+  $t0 = Get-Date
+  for ($i = 0; $i -lt $dur; $i++) {
+    $q = & $smi --query-gpu=power.draw,power.limit,temperature.gpu,fan.speed,clocks.gr,utilization.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+    $p = @($q -split ',\s*')
+    $num = { param($x) $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
+    $s = [pscustomobject]@{ W = (& $num $p[0]); Lim = (& $num $p[1]); T = (& $num $p[2]); F = (& $num $p[3]); C = (& $num $p[4]); U = (& $num $p[5]) }
+    [void]$samples.Add($s)
+    $sync.Progress = [double](100 * ($i + 1) / $dur)
+    $sync.Status = "Måler... $($dur - $i - 1) sek tilbage · $([int]$s.W) W · $([int]$s.T) °C · $([int]$s.U) % belastning"
+    $next = $t0.AddSeconds($i + 1); $wait = ($next - (Get-Date)).TotalMilliseconds; if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]$wait) }
+  }
+  $load = @($samples | Where-Object { $_.U -ge 60 })
+  $use = if ($load.Count -ge 10) { $load } else { @($samples) }
+  $avg = { param($prop) $v = @($use | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($v.Count) { [math]::Round(($v | Measure-Object -Average).Average, 1) } else { $null } }
+  return @{ W = (& $avg 'W'); Lim = (& $avg 'Lim'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U')
+            LowLoad = ($load.Count -lt 10); N = $use.Count; Time = (Get-Date) }
+}
+$GpuLibScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $sync.Status = 'Henter GPU-eksempler...'
+  $j = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/iBlessi/gpu-undervolt-db/main/data/undervolt_results.json' -UseBasicParsing -TimeoutSec 15
+  return @($j.results)
+}
+
 # =====================================================================
 #  GUI
 # =====================================================================
@@ -1012,7 +1081,10 @@ $SysInfoScript = {
         <Border Grid.Row="2" Style="{StaticResource CardB}" Margin="0,0,0,16" Padding="18,14">
           <Grid>
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <TextBlock Text="💻  Din pc" FontWeight="SemiBold" FontSize="15" Margin="0,0,0,10"/>
+            <DockPanel Margin="0,0,0,10">
+              <Button Name="BtnCopyInfo" DockPanel.Dock="Right" Content="📋  Kopiér til support" Padding="10,5" Margin="0" FontSize="12"/>
+              <TextBlock Text="💻  Din pc" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center"/>
+            </DockPanel>
             <UniformGrid Grid.Row="1" Columns="3">
               <StackPanel Margin="0,0,16,10"><TextBlock Text="SYSTEM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysOS" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysOSsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
               <StackPanel Margin="0,0,16,10"><TextBlock Text="PROCESSOR" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysCpu" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysCpusub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
@@ -1256,6 +1328,88 @@ $SysInfoScript = {
             </StackPanel>
           </Grid>
         </Border>
+        <!-- GPU-TUNING -->
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <StackPanel>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+                <TextBlock Text="🎮" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="0,0,16,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="Grafikkort: mindre strøm og støj" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <Border CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#3B2C6E" VerticalAlignment="Center"><TextBlock Text="Avanceret" FontSize="12" FontWeight="SemiBold" Foreground="#C4B5FD"/></Border>
+                </StackPanel>
+                <TextBlock Name="GpuName" Foreground="#AEB6C6" Margin="0,4,0,0"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Kan dit grafikkort bruge mindre strøm og larme mindre, uden at du mister mærkbar ydelse? Mål det før og efter én ændring, så du kan se, om det var det værd."/>
+              </StackPanel>
+              <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+                <Button Name="BtnGpuTool" Content="🛠  Åbn tuningværktøj" Style="{StaticResource Primary}" Margin="0,0,0,8"/>
+                <Button Name="BtnGpuAb" Content="MSI Afterburner" Margin="0,0,0,8"/>
+                <Button Name="GpuHow" Content="📖  Sådan gør du" Margin="0"/>
+              </StackPanel>
+            </Grid>
+            <Border Name="GpuSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,14,0,0">
+              <TextBlock Name="GpuStepsText" TextWrapping="Wrap" LineHeight="23"/>
+            </Border>
+            <!-- live -->
+            <UniformGrid Columns="5" Margin="0,16,0,0">
+              <StackPanel><TextBlock Text="EFFEKT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveW" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
+              <StackPanel><TextBlock Text="TEMPERATUR" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveT" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
+              <StackPanel><TextBlock Text="BLÆSER" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveF" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
+              <StackPanel><TextBlock Text="CLOCK" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveC" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
+              <StackPanel><TextBlock Text="BELASTNING" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveU" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
+            </UniformGrid>
+            <!-- mål før/efter -->
+            <Border Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,16,0,0">
+              <StackPanel>
+                <TextBlock Text="📏  Mål før og efter" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Name="GpuMeasureInfo" Style="{StaticResource Sub}" Margin="0,4,0,10" Text="1) Start et spil, og stil dig samme sted med samme indstillinger. 2) Tryk 'Mål FØR', og spil i 2 minutter. 3) Lav ÉN ændring i tuningværktøjet. 4) Tryk 'Mål EFTER', og spil samme sekvens igen."/>
+                <WrapPanel>
+                  <Button Name="BtnGpuBefore" Content="①  Mål FØR (2 min)" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnGpuAfter" Content="②  Mål EFTER (2 min)" IsEnabled="False"/>
+                  <TextBlock Text="FPS før:" VerticalAlignment="Center" Margin="10,0,6,0" Foreground="{StaticResource Muted}"/>
+                  <TextBox Name="TxtFpsBefore" Width="60" ToolTip="Valgfrit: læs FPS i spillet eller i NVIDIA-overlay (Alt+R)"/>
+                  <TextBlock Text="efter:" VerticalAlignment="Center" Margin="8,0,6,0" Foreground="{StaticResource Muted}"/>
+                  <TextBox Name="TxtFpsAfter" Width="60"/>
+                </WrapPanel>
+                <ProgressBar Name="GpuMeasureBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="GpuResult" TextWrapping="Wrap" FontSize="15" FontWeight="SemiBold" Margin="0,12,0,0"/>
+                <TextBlock Name="GpuVerdict" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="#AEB6C6"/>
+                <DockPanel Name="GpuSavePanel" Margin="0,10,0,0" Visibility="Collapsed">
+                  <Button Name="BtnGpuSave" DockPanel.Dock="Right" Content="💾  Gem som 'Testet på min pc'" Margin="8,0,0,0"/>
+                  <TextBox Name="TxtGpuNote" ToolTip="Hvad ændrede du? Fx 'Afterburner: 900 mV @ 2600 MHz' eller 'NVIDIA App: auto-tuning'"/>
+                </DockPanel>
+              </StackPanel>
+            </Border>
+            <!-- testet på min pc -->
+            <TextBlock Text="🏠  Testet på min pc" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,6"/>
+            <DataGrid Name="GridGpuMine" IsReadOnly="True" MaxHeight="200">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="DATO" Binding="{Binding Gruppe}" Width="100"/>
+                <DataGridTextColumn Header="ÆNDRING" Binding="{Binding Navn}" Width="2*"/>
+                <DataGridTextColumn Header="RESULTAT" Binding="{Binding Info}" Width="3*"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock Name="GpuMineEmpty" Style="{StaticResource Sub}" Text="Ingen målinger endnu. Gem din første før/efter-måling ovenfor."/>
+            <!-- testet af andre -->
+            <DockPanel Margin="0,18,0,6">
+              <Button Name="BtnGpuSrc" DockPanel.Dock="Right" Content="🔗  Åbn kilde" Padding="10,5" Margin="0" IsEnabled="False"/>
+              <TextBlock Text="🌍  Testet af andre" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBlock Name="GpuLibInfo" Style="{StaticResource Sub}" Margin="0,0,0,6" Text="Henter eksempler..."/>
+            <DataGrid Name="GridGpuLib" IsReadOnly="True" MaxHeight="240">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="KORT" Binding="{Binding Navn}" Width="2*"/>
+                <DataGridTextColumn Header="METODE / INDSTILLING" Binding="{Binding Info}" Width="3*"/>
+                <DataGridTextColumn Header="RESULTAT" Binding="{Binding Note}" Width="2*"/>
+                <DataGridTextColumn Header="KILDETYPE" Binding="{Binding Gruppe}" Width="120"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock FontSize="11" Foreground="#6B7488" Margin="0,6,0,0" TextWrapping="Wrap" Text="Eksempler: TechFuelHQ Community GPU Undervolt Results (CC BY 4.0), github.com/iBlessi/gpu-undervolt-db. To kort med samme GPU kan opføre sig forskelligt, så din egen måling tæller mest."/>
+          </StackPanel>
+        </Border>
           </StackPanel>
         </ScrollViewer>
       </Grid>
@@ -1426,7 +1580,8 @@ $SysInfoScript = {
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,12,0,0">
           <Button Name="BtnUpdCheck" Content="🔄  Søg efter opdateringer"/>
           <Button Name="BtnUpdRun" Content="⬆  Opdatér valgte" Style="{StaticResource Primary}" IsEnabled="False"/>
-          <TextBlock Name="UpdInfo" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="8,0,0,0"/>
+            <TextBlock Name="UpdInfo" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="8,0,0,0"/>
+            <TextBlock Name="UpdReboot" VerticalAlignment="Center" Foreground="#F6C344" Margin="12,0,0,0" FontWeight="SemiBold"/>
         </StackPanel>
       </Grid>
 
@@ -1434,16 +1589,66 @@ $SysInfoScript = {
       <Grid Name="PageHealth" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Ydelse og helbred"/><TextBlock Name="PerfText" Style="{StaticResource Sub}" Text="Diskens tilstand, strømplan, spilindstillinger og hvor længe siden pc'en blev genstartet."/></StackPanel>
-        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="6">
-          <DataGrid Name="GridHealth" IsReadOnly="True">
-            <DataGrid.Columns>
-              <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
-              <DataGridTextColumn Header="EMNE" Binding="{Binding Navn}" Width="2*"/>
-              <DataGridTextColumn Header="VÆRDI" Binding="{Binding Info}" Width="2*"/>
-              <DataGridTextColumn Header="VURDERING" Binding="{Binding Note}" Width="3*"/>
-            </DataGrid.Columns>
-          </DataGrid>
-        </Border>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+            <Border Name="RebootBanner" Visibility="Collapsed" CornerRadius="12" Background="#2A2210" BorderBrush="#F6C344" BorderThickness="1" Padding="16,12" Margin="0,0,0,12">
+              <DockPanel>
+                <Button Name="BtnRebootNow" DockPanel.Dock="Right" Content="🔁  Genstart nu" Style="{StaticResource Primary}" Margin="0"/>
+                <StackPanel VerticalAlignment="Center"><TextBlock Text="🔁  Genstart for at færdiggøre en opdatering" FontWeight="SemiBold" FontSize="14.5"/><TextBlock Name="RebootWhy" Style="{StaticResource Sub}" Margin="0,3,0,0"/></StackPanel>
+              </DockPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="6" Margin="0,0,0,12">
+              <DataGrid Name="GridHealth" IsReadOnly="True" MaxHeight="330">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                  <DataGridTextColumn Header="EMNE" Binding="{Binding Navn}" Width="2*"/>
+                  <DataGridTextColumn Header="VÆRDI" Binding="{Binding Info}" Width="2*"/>
+                  <DataGridTextColumn Header="VURDERING" Binding="{Binding Note}" Width="3*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,12">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="BootBig" DockPanel.Dock="Right" FontSize="22" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center"/>
+                  <StackPanel><TextBlock Text="⏱  Opstartstid" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="BootSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Henter målinger..."/></StackPanel>
+                </DockPanel>
+                <Grid Height="150" Margin="0,14,0,0">
+                  <ItemsControl Name="BootBars" VerticalAlignment="Bottom">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <StackPanel Margin="0,0,10,0" VerticalAlignment="Bottom" ToolTip="{Binding Note}">
+                          <TextBlock Text="{Binding Info}" FontSize="11" Foreground="#AEB6C6" HorizontalAlignment="Center"/>
+                          <Border Height="{Binding Tal}" Width="26" CornerRadius="6,6,2,2" Background="{Binding Gruppe}" Margin="0,3,0,3"/>
+                          <TextBlock Text="{Binding Navn}" FontSize="10.5" Foreground="#6B7488" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Grid>
+                <TextBlock Name="BootLegend" FontSize="11.5" Foreground="#6B7488" Margin="0,6,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="CrashBig" DockPanel.Dock="Right" FontSize="22" FontWeight="Bold" VerticalAlignment="Center"/>
+                  <StackPanel><TextBlock Text="💥  Hvad crasher?" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="CrashSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Henter de seneste 14 dages hændelser..."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridCrash" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="300">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="36"/>
+                    <DataGridTextColumn Header="HVAD" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="ANTAL" Binding="{Binding Info}" Width="120"/>
+                    <DataGridTextColumn Header="SIDST" Binding="{Binding Gruppe}" Width="120"/>
+                    <DataGridTextColumn Header="MULIG SAMMENHÆNG" Binding="{Binding Note}" Width="3*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
         <WrapPanel Grid.Row="2" Margin="0,12,0,0">
           <Button Name="BtnHealthRefresh" Content="⟳  Tjek igen"/>
           <Button Name="BtnPowerHigh" Content="⚡  Strømplan: Høj ydelse"/>
@@ -1606,9 +1811,11 @@ foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
     foreach ($k in $pages.Keys) { $ui[$pages[$k]].Visibility = $(if ($ui[$k].IsChecked) { 'Visible' } else { 'Collapsed' }) }
-    if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health }
+    if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
+    if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {} }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
+    if ($sender.Name -eq 'NavTweaks') { try { Load-Gpu } catch { Log "GPU-fejl: $_" } } else { $gpuTimer.Stop() }
   })
 }
 
@@ -2067,6 +2274,7 @@ function Toggle-Selected {
   if (-not $it) { return }
   try {
     Set-StartupState $it (-not $it.Aktiv)
+    Mark-StartupChange
     Load-Startup
     $ui.StatusText.Text = "$($it.Navn) er slået $(if ($it.Aktiv) { 'FRA' } else { 'TIL' }). Gælder fra næste login."
     Log "Opstart $($it.Navn) -> $(-not $it.Aktiv)"
@@ -2087,6 +2295,7 @@ $ui.BtnStartAll.Add_Click({
   if ((Msg "Slå disse fra ved opstart?`n`n$names`n`nDu kan slå dem til igen her når som helst." 'Bekræft' 'YesNo' 'Question') -ne 'Yes') { return }
   $fail = @()
   foreach ($t in $targets) { try { Set-StartupState $t $false } catch { $fail += $t.Navn } }
+  Mark-StartupChange
   Load-Startup
   $ui.StatusText.Text = "$($targets.Count - $fail.Count) programmer slået fra ved opstart." + $(if ($fail) { " Kunne ikke: $($fail -join ', ')" })
 })
@@ -2269,7 +2478,7 @@ function Load-Health {
   $ui.BtnGameMode.IsEnabled = -not $script:GameModeOn
   $script:HealthLoaded = $true
 }
-$ui.BtnHealthRefresh.Add_Click({ Load-Health })
+$ui.BtnHealthRefresh.Add_Click({ Load-Health; try { Show-Reboot; Show-Boot } catch {}; Show-Crashes })
 $ui.BtnPowerHigh.Add_Click({
   powercfg /setactive SCHEME_MIN 2>$null
   if ($LASTEXITCODE -ne 0) {   # skjult på nogle pc'er: lav en kopi af "Høj ydelse"
@@ -2376,7 +2585,10 @@ function Build-Plan($r) {
     [void]$steps.Add((New-Step 'bloat' 'Fjern unødvendige Windows-apps' "$($bloat.Count) forudinstallerede apps, som du kan undvære (nyheder, kabale og lignende). De kan hentes igen fra Microsoft Store." 'Fjern dem' $bloat))
   }
   $up = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalDays
-  if ($up -ge 5) {
+  $pend = @(Get-PendingReboot)
+  if ($pend.Count) {
+    [void]$steps.Add((New-Step 'restart' 'Genstart for at færdiggøre en opdatering' "Windows venter på en genstart ($($pend -join ' og ')). Ændringerne træder først i kraft bagefter." 'Genstart' $null))
+  } elseif ($up -ge 5) {
     [void]$steps.Add((New-Step 'restart' 'Genstart pc''en' ("Pc'en har kørt i {0:N0} dage uden genstart. Det gør den langsommere. Gør det til sidst." -f $up) 'Genstart' $null))
   }
   $n = 0; foreach ($s in $steps) { $n++; $s.Gruppe = "$n" }
@@ -2457,6 +2669,7 @@ function Run-Step($id, [bool]$auto) {
       if ((Msg "Disse programmer starter ikke længere automatisk:`n`n$names`n`nDu kan stadig åbne dem selv, og du kan slå dem til igen under Opstart." 'Gør opstarten hurtigere' 'YesNo' 'Question') -ne 'Yes') { return }
       $ok = 0; $fail = @()
       foreach ($x in $t) { try { Set-StartupState $x $false; $ok++ } catch { $fail += $x.Navn } }
+      if ($ok) { Mark-StartupChange }
       Load-Startup
       if ($fail.Count) { Set-StepState 'startup' 'fail' "$ok af $($t.Count) slået fra · ikke: $($fail -join ', ')" } else { Set-StepState 'startup' 'done' "$ok slået fra" }
       Log "Plan: opstart $ok/$($t.Count)"
@@ -2728,6 +2941,16 @@ $VagtCfg    = Join-Path $JobBase 'vagt.json'
 $VagtLog    = Join-Path $JobBase 'vagt-log.txt'
 function Get-VagtTask { Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue }
 function Get-VagtProc { @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*PC-Tjek-Vagt.ps1*' }) }
+function Restart-Vagt {
+  try { Stop-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue } catch {}
+  foreach ($p in Get-VagtProc) { try { Stop-Process -Id $p.ProcessId -Force } catch {} }
+  Start-Sleep -Milliseconds 1200
+  try { Start-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction Stop } catch { Log "Vagt-start fejl: $_" }
+}
+function Test-VagtAlive {
+  if ((Get-VagtProc).Count) { return $true }
+  try { $st = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw | ConvertFrom-Json; return (((Get-Date) - [datetime]$st.Heartbeat).TotalSeconds -lt 90) } catch { return $false }
+}
 function Install-Vagt {
   if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når PC-Tjek er installeret med installeren (i Program Files).`n`nKør 'Installer PC-Tjek.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
   if (-not (Test-Path $VagtScript)) { Msg "Filen PC-Tjek-Vagt.ps1 mangler. Opdatér PC-Tjek, eller kør installeren igen." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
@@ -2741,7 +2964,7 @@ function Install-Vagt {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName 'PC-Tjek Vagt' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'PC-Tjek Vagt: tjekker downloads og nye opstartsprogrammer. Starter ved login.' -Force | Out-Null
     Save-VagtCfg
-    Start-ScheduledTask -TaskName 'PC-Tjek Vagt'
+    Restart-Vagt
     Log 'Vagt slået til'
     return $true
   } catch { Msg "Kunne ikke slå vagten til: $($_.Exception.Message)" 'Vagt' 'OK' 'Error' | Out-Null; return $false }
@@ -2758,7 +2981,7 @@ function Save-VagtCfg {
 }
 function Load-Vagt {
   if (Test-Path $VagtCfg) { try { $j = Get-Content $VagtCfg -Raw | ConvertFrom-Json; $script:VagtLoading = $true; $ui.ChkDl.IsChecked = [bool]$j.Downloads; $ui.ChkWd.IsChecked = [bool]$j.Watchdog; $script:VagtLoading = $false } catch {} }
-  $task = Get-VagtTask; $running = (Get-VagtProc).Count -gt 0
+  $task = Get-VagtTask; $running = Test-VagtAlive
   $stat = $null; try { $stat = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw | ConvertFrom-Json } catch {}
   $fmtT = { param($t) if ($t) { $d = [datetime]$t; if ($d.Date -eq (Get-Date).Date) { 'kl. ' + $d.ToString('HH:mm') } else { $d.ToString('dd-MM HH:mm') } } else { 'endnu ikke' } }
   $dlOn = [bool]$ui.ChkDl.IsChecked; $wdOn = [bool]$ui.ChkWd.IsChecked
@@ -2797,10 +3020,10 @@ function Load-Vagt {
 }
 $ui.BtnVagtToggle.Add_Click({
   $task = Get-VagtTask
-  if ($task -and (Get-VagtProc).Count) {
+  if ($task -and (Test-VagtAlive)) {
     if ((Msg 'Slå vagten fra? Du får så ingen advarsler om farlige downloads.' 'Vagt' 'YesNo' 'Question') -ne 'Yes') { return }
     Remove-Vagt
-  } elseif ($task) { Start-ScheduledTask -TaskName 'PC-Tjek Vagt'; Start-Sleep -Milliseconds 1500 }
+  } elseif ($task) { Restart-Vagt; Start-Sleep -Milliseconds 2500 }
   else { if (Install-Vagt) { Start-Sleep -Milliseconds 2000 } }
   Load-Vagt
   $st = Get-Step 'vagt'; if ($st -and (Get-VagtTask)) { Set-StepState 'vagt' 'done' 'Slået til' }
@@ -2809,6 +3032,297 @@ $ui.ChkDl.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg; Load-Vagt } 
 $ui.ChkWd.Add_Click({ if (-not $script:VagtLoading) { Save-VagtCfg; Load-Vagt } })
 $ui.BtnVagtRefresh.Add_Click({ Load-Vagt })
 $ui.BtnVagtTest.Add_Click({ try { [IO.File]::WriteAllText((Join-Path $JobBase 'vagt-test.flag'), 'test'); $ui.StatusText.Text = 'Kig nederst til højre om et par sekunder 👀' } catch {} })
+
+# =====================================================================
+#  FEJLFINDING: nedbrud, opstartstid før/efter, genstart-venter, supporttekst
+# =====================================================================
+$StartMarkFile = Join-Path $OutDir 'opstart-aendringer.txt'
+function Mark-StartupChange { try { Add-Content -Path $StartMarkFile -Value (Get-Date).ToString('s') -Encoding UTF8 } catch {} }
+
+function Get-PendingReboot {
+  $why = @()
+  if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $why += 'Windows Update' }
+  if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $why += 'en Windows-komponent' }
+  $pfr = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+  if ($pfr -and @($pfr | Where-Object { $_ }).Count -gt 0 -and -not $why.Count) { $why += 'en installation' }
+  return $why
+}
+function Show-Reboot {
+  $w = @(Get-PendingReboot)
+  if ($w.Count) {
+    $ui.RebootBanner.Visibility = 'Visible'
+    $ui.RebootWhy.Text = "Venter på: $($w -join ' og '). Ændringerne træder først i kraft efter en genstart."
+    $ui.UpdReboot.Text = "🔁 Genstart venter ($($w -join ', '))"
+  } else { $ui.RebootBanner.Visibility = 'Collapsed'; $ui.UpdReboot.Text = '' }
+}
+$ui.BtnRebootNow.Add_Click({
+  if ((Msg "Genstart pc'en om 30 sekunder?`n`nGem dit arbejde først." 'Genstart' 'YesNo' 'Question') -ne 'Yes') { return }
+  shutdown.exe /r /t 30 /c "PC-Tjek genstarter for at færdiggøre en opdatering."
+})
+
+function Get-Median($xs) { $v = @($xs | Sort-Object); if (-not $v.Count) { return $null }; return $v[[math]::Floor(($v.Count - 1) / 2)] }
+function Show-Boot {
+  $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 14 -ErrorAction SilentlyContinue)
+  $boots = @($ev | ForEach-Object {
+    $ms = (([xml]$_.ToXml()).Event.EventData.Data | Where-Object Name -eq 'BootTime').'#text'
+    if ($ms) { [pscustomobject]@{ Time = $_.TimeCreated; Sek = [int][math]::Round([double]$ms / 1000) } }
+  } | Sort-Object Time)
+  if (-not $boots.Count) { $ui.BootSub.Text = 'Windows har ikke gemt nogen opstartsmålinger på denne pc.'; $ui.BootBig.Text = ''; return }
+  $marks = @(); if (Test-Path $StartMarkFile) { $marks = @(Get-Content $StartMarkFile -Encoding UTF8 | ForEach-Object { try { [datetime]$_ } catch {} } | Where-Object { $_ } | Sort-Object) }
+  $lastMark = if ($marks.Count) { $marks[-1] } else { $null }
+  $max = [math]::Max(30, ($boots | Measure-Object Sek -Maximum).Maximum)
+  $ui.BootBars.ItemsSource = @($boots | ForEach-Object {
+    $r = New-Object PcTjek.Row
+    $r.Navn = $_.Time.ToString('dd/MM'); $r.Info = "$($_.Sek)s"; $r.Tal = [math]::Max(4, 110.0 * $_.Sek / $max)
+    $after = [bool]($lastMark -and $_.Time -gt $lastMark)
+    $r.Gruppe = $(if ($after) { '#4ADE80' } else { '#7C5CFF' })
+    $r.Note = "$($_.Time.ToString('dd-MM-yyyy HH:mm')): $($_.Sek) sek$(if ($after) { ' (efter ændring af opstart)' })"
+    $r })
+  $typ = Get-Median @($boots | Select-Object -Last 5 | ForEach-Object { $_.Sek })
+  $ui.BootBig.Text = "$typ sek"
+  if ($lastMark) {
+    $before = @($boots | Where-Object { $_.Time -le $lastMark } | Select-Object -Last 5 | ForEach-Object { $_.Sek })
+    $afterB = @($boots | Where-Object { $_.Time -gt $lastMark } | ForEach-Object { $_.Sek })
+    if ($before.Count -and $afterB.Count) {
+      $b = Get-Median $before; $a = Get-Median $afterB; $diff = $b - $a
+      $ui.BootSub.Text = "Typisk opstart: $b → $a sekunder $(if ($diff -ge 3) { "· $diff sek hurtigere 🎉" } elseif ($diff -le -3) { "· $([math]::Abs($diff)) sek langsommere" } else { '· ingen tydelig forskel' }) (siden du ændrede opstarten $($lastMark.ToString('dd-MM')))"
+    } elseif ($before.Count) { $ui.BootSub.Text = "Typisk opstart: $typ sek. Du ændrede opstarten $($lastMark.ToString('dd-MM')), så genstart pc'en for at måle effekten." }
+    else { $ui.BootSub.Text = "Typisk opstart: $typ sek (median af de seneste 5)." }
+  } else { $ui.BootSub.Text = "Typisk opstart: $typ sek (median af de seneste 5). Slår du programmer fra under Opstart, viser appen her, om det hjalp." }
+  $ui.BootLegend.Text = 'Lilla = før, grøn = efter din seneste ændring af opstarten. Windows måler kun nogle opstarter, ikke alle.'
+}
+
+function Show-Crashes {
+  Invoke-Bg $CrashScript $null {
+    param($res, $err, $c)
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
+    if (-not $res) { $ui.CrashSub.Text = 'Kunne ikke læse hændelsesloggen.'; return }
+    $script:Crashes = $res
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($a in @($res.Apps | Sort-Object { $_.Crash + $_.Hang } -Descending)) {
+      $n = $a.Crash + $a.Hang
+      $r = New-Object PcTjek.Row
+      $r.Status = $(if ($n -ge 3) { '🔴' } elseif ($n -ge 2) { '🟡' } else { '⚪' })
+      $nice = $a.Name -replace '\.exe$', ''
+      $r.Navn = "$nice $(if ($a.Crash -and $a.Hang) { 'lukkede uventet / hang' } elseif ($a.Crash) { 'lukkede uventet' } else { 'holdt op med at svare' })"
+      $r.Info = "$n gang$(if ($n -ne 1) { 'e' })"
+      $r.Gruppe = $a.Last.ToString('dd-MM HH:mm')
+      $near = @($res.Installs | Where-Object { $_.Time -le $a.First -and $_.Time -ge $a.First.AddHours(-48) } | Sort-Object Time -Descending | Select-Object -First 1)
+      $r.Note = if ($near.Count) { "Begyndte $($a.First.ToString('dd-MM')), kort efter: $($near[0].Name) ($($near[0].Time.ToString('dd-MM HH:mm')))" } elseif ($n -ge 2) { "Første gang $($a.First.ToString('dd-MM HH:mm')). Ingen installation lige før." } else { '' }
+      [void]$rows.Add($r)
+    }
+    foreach ($k in @(@{ K = 'bsod'; T = 'Blå skærm (systemnedbrud)'; I = '🔴' }, @{ K = 'restart'; T = 'Uventet genstart / strømtab'; I = '🟡' }, @{ K = 'shutdown'; T = 'Pc''en lukkede ned uventet'; I = '🟡' })) {
+      $ev = @($res.System | Where-Object { $_.Kind -eq $k.K })
+      if ($ev.Count) {
+        $r = New-Object PcTjek.Row; $r.Status = $k.I; $r.Navn = $k.T; $r.Info = "$($ev.Count) gang$(if ($ev.Count -ne 1) { 'e' })"
+        $r.Gruppe = ($ev | Sort-Object Time | Select-Object -Last 1).Time.ToString('dd-MM HH:mm')
+        $r.Note = if ($k.K -eq 'bsod') { 'Ofte driver, RAM (fx ustabil XMP) eller overophedning' } elseif ($k.K -eq 'restart') { 'Strømafbrydelse, holdt tænd/sluk inde, eller ustabil hardware' } else { '' }
+        [void]$rows.Insert(0, $r)
+      }
+    }
+    $ui.GridCrash.ItemsSource = @($rows)
+    $top = $res.Apps | Sort-Object { $_.Crash + $_.Hang } -Descending | Select-Object -First 1
+    $total = [int](($res.Apps | Measure-Object Crash -Sum).Sum + ($res.Apps | Measure-Object Hang -Sum).Sum) + @($res.System).Count
+    $ui.CrashBig.Text = "$total"
+    $ui.CrashBig.Foreground = $Brush.ConvertFromString($(if ($total -ge 5) { '#FF5D6C' } elseif ($total -ge 1) { '#F6C344' } else { '#4ADE80' }))
+    $ui.CrashSub.Text = if (-not $rows.Count) { 'Ingen nedbrud eller uventede genstarter de seneste 14 dage. 🎉' }
+                        elseif ($top -and ($top.Crash + $top.Hang) -ge 2) { "$($top.Name -replace '\.exe$', '') har haft problemer $($top.Crash + $top.Hang) gange de seneste 14 dage. Start dér." }
+                        else { 'Enkelte nedbrud de seneste 14 dage. Intet gentager sig.' }
+  } $null
+}
+
+# ---------- Kopiér pc-info til support ----------
+$ui.BtnCopyInfo.Add_Click({
+  $lines = New-Object System.Collections.ArrayList
+  [void]$lines.Add("PC-Tjek – pc-oplysninger ($(Get-Date -Format 'dd-MM-yyyy HH:mm'))")
+  [void]$lines.Add('')
+  foreach ($p in @(@('System', 'SysOS'), @('Processor', 'SysCpu'), @('Grafikkort', 'SysGpu'), @('Hukommelse', 'SysRam'), @('Bundkort', 'SysBoard'), @('Lager', 'SysDisk'))) {
+    $v = $ui[$p[1]].Text; $sub = $ui["$($p[1])sub"].Text
+    if ($v -and $v -ne '…') { [void]$lines.Add("$($p[0]): $v$(if ($sub) { ' · ' + ($sub -replace "`r?`n", ' | ') })") }
+  }
+  $w = @(Get-PendingReboot); if ($w.Count) { [void]$lines.Add("Venter på genstart: $($w -join ', ')") }
+  if ($script:Crashes) {
+    $top = @($script:Crashes.Apps | Sort-Object { $_.Crash + $_.Hang } -Descending | Select-Object -First 5)
+    if ($top.Count) { [void]$lines.Add(''); [void]$lines.Add('Nedbrud (14 dage):'); foreach ($a in $top) { [void]$lines.Add("  - $($a.Name): $($a.Crash) nedbrud, $($a.Hang) hængt, sidst $($a.Last.ToString('dd-MM HH:mm'))") } }
+    $bs = @($script:Crashes.System | Where-Object { $_.Kind -eq 'bsod' }).Count; if ($bs) { [void]$lines.Add("  - Blå skærm: $bs gange") }
+  } else { [void]$lines.Add(''); [void]$lines.Add('(Åbn "Ydelse og helbred" først, hvis nedbrud skal med.)') }
+  $text = $lines -join "`r`n"
+  [xml]$dx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Title="Kopiér pc-info til support" Width="660" Height="520" WindowStartupLocation="CenterOwner"
+        Background="#0D0F14" Foreground="#E7E9EE" FontFamily="Segoe UI Variable Text, Segoe UI">
+  <Grid Margin="18">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <TextBlock TextWrapping="Wrap" Foreground="#8A94A7" Margin="0,0,0,10" Text="Det her bliver kopieret. Du kan rette eller slette linjer, før du kopierer. Der er ingen adgangskoder eller personlige filer med."/>
+    <TextBox Name="Txt" Grid.Row="1" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Background="#10131A" Foreground="#E7E9EE" BorderBrush="#242A39" Padding="10" FontFamily="Consolas" FontSize="12.5"/>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button Name="CopyBtn" Content="📋  Kopiér" Padding="16,8" Margin="0,0,8,0"/>
+      <Button Name="CloseBtn" Content="Luk" Padding="16,8"/>
+    </StackPanel>
+  </Grid>
+</Window>
+'@
+  $d = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
+  $d.Owner = $win
+  $d.FindName('Txt').Text = $text
+  $d.FindName('CopyBtn').Add_Click({ param($s, $e) $dw = [Windows.Window]::GetWindow($s); [Windows.Clipboard]::SetText($dw.FindName('Txt').Text); $s.Content = '✓  Kopieret' })
+  $d.FindName('CloseBtn').Add_Click({ param($s, $e) [Windows.Window]::GetWindow($s).Close() })
+  [void]$d.ShowDialog()
+})
+
+# =====================================================================
+#  GPU-TUNING: live-data, mål før/efter, testet på min pc, testet af andre
+# =====================================================================
+$GpuTestsFile = Join-Path $OutDir 'gpu-tests.json'
+$script:GpuBefore = $null; $script:GpuAfter = $null
+function Get-Smi { $p = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Test-Path $p)) { $p = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }; if (Test-Path $p) { $p } else { $null } }
+function Get-GpuName { (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage' } | Select-Object -First 1).Name }
+function Update-GpuLive {
+  $smi = Get-Smi
+  if (-not $smi) { $ui.GpuLiveW.Text = '–'; return }
+  $q = & $smi --query-gpu=power.draw,power.limit,temperature.gpu,fan.speed,clocks.gr,utilization.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+  $p = @($q -split ',\s*')
+  if ($p.Count -lt 6) { return }
+  $f = { param($x, $u) $x = ([string]$x).Trim(); if ($x -match '^[\d.]+$') { "$([math]::Round([double]::Parse($x, [Globalization.CultureInfo]::InvariantCulture)))$u" } else { 'n/a' } }
+  $ui.GpuLiveW.Text = (& $f $p[0] ' W') + $(if ($p[1] -match '^[\d.]+') { " / $(& $f $p[1] '')" } else { '' })
+  $ui.GpuLiveT.Text = & $f $p[2] ' °C'
+  $ui.GpuLiveF.Text = & $f $p[3] ' %'
+  $ui.GpuLiveC.Text = & $f $p[4] ' MHz'
+  $ui.GpuLiveU.Text = & $f $p[5] ' %'
+}
+$gpuTimer = New-Object Windows.Threading.DispatcherTimer
+$gpuTimer.Interval = [TimeSpan]::FromSeconds(3)
+$gpuTimer.Add_Tick({ if ($ui.PageTweaks.Visibility -eq 'Visible' -and -not $script:GpuMeasuring) { try { Update-GpuLive } catch {} } })
+
+function Fmt-Delta($a, $b, $unit, [switch]$Pct) {
+  if ($null -eq $a -or $null -eq $b) { return $null }
+  $s = "$([math]::Round($a)) → $([math]::Round($b))$unit"
+  if ($Pct -and $a -gt 0) { $d = [math]::Round(($b - $a) / $a * 100); $s += " ($(if ($d -gt 0) { '+' })$d %)" }
+  return $s
+}
+function Show-GpuCompare {
+  $a = $script:GpuBefore; $b = $script:GpuAfter
+  $parts = @()
+  $x = Fmt-Delta $a.W $b.W ' W' -Pct; if ($x) { $parts += "Effekt $x" }
+  $x = Fmt-Delta $a.T $b.T ' °C'; if ($x) { $parts += "Temp $x" }
+  $x = Fmt-Delta $a.F $b.F ' %'; if ($x) { $parts += "Blæser $x" }
+  $x = Fmt-Delta $a.C $b.C ' MHz' -Pct; if ($x) { $parts += "Clock $x" }
+  $fb = 0.0; $fa = 0.0
+  $hasFps = [double]::TryParse($ui.TxtFpsBefore.Text, [ref]$fb) -and [double]::TryParse($ui.TxtFpsAfter.Text, [ref]$fa) -and $fb -gt 0
+  if ($hasFps) { $parts += "FPS $(Fmt-Delta $fb $fa '' -Pct)" }
+  $ui.GpuResult.Text = $parts -join '  ·  '
+  $wPct = if ($a.W -gt 0 -and $null -ne $b.W) { ($b.W - $a.W) / $a.W * 100 } else { 0 }
+  $perfPct = if ($hasFps) { ($fa - $fb) / $fb * 100 } elseif ($a.C -gt 0 -and $null -ne $b.C) { ($b.C - $a.C) / $a.C * 100 } else { 0 }
+  $what = if ($hasFps) { 'FPS' } else { 'clock (FPS ikke indtastet)' }
+  $ui.GpuVerdict.Text = if ($wPct -le -8 -and $perfPct -ge -3) { "👍 Værd at beholde: $([math]::Abs([math]::Round($wPct))) % mindre strøm, og $what faldt kun $([math]::Abs([math]::Round($perfPct))) %. Spil et par timer i dine egne spil for at sikre, at det er stabilt. Går et spil ned, så skru lidt tilbage." }
+                        elseif ($perfPct -lt -5) { "⚠ Ydelsen faldt mærkbart ($([math]::Round($perfPct)) % $what). Prøv en mildere indstilling." }
+                        elseif ($wPct -gt -3) { "Næsten ingen forskel i strømforbrug. Ændringen gjorde ikke meget, eller kortet var ikke fuldt belastet." }
+                        else { "Lidt mindre strøm ($([math]::Round($wPct)) %). Sammenlign, om det er det værd for dig." }
+  if ($a.LowLoad -or $b.LowLoad) { $ui.GpuVerdict.Text += "`n⚠ Grafikkortet var ikke fuldt belastet under en af målingerne. Kørte spillet i forgrunden?" }
+  $ui.GpuSavePanel.Visibility = 'Visible'
+}
+function Start-GpuMeasure($which) {
+  if (-not (Get-Smi)) { Msg 'Måling kræver et NVIDIA-grafikkort (nvidia-smi). Til AMD: brug målingerne i AMD Adrenalin.' 'GPU' | Out-Null; return }
+  $script:GpuMeasuring = $true
+  $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false
+  $ui.GpuMeasureBar.Visibility = 'Visible'; $ui.GpuMeasureBar.Value = 0
+  $ui.GpuResult.Text = "Måler $(if ($which -eq 'before') { 'FØR' } else { 'EFTER' })... Skift til spillet nu, og spil i 2 minutter."
+  $ui.GpuVerdict.Text = ''
+  Invoke-Bg $GpuMeasureScript @{ Seconds = 120 } {
+    param($res, $err, $c)
+    $script:GpuMeasuring = $false; $ui.GpuMeasureBar.Visibility = 'Collapsed'
+    $ui.BtnGpuBefore.IsEnabled = $true
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
+    if ($err -or -not $res) { $ui.GpuResult.Text = "Målingen fejlede: $err"; return }
+    if ($c.Which -eq 'before') {
+      $script:GpuBefore = $res; $script:GpuAfter = $null
+      $ui.GpuResult.Text = "FØR: $([math]::Round($res.W)) W · $([math]::Round($res.T)) °C · blæser $(if ($null -ne $res.F) { "$([math]::Round($res.F)) %" } else { 'n/a' }) · $([math]::Round($res.C)) MHz · $([math]::Round($res.U)) % belastning"
+      $ui.GpuVerdict.Text = "Lav nu ÉN ændring i tuningværktøjet (fx et lavere power limit, kortets Quiet-profil eller auto-tuning), og tryk så 'Mål EFTER'.$(if ($res.LowLoad) { "`n⚠ Kortet var ikke fuldt belastet. Kørte spillet?" })"
+      $ui.BtnGpuAfter.IsEnabled = $true
+    } else { $script:GpuAfter = $res; $ui.BtnGpuAfter.IsEnabled = $true; Show-GpuCompare }
+    try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
+  } @{ Which = $which }
+  # vis måle-fremdrift i bjælken
+  $script:GpuProgTimer = New-Object Windows.Threading.DispatcherTimer
+  $script:GpuProgTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+  $script:GpuProgTimer.Add_Tick({
+    if (-not $script:GpuMeasuring) { $script:GpuProgTimer.Stop(); return }
+    $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.Which } | Select-Object -First 1
+    if ($j -and [double]$j.S.Progress -ge 0) { $ui.GpuMeasureBar.Value = [double]$j.S.Progress; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
+  })
+  $script:GpuProgTimer.Start()
+}
+$ui.BtnGpuBefore.Add_Click({ Start-GpuMeasure 'before' })
+$ui.BtnGpuAfter.Add_Click({ Start-GpuMeasure 'after' })
+$ui.TxtFpsAfter.Add_TextChanged({ if ($script:GpuBefore -and $script:GpuAfter) { Show-GpuCompare } })
+$ui.TxtFpsBefore.Add_TextChanged({ if ($script:GpuBefore -and $script:GpuAfter) { Show-GpuCompare } })
+
+function Load-GpuMine {
+  $list = @(); if (Test-Path $GpuTestsFile) { try { $list = @((Get-Content $GpuTestsFile -Raw | ConvertFrom-Json) | ForEach-Object { $_ }) } catch {} }
+  $ui.GridGpuMine.ItemsSource = @($list | Sort-Object Dato -Descending | ForEach-Object { $r = New-Object PcTjek.Row; $r.Gruppe = ([datetime]$_.Dato).ToString('dd-MM-yyyy'); $r.Navn = $_.Note; $r.Info = $_.Resultat; $r })
+  $ui.GpuMineEmpty.Visibility = $(if ($list.Count) { 'Collapsed' } else { 'Visible' })
+  $ui.GridGpuMine.Visibility = $(if ($list.Count) { 'Visible' } else { 'Collapsed' })
+}
+$ui.BtnGpuSave.Add_Click({
+  $list = @(); if (Test-Path $GpuTestsFile) { try { $list = @((Get-Content $GpuTestsFile -Raw | ConvertFrom-Json) | ForEach-Object { $_ }) } catch {} }
+  $note = if ($ui.TxtGpuNote.Text) { $ui.TxtGpuNote.Text } else { '(ingen beskrivelse)' }
+  $list += [pscustomobject]@{ Dato = (Get-Date).ToString('s'); Gpu = (Get-GpuName); Note = $note; Resultat = $ui.GpuResult.Text; Dom = $ui.GpuVerdict.Text; Foer = $script:GpuBefore; Efter = $script:GpuAfter }
+  ConvertTo-Json -InputObject @($list) -Depth 4 | Out-File -Encoding utf8 $GpuTestsFile
+  Load-GpuMine; $ui.GpuSavePanel.Visibility = 'Collapsed'; $ui.StatusText.Text = 'Gemt under "Testet på min pc".'
+})
+
+function Load-GpuLib {
+  Invoke-Bg $GpuLibScript $null {
+    param($res, $err, $c)
+    if ($err -or -not $res) { $ui.GpuLibInfo.Text = "Kunne ikke hente eksempler lige nu. $err"; return }
+    $mine = (Get-GpuName) -replace '(?i)nvidia|geforce|amd|radeon|\s', ''
+    $rows = @($res | ForEach-Object {
+      $g = [string]$_.gpu
+      $key = $g -replace '(?i)nvidia|geforce|amd|radeon|\s', ''
+      $r = New-Object PcTjek.Row
+      $r.Navn = "$g$(if ($_.board) { " · $($_.board)" })"
+      $set = @($_.method, $_.setting) | Where-Object { $_ }
+      $r.Info = ($set -join ': ')
+      $res2 = @()
+      if ($_.power_saved_w) { $res2 += "−$($_.power_saved_w) W" }
+      if ($null -ne $_.fps_delta_pct -and "$($_.fps_delta_pct)" -ne '') { $res2 += "FPS $(if ([double]$_.fps_delta_pct -gt 0) { '+' })$($_.fps_delta_pct) %" }
+      if ($_.temp_drop_c) { $res2 += "−$($_.temp_drop_c) °C" }
+      $r.Note = ($res2 -join ' · ') + $(if ($_.test_method) { " ($($_.test_method))" })
+      $r.Gruppe = [string]$_.source_type
+      $r.Sti = [string]$_.source_url
+      $r.Valgt = ($mine -and $key -and ($mine -like "*$key*" -or $key -like "*$mine*"))
+      $r })
+    $match = @($rows | Where-Object Valgt)
+    $ui.GridGpuLib.ItemsSource = $(if ($match.Count) { $match } else { $rows })
+    $ui.GpuLibInfo.Text = if ($match.Count) { "$($match.Count) eksempel$(if ($match.Count -ne 1) { 'er' }) med dit kort ($(Get-GpuName)). Brug dem som udgangspunkt, og mål selv." } else { "Ingen eksempler med dit kort endnu. Her er dem, der findes ($($rows.Count)), til inspiration." }
+  } $null
+}
+$ui.GridGpuLib.Add_SelectionChanged({ $ui.BtnGpuSrc.IsEnabled = [bool]($ui.GridGpuLib.SelectedItem -and $ui.GridGpuLib.SelectedItem.Sti) })
+$ui.BtnGpuSrc.Add_Click({ $u = $ui.GridGpuLib.SelectedItem.Sti; if ($u -match '^https?://') { Start-Process $u } })
+
+$ui.GpuHow.Add_Click({
+  $ui.GpuSteps.Visibility = $(if ($ui.GpuSteps.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' })
+  $ui.GpuHow.Content = $(if ($ui.GpuSteps.Visibility -eq 'Visible') { '✕  Skjul guiden' } else { '📖  Sådan gør du' })
+})
+$ui.GpuStepsText.Text = "Vælg ét mål ad gangen, og mål før og efter:`n`n🔋  MINDRE STRØM`n•  Nemmest: sæt et FPS-loft lidt over din skærms Hz (fx 141 på en 144 Hz-skærm) i spillet eller i NVIDIA-kontrolpanelet. Så arbejder kortet ikke for billeder, du ikke kan se.`n•  Eller sænk 'Power limit' 10-20 % i MSI Afterburner, og se, hvad det koster i FPS.`n`n🤫  MINDRE STØJ`n•  Brug kortets egen Quiet-profil (BIOS-knap på kortet eller producentens program), hvis den findes.`n•  Eller lav en roligere blæserkurve i Afterburner. Hold øje med temperaturen her i appen.`n`n⚡  SAMME YDELSE VED FÆRRE WATT (undervolt)`n•  NVIDIA App → System → Ydeevne → automatisk tuning (på understøttede kort).`n•  MSI Afterburner → Ctrl+F → spændings-/frekvenskurve: lås fx en lidt lavere frekvens ved en lavere spænding.`n•  AMD: Adrenalin → Ydeevne → Tuning → Undervolt GPU.`n`nTest stabiliteten ved at spille et par timer. Går et spil ned eller får du grafikfejl, så skru lidt tilbage. Det ødelægger ikke kortet, men kan give nedbrud."
+$ui.BtnGpuTool.Add_Click({
+  $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  $amd = "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe"
+  if ($nv) { Start-Process $nv } elseif (Test-Path $amd) { Start-Process $amd } else { Msg 'Hverken NVIDIA App eller AMD Adrenalin blev fundet. Installér dit grafikkorts program fra producenten.' 'GPU' | Out-Null }
+})
+$ui.BtnGpuAb.Add_Click({
+  $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($ab) { Start-Process $ab } else { Start-Process 'https://www.msi.com/Landing/afterburner/graphics-cards' }
+})
+function Load-Gpu {
+  $n = Get-GpuName
+  $ui.GpuName.Text = "$n$(if (-not (Get-Smi)) { ' · live-måling kræver NVIDIA (nvidia-smi)' })"
+  $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  $ui.BtnGpuAb.Content = $(if ($ab) { '🎚  Åbn MSI Afterburner' } else { '⬇  Hent MSI Afterburner' })
+  try { Update-GpuLive } catch {}
+  Load-GpuMine
+  if (-not $script:GpuLibLoaded) { $script:GpuLibLoaded = $true; Load-GpuLib }
+  $gpuTimer.Start()
+}
 
 # =====================================================================
 #  Eksport
@@ -2905,7 +3419,7 @@ function Refresh-VagtVersion {
   try {
     $vp = Get-VagtProc | Select-Object -First 1
     if ($vp -and (Test-Path $VagtScript) -and (Get-Item $VagtScript).LastWriteTime -gt $vp.CreationDate) {
-      Stop-Process -Id $vp.ProcessId -Force; Start-Sleep -Milliseconds 500; Start-ScheduledTask -TaskName 'PC-Tjek Vagt'; Log 'Vagten genstartet med ny version'
+      Restart-Vagt; Log 'Vagten genstartet med ny version'
     }
   } catch {}
 }
