@@ -1,5 +1,5 @@
 ﻿<#
-  PC-Tjek Vagt  –  kører stille i baggrunden (startes af den planlagte opgave "PC-Tjek Vagt" ved login)
+  Opticon Vagt  –  kører stille i baggrunden (startes af den planlagte opgave "PC-Tjek Vagt" ved login)
   ---------------------------------------------------------------------------------------------------
   * Download-vagt: tjekker nye programfiler i Overførsler (signatur, hvor de kommer fra, Defender, indhold i zip)
   * Vagthund: giver besked, når noget nyt sætter sig i opstart, planlagte opgaver, tjenester, browserudvidelser
@@ -48,8 +48,8 @@ $ModeStopFlag   = Join-Path $ModeBase 'mode-stop.flag'
 $GamesFile      = Join-Path $ModeBase 'spil.json'
 $GpuRestoreFile = Join-Path $ModeBase 'gpu-restore.json'
 $HostsFile      = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-$HostsBegin     = '# >>> PC-Tjek Fokus (fjernes automatisk, når fokus slutter)'
-$HostsEnd       = '# <<< PC-Tjek Fokus'
+$HostsBegin     = '# >>> Opticon Fokus (fjernes automatisk, når fokus slutter)'
+$HostsEnd       = '# <<< Opticon Fokus'
 # Vises aldrig som "må lukkes": Windows, sikkerhed, drivere, lyd og anti-cheat
 $ModeNever = @('system','idle','registry','smss','csrss','wininit','winlogon','services','lsass','lsaiso','svchost','dwm','explorer','fontdrvhost','sihost','ctfmon',
   'taskhostw','runtimebroker','searchhost','searchindexer','startmenuexperiencehost','shellexperiencehost','textinputhost','dllhost','conhost','audiodg','msmpeng','nissrv',
@@ -164,7 +164,7 @@ function Stop-Mode($reason) {
   $done = New-Object System.Collections.ArrayList
   if ($m) {
     if ($null -ne $m.PrevToast) { Set-Toasts ([int]$m.PrevToast); [void]$done.Add('Windows-beskeder er som før') }
-    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør PC-Tjek igen.') } }
+    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør Opticon igen.') } }
     if ($m.PrevPl) { if (Set-GpuPlNow $m.PrevPl) { [void]$done.Add("Grafikkortet er tilbage på $($m.PrevPl) W") } else { [void]$done.Add("Kunne ikke sætte grafikkortet tilbage til $($m.PrevPl) W") } }
     foreach ($p in @($m.Paused)) {
       if (-not $p.Path -or -not (Test-Path -LiteralPath $p.Path)) { continue }
@@ -234,7 +234,7 @@ $PopupXaml = @'
         <StackPanel Orientation="Horizontal">
           <Border Name="IconBg" Width="34" Height="34" CornerRadius="10"><TextBlock Name="Icon" FontSize="17" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White"/></Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center" MaxWidth="290">
-            <TextBlock Text="PC-Tjek Vagt" FontSize="11" Foreground="#8A94A7"/>
+            <TextBlock Text="Opticon Vagt" FontSize="11" Foreground="#8A94A7"/>
             <TextBlock Name="Title" FontWeight="SemiBold" FontSize="14.5" Foreground="#F2F4F8" TextWrapping="Wrap"/>
           </StackPanel>
         </StackPanel>
@@ -371,7 +371,7 @@ function Check-Download($path) {
   $ok = @{ Text = 'OK'; Kind = 'normal'; Data = $null; Action = $null }
   switch ($level) {
     'danger' {
-      $btns = if (Test-Path -LiteralPath $path) { @($del, @{ Text = 'Åbn PC-Tjek'; Kind = 'normal'; Action = { Open-App } }) } else { @($ok) }
+      $btns = if (Test-Path -LiteralPath $path) { @($del, @{ Text = 'Åbn Opticon'; Kind = 'normal'; Action = { Open-App } }) } else { @($ok) }
       Show-Popup 'danger' "Kør IKKE: $($f.Name)" ("$from · $sizeTxt`n`n" + (($reasons | ForEach-Object { "•  $_" }) -join "`n")) $btns 0
     }
     'caution' {
@@ -493,7 +493,7 @@ function Check-Watchdog {
     $btns = New-Object System.Collections.ArrayList
     if ($it.Kind -in 'run', 'task', 'startfile' -and ($it.Kind -eq 'task' -or $it.Hive)) {
       [void]$btns.Add(@{ Text = '⛔  Slå fra'; Kind = 'danger'; Data = $it; Action = { param($x) try { Disable-Item $x; VLog 'Vagthund' 'handling' "Slået fra: $($x.Name)" $x.Cmd $x.Cmd } catch {} } })
-    } else { [void]$btns.Add(@{ Text = 'Åbn PC-Tjek'; Kind = 'primary'; Action = { Open-App } }) }
+    } else { [void]$btns.Add(@{ Text = 'Åbn Opticon'; Kind = 'primary'; Action = { Open-App } }) }
     [void]$btns.Add(@{ Text = 'Det er OK'; Kind = 'normal'; Action = $null })
     Show-Popup $level "Ændret $($label.ToLower()): $($it.Name)" "Peger nu på et andet program. $who`n`nNu:  $($it.Cmd)`nFør: $old" @($btns) $(if ($level -eq 'caution') { 0 } else { 30 })
     VLog 'Vagthund' $level "Ændret $($label.ToLower()): $($it.Name)" "Før: $old · Nu: $($it.Cmd)" $it.Cmd
@@ -510,7 +510,7 @@ function Check-Watchdog {
     $items = @($new | ForEach-Object { $it = $now[$_]; $it.Key = $_; $it })
     if ($items.Count -gt 3) {
       $list = ($items | Select-Object -First 6 | ForEach-Object { "•  $(Kind-Label $_.Kind): $(if ($_.Kind -eq 'ext') { Ext-Name $_.Cmd } else { $_.Name })" }) -join "`n"
-      Show-Popup 'info' "$($items.Count) nye ting starter automatisk" "Har du lige installeret eller opdateret et program? Så er det sikkert fint.`n`n$list" @(@{ Text = 'Åbn PC-Tjek'; Kind = 'primary'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'normal'; Action = $null }) 30
+      Show-Popup 'info' "$($items.Count) nye ting starter automatisk" "Har du lige installeret eller opdateret et program? Så er det sikkert fint.`n`n$list" @(@{ Text = 'Åbn Opticon'; Kind = 'primary'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'normal'; Action = $null }) 30
       foreach ($it in $items) { VLog 'Vagthund' 'info' "$(Kind-Label $it.Kind): $($it.Name)" $it.Cmd $it.Cmd }
       return
     }
@@ -528,10 +528,10 @@ function Check-Watchdog {
       }
       $btns = New-Object System.Collections.ArrayList
       if ($it.Kind -in 'run', 'task', 'startfile' -and ($it.Kind -eq 'task' -or $it.Hive)) {
-        [void]$btns.Add(@{ Text = '⛔  Slå fra'; Kind = 'danger'; Data = $it; Action = { param($x) try { Disable-Item $x; VLog 'Vagthund' 'handling' "Slået fra: $($x.Name)" $x.Cmd $x.Cmd } catch { Show-Popup 'caution' 'Kunne ikke slå det fra' 'Åbn PC-Tjek, og gør det derfra.' @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) 10 } } })
+        [void]$btns.Add(@{ Text = '⛔  Slå fra'; Kind = 'danger'; Data = $it; Action = { param($x) try { Disable-Item $x; VLog 'Vagthund' 'handling' "Slået fra: $($x.Name)" $x.Cmd $x.Cmd } catch { Show-Popup 'caution' 'Kunne ikke slå det fra' 'Åbn Opticon, og gør det derfra.' @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) 10 } } })
       }
       if ($it.Kind -eq 'ext') { [void]$btns.Add(@{ Text = '🧩  Åbn udvidelser'; Kind = 'primary'; Data = $it.Browser; Action = { param($b) if ($b -eq 'Chrome') { Start-Process 'chrome.exe' 'chrome://extensions' } else { Start-Process 'msedge.exe' 'edge://extensions' } } }) }
-      if ($it.Kind -in 'service', 'excl') { [void]$btns.Add(@{ Text = 'Åbn PC-Tjek'; Kind = 'primary'; Action = { Open-App } }) }
+      if ($it.Kind -in 'service', 'excl') { [void]$btns.Add(@{ Text = 'Åbn Opticon'; Kind = 'primary'; Action = { Open-App } }) }
       [void]$btns.Add(@{ Text = 'Det er OK'; Kind = 'normal'; Action = $null })
       Show-Popup $level "Ny $($label.ToLower()): $name" ("$why $who`n`n$($it.Cmd)").Trim() @($btns) $(if ($level -eq 'caution') { 0 } else { 40 })
       VLog 'Vagthund' $level "$($label): $name" "$why $who" $it.Cmd
@@ -569,7 +569,7 @@ function End-ModeWithPopup($reason) {
   $body = ((@($s.Done) | ForEach-Object { "✓  $_" }) -join "`n")
   if ($held.Count) { $body += "`n`nImens fik du $($held.Count) besked$(if ($held.Count -ne 1) { 'er' }) fra Vagten:`n" + ((@($held) | Select-Object -First 5 | ForEach-Object { "•  $_" }) -join "`n") }
   if (-not $body.Trim()) { $body = 'Alt er som før.' }
-  Show-Popup 'safe' $label $body.Trim() @(@{ Text = 'Åbn PC-Tjek'; Kind = 'normal'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'primary'; Action = $null }) $(if ($held.Count) { 0 } else { 20 }) -Force
+  Show-Popup 'safe' $label $body.Trim() @(@{ Text = 'Åbn Opticon'; Kind = 'normal'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'primary'; Action = $null }) $(if ($held.Count) { 0 } else { 20 }) -Force
 }
 function Mode-Tick {
   $m = Get-ModeState
@@ -595,7 +595,7 @@ function Mode-Tick {
     if ($k -and $running.ContainsKey($k) -and $k -ne $script:SkipGame) {
       $nm = Start-GameMode $g
       if ($nm) {
-        $txt = if (@($nm.Paused).Count) { "Sat på pause: $((@($nm.Paused) | ForEach-Object { $_.Name }) -join ', '). Det starter igen, når du lukker spillet." } else { 'Beskeder fra PC-Tjek venter, til du er færdig.' }
+        $txt = if (@($nm.Paused).Count) { "Sat på pause: $((@($nm.Paused) | ForEach-Object { $_.Name }) -join ', '). Det starter igen, når du lukker spillet." } else { 'Beskeder fra Opticon venter, til du er færdig.' }
         if ($nm.NewPl) { $txt += "`nGrafikkort: $($nm.NewPl) W." }
         Show-Popup 'info' "🎮 Spil-tilstand: $($g.Name)" $txt @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) 6 -Force
       }
@@ -605,7 +605,7 @@ function Mode-Tick {
 }
 VLog 'Vagt' 'info' 'Vagten er startet' "Overvåger $DlDir$(if (-not $IsAdmin) { ' · ADVARSEL: kører uden administratorrettigheder' })" ''
 try { $r = Repair-Modes; if ($r) { $script:StartupSummary = $r } } catch {}
-# Grafikkortets strømgrænse fra PC-Tjeks GPU-test (Windows nulstiller den ved genstart)
+# Grafikkortets strømgrænse fra Opticons GPU-test (Windows nulstiller den ved genstart)
 $GpuPlFile = Join-Path $Base 'gpu-pl.json'
 if (Test-Path $GpuPlFile) {
   try {

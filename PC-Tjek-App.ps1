@@ -1,11 +1,11 @@
 ﻿<#
-  PC-Tjek 2.0  –  sikkerhed, oprydning og optimering til Windows 11
+  Opticon 2.0  –  sikkerhed, oprydning og optimering til Windows 11
   ------------------------------------------------------------------
   * Scanninger LÆSER kun. Intet ændres, før du selv trykker på en handling og bekræfter.
   * Før større ændringer oprettes et gendannelsespunkt (hvis systembeskyttelse er slået til).
   * Filer, du sletter fra Filer-siden, flyttes til papirkurven.
   * Rapporter, snapshots, fortryd-log og fejl-log ligger i  Overførsler\PC-Tjek-rapport\
-  Installation: kør "Installer PC-Tjek.cmd" én gang. Derefter starter appen fra ikonet uden UAC og uden konsol.
+  Installation: kør "Installer Opticon.cmd" én gang. Derefter starter appen fra ikonet uden UAC og uden konsol.
 #>
 
 # ---------- Elevering + STA (bruges kun, hvis appen startes uden installeren) ----------
@@ -20,7 +20,8 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.24'
+$AppVersion = '2.25'
+$AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -133,8 +134,8 @@ $ModeStopFlag   = Join-Path $ModeBase 'mode-stop.flag'
 $GamesFile      = Join-Path $ModeBase 'spil.json'
 $GpuRestoreFile = Join-Path $ModeBase 'gpu-restore.json'
 $HostsFile      = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-$HostsBegin     = '# >>> PC-Tjek Fokus (fjernes automatisk, når fokus slutter)'
-$HostsEnd       = '# <<< PC-Tjek Fokus'
+$HostsBegin     = '# >>> Opticon Fokus (fjernes automatisk, når fokus slutter)'
+$HostsEnd       = '# <<< Opticon Fokus'
 # Vises aldrig som "må lukkes": Windows, sikkerhed, drivere, lyd og anti-cheat
 $ModeNever = @('system','idle','registry','smss','csrss','wininit','winlogon','services','lsass','lsaiso','svchost','dwm','explorer','fontdrvhost','sihost','ctfmon',
   'taskhostw','runtimebroker','searchhost','searchindexer','startmenuexperiencehost','shellexperiencehost','textinputhost','dllhost','conhost','audiodg','msmpeng','nissrv',
@@ -249,7 +250,7 @@ function Stop-Mode($reason) {
   $done = New-Object System.Collections.ArrayList
   if ($m) {
     if ($null -ne $m.PrevToast) { Set-Toasts ([int]$m.PrevToast); [void]$done.Add('Windows-beskeder er som før') }
-    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør PC-Tjek igen.') } }
+    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør Opticon igen.') } }
     if ($m.PrevPl) { if (Set-GpuPlNow $m.PrevPl) { [void]$done.Add("Grafikkortet er tilbage på $($m.PrevPl) W") } else { [void]$done.Add("Kunne ikke sætte grafikkortet tilbage til $($m.PrevPl) W") } }
     foreach ($p in @($m.Paused)) {
       if (-not $p.Path -or -not (Test-Path -LiteralPath $p.Path)) { continue }
@@ -454,13 +455,13 @@ $ScanScript = {
     foreach ($a in $t.Actions) {
       if (-not $a.Execute) { continue }
       $exe = ExePath $a.Execute; $sg = Sig $exe; $full = "$($a.Execute) $($a.Arguments)".Trim()
-      # PC-Tjeks egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
+      # Opticons egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
       if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek Vagt' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Vagt.ps1*") {
-        Add-Find 0 'Planlagt opgave' 'PC-Tjek Vagt (denne app)' 'Starter vagten, når du logger ind' 'Oprettet af PC-Tjek.' $full 'self' $null
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek Vagt (denne app)' 'Starter vagten, når du logger ind' 'Oprettet af Opticon.' $full 'self' $null
         continue
       }
       if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*") {
-        Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter PC-Tjek, når du klikker på ikonet' 'Oprettet af PC-Tjeks installer.' $full 'self' $null
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter Opticon, når du klikker på ikonet' 'Oprettet af Opticons installer.' $full 'self' $null
         continue
       }
       $risk = 0; $why = 'Planlagt opgave fra en signeret udgiver.'
@@ -523,7 +524,7 @@ $ScanScript = {
     }
   }
   foreach ($pp in $procs.Values) {
-    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|PC-Tjek-Vagt\.ps1|jobs\\)') {
+    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|Opticon-Vagt\.ps1|jobs\\)') {
       Add-Find 4 'Proces' "Mistænkelig kommando kører: $($pp.Name)" $pp.CommandLine 'Et skjult/kodet script kører lige nu.' $pp.ExecutablePath 'file' $null
     }
   }
@@ -869,7 +870,7 @@ $WingetUpgradeScript = {
 $RestorePointScript = {
   param($sync, $arg)
   $sync.Status = 'Opretter gendannelsespunkt (kan tage op til et minut)...'
-  Checkpoint-Computer -Description "PC-Tjek $($arg.Why)" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningAction SilentlyContinue
+  Checkpoint-Computer -Description "Opticon $($arg.Why)" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningAction SilentlyContinue
   return 'ok'
 }
 
@@ -882,7 +883,7 @@ $UpdateCheckScript = {
   $m = [regex]::Match($arg.Url, '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)$')
   if ($m.Success) {
     try {
-      $c = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/{1}/commits/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'User-Agent' = 'PC-Tjek'; 'Accept' = 'application/vnd.github+json' }
+      $c = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/{1}/commits/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'User-Agent' = 'Opticon'; 'Accept' = 'application/vnd.github+json' }
       if ($c.sha -match '^[0-9a-f]{40}$') {
         $base = "https://raw.githubusercontent.com/{0}/{1}/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $c.sha
         $v = Invoke-RestMethod -Uri "$base/version.json" -UseBasicParsing -TimeoutSec 15
@@ -1032,7 +1033,7 @@ $GpuLibScript = {
 
 $GpuBenchHtml = @'
 <!doctype html>
-<html lang="da"><head><meta charset="utf-8"><title>PC-Tjek GPU-test</title>
+<html lang="da"><head><meta charset="utf-8"><title>Opticon GPU-test</title>
 <style>
 html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}
 canvas{width:100vw;height:100vh;display:block}
@@ -1040,7 +1041,7 @@ canvas{width:100vw;height:100vh;display:block}
 #o small{font-weight:400;opacity:.75}
 #f{position:fixed;inset:0;display:none;align-items:center;justify-content:center;font:600 30px "Segoe UI",sans-serif;color:#fff;background:#0D0F14}
 </style></head>
-<body><canvas id="c"></canvas><div id="o">PC-Tjek GPU-test<br><small>Starter…</small></div><div id="f">✓ Færdig. Du kan gå tilbage til PC-Tjek.</div>
+<body><canvas id="c"></canvas><div id="o">Opticon GPU-test<br><small>Starter…</small></div><div id="f">✓ Færdig. Du kan gå tilbage til Opticon.</div>
 <script>
 const q = new URLSearchParams(location.search);
 let work = parseFloat(q.get('work')) || 0;
@@ -1093,8 +1094,8 @@ const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.v
 const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
 function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRatio * work)); c.height = Math.max(180, Math.round(innerHeight * devicePixelRatio * work)); gl.viewport(0, 0, c.width, c.height); }
 resize(); addEventListener('resize', resize);
-c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'PC-Tjek GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
-addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
+c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'Opticon GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
+addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'Opticon GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
 // Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
 // For at komme forbi skærmens Hz-loft tegnes den K gange pr. skærmbillede; FPS = antal tegninger pr. sekund.
@@ -1133,14 +1134,14 @@ function frame(now){
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     const fps = rfps * K;
     if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
-    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    o.innerHTML = `Opticon GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   }
   requestAnimationFrame(frame);
@@ -1274,36 +1275,42 @@ $GpuBenchScript = {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="PC-Tjek" Width="1280" Height="820" MinWidth="1050" MinHeight="650" WindowStartupLocation="CenterScreen"
-        Background="#0D0F14" Foreground="#E7E9EE" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+        Title="Opticon" Width="1280" Height="820" MinWidth="1050" MinHeight="650" WindowStartupLocation="CenterScreen"
+        Foreground="#E7E9EE" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+  <Window.Background>
+    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#0C0E14" Offset="0"/><GradientStop Color="#110F1B" Offset="1"/></LinearGradientBrush>
+  </Window.Background>
   <Window.Resources>
-    <SolidColorBrush x:Key="Card" Color="#161A23"/>
-    <SolidColorBrush x:Key="Line" Color="#242A39"/>
-    <SolidColorBrush x:Key="Muted" Color="#8A94A7"/>
+    <SolidColorBrush x:Key="Card" Color="#141823"/>
+    <SolidColorBrush x:Key="Line" Color="#20263A"/>
+    <SolidColorBrush x:Key="Muted" Color="#8C95A9"/>
     <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1">
-      <GradientStop Color="#8B5CF6" Offset="0"/><GradientStop Color="#3B9EFF" Offset="1"/>
+      <GradientStop Color="#8B5CF6" Offset="0"/><GradientStop Color="#6D7CFF" Offset="0.55"/><GradientStop Color="#3B9EFF" Offset="1"/>
     </LinearGradientBrush>
 
     <Style TargetType="Button">
-      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="Background" Value="#222837"/>
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="Background" Value="#1E2433"/>
       <Setter Property="Padding" Value="14,8"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
+            <Grid x:Name="root">
+              <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="10"/>
+              <Border x:Name="hv" CornerRadius="10" Background="#16FFFFFF" Visibility="Hidden"/>
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.82"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.65"/></Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="bd" Property="Opacity" Value="0.35"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="hv" Property="Visibility" Value="Visible"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="hv" Property="Background" Value="#26000000"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.4"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Background" Value="{StaticResource Accent}"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Background" Value="{StaticResource Accent}"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="White"/>
+      <Setter Property="Effect"><Setter.Value><DropShadowEffect Color="#7C5CFF" BlurRadius="16" ShadowDepth="0" Opacity="0.35"/></Setter.Value></Setter>
     </Style>
     <Style x:Key="Danger" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Background" Value="#5A1E26"/>
@@ -1315,15 +1322,15 @@ $GpuBenchScript = {
         <Setter.Value>
           <ControlTemplate TargetType="RadioButton">
             <Grid>
-              <Border x:Name="bd" Background="Transparent" CornerRadius="8" Padding="14,10">
+              <Border x:Name="bd" Background="Transparent" CornerRadius="10" Padding="14,10">
                 <ContentPresenter/>
               </Border>
               <Border x:Name="bar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="0,9" Background="{StaticResource Accent}" Visibility="Collapsed"/>
             </Grid>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#171B26"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#151925"/></Trigger>
               <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="bd" Property="Background" Value="#1D2230"/>
+                <Setter TargetName="bd" Property="Background"><Setter.Value><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#2A2152" Offset="0"/><GradientStop Color="#161B28" Offset="1"/></LinearGradientBrush></Setter.Value></Setter>
                 <Setter TargetName="bar" Property="Visibility" Value="Visible"/>
                 <Setter Property="Foreground" Value="#FFFFFF"/>
               </Trigger>
@@ -1334,21 +1341,82 @@ $GpuBenchScript = {
     </Style>
 
     <Style x:Key="CardB" TargetType="Border">
-      <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="CornerRadius" Value="12"/>
-      <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="16"/>
+      <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="18"/>
     </Style>
-    <Style x:Key="H1" TargetType="TextBlock"><Setter Property="FontSize" Value="24"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+    <Style x:Key="H1" TargetType="TextBlock"><Setter Property="FontSize" Value="26"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
     <Style x:Key="Sub" TargetType="TextBlock"><Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
 
     <Style TargetType="TextBox">
       <Setter Property="Background" Value="#10131A"/><Setter Property="Foreground" Value="#E7E9EE"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="Padding" Value="8,5"/><Setter Property="CaretBrush" Value="#E7E9EE"/>
     </Style>
-    <Style TargetType="CheckBox"><Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox">
+        <StackPanel x:Name="root" Orientation="Horizontal" Background="Transparent">
+          <Border x:Name="box" Width="18" Height="18" CornerRadius="5" BorderThickness="1.5" BorderBrush="#3A4358" Background="#0F1219" VerticalAlignment="Center">
+            <Path x:Name="mark" Data="M3.2,8.6 L6.8,12.2 L13.2,4.8" Stroke="White" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+          </Border>
+          <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#6B74A0"/></Trigger>
+          <Trigger Property="IsChecked" Value="True"><Setter TargetName="box" Property="Background" Value="{StaticResource Accent}"/><Setter TargetName="box" Property="BorderBrush" Value="Transparent"/><Setter TargetName="mark" Property="Visibility" Value="Visible"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.45"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+        <StackPanel x:Name="root" Orientation="Horizontal" Background="Transparent">
+          <Grid Width="18" Height="18" VerticalAlignment="Center">
+            <Ellipse x:Name="ring" Stroke="#3A4358" StrokeThickness="1.5" Fill="#0F1219"/>
+            <Ellipse x:Name="dot" Width="8" Height="8" Fill="White" Visibility="Collapsed"/>
+          </Grid>
+          <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ring" Property="Stroke" Value="#6B74A0"/></Trigger>
+          <Trigger Property="IsChecked" Value="True"><Setter TargetName="ring" Property="Fill" Value="{StaticResource Accent}"/><Setter TargetName="ring" Property="Stroke" Value="Transparent"/><Setter TargetName="dot" Property="Visibility" Value="Visible"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.45"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="#1C2130"/><Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="BorderBrush" Value="#2E3546"/><Setter Property="Padding" Value="10,6"/>
+    </Style>
+    <Style x:Key="ThumbS" TargetType="Thumb">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
+        <Border x:Name="t" Background="#2C3344" CornerRadius="4"/>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="t" Property="Background" Value="#465070"/></Trigger>
+          <Trigger Property="IsDragging" Value="True"><Setter TargetName="t" Property="Background" Value="#7C5CFF"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Width" Value="10"/><Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+        <Grid Background="Transparent" Margin="2"><Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True"><Track.Thumb><Thumb Style="{StaticResource ThumbS}"/></Track.Thumb></Track></Grid>
+      </ControlTemplate></Setter.Value></Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/><Setter Property="MinWidth" Value="0"/><Setter Property="Height" Value="10"/><Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent" Margin="2"><Track x:Name="PART_Track" Orientation="Horizontal"><Track.Thumb><Thumb Style="{StaticResource ThumbS}"/></Track.Thumb></Track></Grid>
+          </ControlTemplate></Setter.Value></Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#181D2A"/></Trigger></Style.Triggers>
+    </Style>
 
     <Style TargetType="DataGrid">
       <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#E7E9EE"/>
-      <Setter Property="RowBackground" Value="Transparent"/><Setter Property="AlternatingRowBackground" Value="#131722"/>
+      <Setter Property="RowBackground" Value="Transparent"/><Setter Property="AlternatingRowBackground" Value="#111520"/>
       <Setter Property="GridLinesVisibility" Value="None"/><Setter Property="BorderThickness" Value="0"/>
       <Setter Property="HeadersVisibility" Value="Column"/><Setter Property="AutoGenerateColumns" Value="False"/>
       <Setter Property="CanUserAddRows" Value="False"/><Setter Property="CanUserDeleteRows" Value="False"/>
@@ -1372,7 +1440,7 @@ $GpuBenchScript = {
         </Setter.Value>
       </Setter>
       <Style.Triggers>
-        <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#2A2F55"/><Setter Property="Foreground" Value="White"/></Trigger>
+        <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#2B2555"/><Setter Property="Foreground" Value="White"/></Trigger>
       </Style.Triggers>
     </Style>
   </Window.Resources>
@@ -1381,15 +1449,19 @@ $GpuBenchScript = {
     <Grid.ColumnDefinitions><ColumnDefinition Width="236"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
     <!-- ===== Sidemenu ===== -->
-    <Border Background="#0A0C10" BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0">
+    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0">
+      <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#0A0B11" Offset="0"/><GradientStop Color="#0E0C19" Offset="1"/></LinearGradientBrush></Border.Background>
       <Grid Margin="14,20,14,16">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel Orientation="Horizontal" Margin="8,0,0,22">
-          <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource Accent}">
-            <TextBlock Text="✓" FontSize="19" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White"/>
-          </Border>
+          <Grid Width="40" Height="40">
+            <Border Name="LogoTile" CornerRadius="10" Background="{StaticResource Accent}" Margin="3">
+              <TextBlock Text="✓" FontSize="19" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White"/>
+            </Border>
+            <Image Name="LogoImg" RenderOptions.BitmapScalingMode="HighQuality"/>
+          </Grid>
           <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
-            <TextBlock Text="PC-Tjek" FontSize="18" FontWeight="SemiBold"/>
+            <TextBlock Text="Opticon" FontSize="19" FontWeight="SemiBold"/>
             <TextBlock Name="VerText" Text="v2.0" FontSize="11" Foreground="{StaticResource Muted}"/>
           </StackPanel>
         </StackPanel>
@@ -1414,7 +1486,7 @@ $GpuBenchScript = {
               <Button Name="BtnUpdateApp" Content="⬇  Opdatér nu" Style="{StaticResource Primary}" Margin="0"/>
             </StackPanel>
           </Border>
-          <Border Name="ModeSide" Visibility="Collapsed" CornerRadius="12" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="12,10" Margin="0,0,0,10" Cursor="Hand" ToolTip="Klik for at se, hvad PC-Tjek har gjort">
+          <Border Name="ModeSide" Visibility="Collapsed" CornerRadius="12" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="12,10" Margin="0,0,0,10" Cursor="Hand" ToolTip="Klik for at se, hvad Opticon har gjort">
             <StackPanel>
               <TextBlock Name="ModeSideTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
               <TextBlock Name="ModeSideSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,8"/>
@@ -1559,7 +1631,7 @@ $GpuBenchScript = {
         <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="0,0,8,0">
           <TextBlock Style="{StaticResource H1}" Text="Tilstande"/>
-          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Midlertidige indstillinger til spil og fokus. Alt bliver sat tilbage, når du er færdig, også hvis pc'en går ned undervejs. Du kan altid se, hvad PC-Tjek har gjort."/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Midlertidige indstillinger til spil og fokus. Alt bliver sat tilbage, når du er færdig, også hvis pc'en går ned undervejs. Du kan altid se, hvad Opticon har gjort."/>
           <Border Name="ModeActiveCard" Visibility="Collapsed" CornerRadius="14" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="20,16" Margin="0,0,0,14">
             <DockPanel>
               <Button Name="BtnModeStop" DockPanel.Dock="Right" Content="⏹  Afslut og gendan" Style="{StaticResource Primary}" VerticalAlignment="Center" Padding="16,10" Margin="12,0,0,0"/>
@@ -1580,7 +1652,7 @@ $GpuBenchScript = {
                   <TextBlock Style="{StaticResource Sub}" Margin="0,4,12,0" Text="Starter af sig selv, når et af dine spil åbner, og slutter, når du lukker det: lukker de baggrundsapps, du har valgt, dæmper beskeder og bruger evt. din GPU-profil. Bagefter startes alt igen."/>
                 </StackPanel>
               </DockPanel>
-              <TextBlock Name="GamesEmpty" Style="{StaticResource Sub}" Margin="0,14,0,0" Text="Ingen spil endnu. Start dit spil, og tryk så på Tilføj spil. Så finder PC-Tjek det selv."/>
+              <TextBlock Name="GamesEmpty" Style="{StaticResource Sub}" Margin="0,14,0,0" Text="Ingen spil endnu. Start dit spil, og tryk så på Tilføj spil. Så finder Opticon det selv."/>
               <DataGrid Name="GridGames" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="200" Visibility="Collapsed">
                 <DataGrid.Columns>
                   <DataGridTextColumn Header="SPIL" Binding="{Binding Navn}" Width="2*"/>
@@ -1628,7 +1700,7 @@ $GpuBenchScript = {
                       <DataGridTextColumn Header="BEMÆRKNING" Binding="{Binding Note}" Width="3*" IsReadOnly="True"/>
                     </DataGrid.Columns>
                   </DataGrid>
-                  <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="0,8,0,0" Text="Windows, Defender, Windows Update, drivere og anti-cheat vises ikke. Dem rører PC-Tjek aldrig."/>
+                  <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="0,8,0,0" Text="Windows, Defender, Windows Update, drivere og anti-cheat vises ikke. Dem rører Opticon aldrig."/>
                   <CheckBox Name="ChkGameMute" Content="Dæmp Windows-beskeder, mens jeg spiller" IsChecked="True" Margin="0,12,0,0"/>
                   <CheckBox Name="ChkGameGpu" Content="Brug min GPU-profil" Margin="0,6,0,0" IsEnabled="False"/>
                   <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
@@ -1650,7 +1722,7 @@ $GpuBenchScript = {
                 <RadioButton Name="Foc50" GroupName="foc" Content="50 min" Foreground="#E7E9EE" Margin="0,0,22,0"/>
                 <RadioButton Name="Foc90" GroupName="foc" Content="90 min" Foreground="#E7E9EE"/>
               </StackPanel>
-              <CheckBox Name="ChkFocMute" Content="Dæmp beskeder (Windows og PC-Tjek)" IsChecked="True" Margin="0,14,0,0"/>
+              <CheckBox Name="ChkFocMute" Content="Dæmp beskeder (Windows og Opticon)" IsChecked="True" Margin="0,14,0,0"/>
               <CheckBox Name="ChkFocBlock" Content="Skjul distraktioner: bloker disse sider i alle browsere" Margin="0,8,0,0"/>
               <TextBox Name="FocSites" Text="facebook.com, reddit.com, youtube.com, tiktok.com, instagram.com" Margin="26,6,0,0" Padding="8,6" Background="#141821" Foreground="#E7E9EE" BorderBrush="#2A3142" IsEnabled="{Binding IsChecked, ElementName=ChkFocBlock}"/>
               <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
@@ -1667,7 +1739,7 @@ $GpuBenchScript = {
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <StackPanel Margin="0,0,0,16">
           <TextBlock Style="{StaticResource H1}" Text="Vagt"/>
-          <TextBlock Style="{StaticResource Sub}" Text="Passer på din pc i baggrunden, også når PC-Tjek er lukket. Du får en lille besked nederst til højre, hvis der sker noget."/>
+          <TextBlock Style="{StaticResource Sub}" Text="Passer på din pc i baggrunden, også når Opticon er lukket. Du får en lille besked nederst til højre, hvis der sker noget."/>
         </StackPanel>
         <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
           <Grid>
@@ -1869,7 +1941,7 @@ $GpuBenchScript = {
                   <Button Name="BtnGpuAuto" DockPanel.Dock="Right" Content="🚀  Find det bedste punkt (ca. 4 min)" Style="{StaticResource Primary}" Padding="16,9" Margin="0"/>
                   <StackPanel Margin="0,0,12,0">
                     <TextBlock Text="🚀  Automatisk: mindre strøm, næsten samme ydelse" FontSize="15" FontWeight="SemiBold"/>
-                    <TextBlock Name="GpuAutoInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="PC-Tjek viser en 3D-testscene i fuld skærm og prøver selv 4 strømgrænser (100, 90, 80 og 70 %). Bagefter får du en anbefaling. Den oprindelige indstilling gendannes altid."/>
+                    <TextBlock Name="GpuAutoInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Opticon viser en 3D-testscene i fuld skærm og prøver selv 4 strømgrænser (100, 90, 80 og 70 %). Bagefter får du en anbefaling. Den oprindelige indstilling gendannes altid."/>
                   </StackPanel>
                 </DockPanel>
                 <ProgressBar Name="GpuAutoBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
@@ -1947,7 +2019,7 @@ $GpuBenchScript = {
             <Border Background="#10131A" BorderBrush="#5F3A1E" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
               <StackPanel>
                 <TextBlock Text="⚡  OC-tjek: flere FPS, og holder det?" FontSize="15" FontWeight="SemiBold"/>
-                <TextBlock Name="GpuOcInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Lad NVIDIAs egen automatiske tuning finde dit overclock, og lad PC-Tjek måle, om det giver flere FPS og kører stabilt. Testen kører i 2K, så det er grafikkortet, der bliver presset."/>
+                <TextBlock Name="GpuOcInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Lad NVIDIAs egen automatiske tuning finde dit overclock, og lad Opticon måle, om det giver flere FPS og kører stabilt. Testen kører i 2K, så det er grafikkortet, der bliver presset."/>
                 <WrapPanel Margin="0,12,0,0">
                   <Button Name="BtnOcBase" Content="1 · Mål udgangspunkt (1 min)" Style="{StaticResource Primary}"/>
                   <Button Name="BtnOcTune" Content="2 · Find overclock automatisk"/>
@@ -2278,15 +2350,24 @@ foreach ($node in $xaml.SelectNodes('//*[@Name]')) { $ui[$node.Name] = $win.Find
 $ui.VerText.Text = "v$AppVersion"
 $icoPath = Join-Path $PSScriptRoot 'PC-Tjek.ico'
 if (Test-Path $icoPath) { try { $ms = New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($icoPath)); $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create($ms, 'None', 'OnLoad') } catch {} }   # indlæst i hukommelsen, så filen ikke låses
+# Logo i sidemenuen: den største udgave fra ikonfilen
+if (Test-Path $icoPath) {
+  try {
+    $ms2 = New-Object IO.MemoryStream (, [IO.File]::ReadAllBytes($icoPath))
+    $dec = New-Object Windows.Media.Imaging.IconBitmapDecoder($ms2, 'None', 'OnLoad')
+    $big = $dec.Frames | Sort-Object PixelWidth -Descending | Select-Object -First 1
+    if ($big) { $ui.LogoImg.Source = $big; $ui.LogoTile.Visibility = 'Collapsed' }
+  } catch {}
+}
 $win.Add_SourceInitialized({ try { [PcTjek.Win]::Dark((New-Object System.Windows.Interop.WindowInteropHelper $win).Handle) } catch {} })
 $win.Dispatcher.Add_UnhandledException({
   param($s, $e)
   Log "FEJL: $($e.Exception)"
-  [Windows.MessageBox]::Show("Der skete en fejl:`n`n$($e.Exception.Message)`n`nDetaljer er gemt i pc-tjek.log.", 'PC-Tjek', 'OK', 'Error') | Out-Null
+  [Windows.MessageBox]::Show("Der skete en fejl:`n`n$($e.Exception.Message)`n`nDetaljer er gemt i pc-tjek.log.", 'Opticon', 'OK', 'Error') | Out-Null
   $e.Handled = $true
 })
 $Brush = New-Object Windows.Media.BrushConverter
-function Msg($text, $title = 'PC-Tjek', $buttons = 'OK', $icon = 'Information') { [Windows.MessageBox]::Show($text, $title, $buttons, $icon) }
+function Msg($text, $title = 'Opticon', $buttons = 'OK', $icon = 'Information') { [Windows.MessageBox]::Show($text, $title, $buttons, $icon) }
 function Fmt-GB($bytes) { if ($bytes -ge 1GB) { '{0:N1} GB' -f ($bytes / 1GB) } elseif ($bytes -ge 1MB) { '{0:N0} MB' -f ($bytes / 1MB) } else { '{0:N0} KB' -f ($bytes / 1KB) } }
 
 # =====================================================================
@@ -2355,7 +2436,7 @@ function Invoke-Bg([scriptblock]$Work, $Arg, [scriptblock]$Done, $Ctx) {
     Log "Job startet (proces $($p.Id))"
   } catch {
     Log "Invoke-Bg FEJL: $($_.Exception.Message)"
-    Msg "Kunne ikke starte baggrundsjob:`n$($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null
+    Msg "Kunne ikke starte baggrundsjob:`n$($_.Exception.Message)" 'Opticon' 'OK' 'Error' | Out-Null
   }
 }
 function Read-JobProgress($j) {
@@ -2390,7 +2471,7 @@ $jobTimer.Add_Tick({
     else { $err = "Jobbet stoppede uventet (kode $($j.P.ExitCode))." }
     if ($err) { Log "Job-fejl: $err" }
     Remove-Item -Recurse -Force $j.Dir -ErrorAction SilentlyContinue
-    try { & $j.Done $res $err $j.Ctx } catch { Log "Done-fejl: $_"; Msg "Fejl: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+    try { & $j.Done $res $err $j.Ctx } catch { Log "Done-fejl: $_"; Msg "Fejl: $($_.Exception.Message)" 'Opticon' 'OK' 'Error' | Out-Null }
   }
   if ($script:Jobs.Count -eq 0) { $ui.Busy.Visibility = 'Hidden' }
 })
@@ -2636,7 +2717,7 @@ $ui.BtnScan.Add_Click({
     $ui.ScanCard.Visibility = 'Collapsed'; $ui.PlanCard.Visibility = 'Visible'; $ui.BtnDetails.Content = 'Vis detaljer'
     $ui.BtnScan.IsEnabled = $true; $ui.BtnScan.Content = "🔍   Scan igen"
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [hashtable] })[-1] }   # sikkerhed mod løst output
-    if ($err -or -not $res) { Msg "Scanningen fejlede: $err" 'PC-Tjek' 'OK' 'Error' | Out-Null; return }
+    if ($err -or -not $res) { Msg "Scanningen fejlede: $err" 'Opticon' 'OK' 'Error' | Out-Null; return }
     if ($res.PhaseSec) { try { $res.PhaseSec | ConvertTo-Json | Out-File -Encoding utf8 $TimesFile } catch {} }
     $script:NewSince = @(Compare-Snapshot $res.Snapshot)
     $findings = [System.Collections.ArrayList]@($res.Findings)
@@ -2742,7 +2823,7 @@ $ui.BtnDisable.Add_Click({
     param($s)
     $n = Disable-Findings @($s)
     $ui.GridFind.Items.Refresh()
-    if ($n) { $ui.StatusText.Text = "Deaktiveret: $($s.Titel)" } else { Msg 'Det lykkedes ikke at deaktivere den. Se pc-tjek.log.' 'PC-Tjek' 'OK' 'Error' | Out-Null }
+    if ($n) { $ui.StatusText.Text = "Deaktiveret: $($s.Titel)" } else { Msg 'Det lykkedes ikke at deaktivere den. Se pc-tjek.log.' 'Opticon' 'OK' 'Error' | Out-Null }
   }
 })
 $ui.BtnUninstall.Add_Click({
@@ -2761,7 +2842,7 @@ $ui.BtnUninstall.Add_Click({
         $s.Detalje = 'Afinstalleringsprogrammet er startet. Følg dets vejledning'
       }
       $ui.GridFind.Items.Refresh(); Log "Afinstallér $($s.Titel)"
-    } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+    } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'Opticon' 'OK' 'Error' | Out-Null }
   }
 })
 $ui.BtnUndo.Add_Click({
@@ -2775,7 +2856,7 @@ $ui.BtnUndo.Add_Click({
     else { New-ItemProperty -Path $last.Key -Name $last.Name -Value $last.Value -PropertyType String -Force -ErrorAction Stop | Out-Null }
     $undo.RemoveAt($undo.Count - 1); Write-Undo $undo
     Msg 'Fortrudt.' | Out-Null
-  } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+  } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'Opticon' 'OK' 'Error' | Out-Null }
 })
 
 # =====================================================================
@@ -2893,7 +2974,7 @@ function Toggle-Selected {
     Load-Startup
     $ui.StatusText.Text = "$($it.Navn) er slået $(if ($it.Aktiv) { 'FRA' } else { 'TIL' }). Gælder fra næste login."
     Log "Opstart $($it.Navn) -> $(-not $it.Aktiv)"
-  } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'PC-Tjek' 'OK' 'Error' | Out-Null }
+  } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" 'Opticon' 'OK' 'Error' | Out-Null }
 }
 $ui.GridStart.Add_SelectionChanged({
   $it = $ui.GridStart.SelectedItem
@@ -3351,7 +3432,7 @@ function Run-Step($id, [bool]$auto) {
     }
     'restart' {
       if ((Msg "Genstart pc'en om 30 sekunder?`n`nGem dit arbejde først." 'Genstart' 'YesNo' 'Question') -ne 'Yes') { return }
-      shutdown.exe /r /t 30 /c "PC-Tjek genstarter pc'en om 30 sekunder."
+      shutdown.exe /r /t 30 /c "Opticon genstarter pc'en om 30 sekunder."
       Set-StepState 'restart' 'busy' 'Genstarter om 30 sek.'
     }
   }
@@ -3472,7 +3553,7 @@ function Show-Tweaks {
             elseif ($r.Board -match '(?i)micro-star|msi') { "I MSI-BIOS: øverst til venstre findes en $($r.Prof)-knap. Slå den til (Profile 1)." }
             elseif ($r.Board -match '(?i)asrock') { "I ASRock-BIOS: OC Tweaker → DRAM Configuration → Load $($r.Prof) Setting → Profile 1." }
             else { "Find indstillingen $($r.Prof) (eller 'Memory Profile') i BIOS, og vælg Profile 1." }
-    $ui.RamStepsText.Text = "Avanceret: gør det kun, hvis du er tryg ved at ændre i BIOS.`n`n1.  Tryk på 'Genstart til BIOS' (eller genstart, og tryk gentagne gange på Del, mens pc'en starter).`n2.  $bios`n3.  Tryk F10 for at gemme og genstarte.`n4.  Åbn PC-Tjek igen, og tryk 'Tjek igen'. Nu bør der stå $($r.Rated) MT/s.`n`nStarter pc'en ikke bagefter, venter den typisk lidt og nulstiller selv. Ellers så slå $($r.Prof) fra igen."
+    $ui.RamStepsText.Text = "Avanceret: gør det kun, hvis du er tryg ved at ændre i BIOS.`n`n1.  Tryk på 'Genstart til BIOS' (eller genstart, og tryk gentagne gange på Del, mens pc'en starter).`n2.  $bios`n3.  Tryk F10 for at gemme og genstarte.`n4.  Åbn Opticon igen, og tryk 'Tjek igen'. Nu bør der stå $($r.Rated) MT/s.`n`nStarter pc'en ikke bagefter, venter den typisk lidt og nulstiller selv. Ellers så slå $($r.Prof) fra igen."
     $ui.RamAction.Content = '🔁  Genstart til BIOS'; $ui.RamAction.Visibility = $(if ($r.Gain) { 'Visible' } else { 'Collapsed' })
   } else { Set-Badge 'Ram' 'info' 'Kunne ikke måles'; $ui.RamNow.Text = '–'; $ui.RamArrow.Visibility = 'Collapsed'; $ui.RamCan.Visibility = 'Collapsed'; $ui.RamCanLbl.Visibility = 'Collapsed'; $ui.RamText.Text = 'Windows oplyser ikke RAM-hastigheden på denne pc, så den kan ikke vurderes.'; $ui.RamAction.Visibility = 'Collapsed' }
 
@@ -3531,7 +3612,7 @@ foreach ($p in 'Ram', 'Hz', 'Drv') {
   })
 }
 $ui.RamAction.Add_Click({
-  if ((Msg "Pc'en genstarter om 10 sekunder og åbner BIOS'en direkte.`n`nGem dit arbejde først. Guiden står i PC-Tjek under 'Sådan gør du'. Tag gerne et billede af den med telefonen.`n`nGenstart nu?" 'Genstart til BIOS' 'YesNo' 'Question') -ne 'Yes') { return }
+  if ((Msg "Pc'en genstarter om 10 sekunder og åbner BIOS'en direkte.`n`nGem dit arbejde først. Guiden står i Opticon under 'Sådan gør du'. Tag gerne et billede af den med telefonen.`n`nGenstart nu?" 'Genstart til BIOS' 'YesNo' 'Question') -ne 'Yes') { return }
   $o = & shutdown.exe /r /fw /t 10 2>&1
   if ($LASTEXITCODE -ne 0) { Msg "Din pc understøtter ikke genstart direkte til BIOS fra Windows.`n`nGenstart i stedet, og tryk gentagne gange på Del-tasten, mens pc'en starter." 'Genstart til BIOS' | Out-Null }
 })
@@ -3573,8 +3654,8 @@ function Test-VagtAlive {
   return $false
 }
 function Install-Vagt {
-  if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når PC-Tjek er installeret med installeren (i Program Files).`n`nKør 'Installer PC-Tjek.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
-  if (-not (Test-Path $VagtScript)) { Msg "Filen PC-Tjek-Vagt.ps1 mangler. Opdatér PC-Tjek, eller kør installeren igen." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
+  if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når Opticon er installeret med installeren (i Program Files).`n`nKør 'Installer Opticon.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
+  if (-not (Test-Path $VagtScript)) { Msg "Filen PC-Tjek-Vagt.ps1 mangler. Opdatér Opticon, eller kør installeren igen." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
   try {
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $sys = Join-Path $env:SystemRoot 'System32'
@@ -3583,7 +3664,7 @@ function Install-Vagt {
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName 'PC-Tjek Vagt' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'PC-Tjek Vagt: tjekker downloads og nye opstartsprogrammer. Starter ved login.' -Force | Out-Null
+    Register-ScheduledTask -TaskName 'PC-Tjek Vagt' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Opticon Vagt: tjekker downloads og nye opstartsprogrammer. Starter ved login.' -Force | Out-Null
     Save-VagtCfg
     Restart-Vagt
     Log 'Vagt slået til'
@@ -3678,7 +3759,7 @@ function Show-Reboot {
 }
 $ui.BtnRebootNow.Add_Click({
   if ((Msg "Genstart pc'en om 30 sekunder?`n`nGem dit arbejde først." 'Genstart' 'YesNo' 'Question') -ne 'Yes') { return }
-  shutdown.exe /r /t 30 /c "PC-Tjek genstarter for at færdiggøre en opdatering."
+  shutdown.exe /r /t 30 /c "Opticon genstarter for at færdiggøre en opdatering."
 })
 
 function Get-Median($xs) { $v = @($xs | Sort-Object); if (-not $v.Count) { return $null }; return $v[[math]::Floor(($v.Count - 1) / 2)] }
@@ -3755,7 +3836,7 @@ function Show-Crashes {
 # ---------- Kopiér pc-info til support ----------
 $ui.BtnCopyInfo.Add_Click({
   $lines = New-Object System.Collections.ArrayList
-  [void]$lines.Add("PC-Tjek – pc-oplysninger ($(Get-Date -Format 'dd-MM-yyyy HH:mm'))")
+  [void]$lines.Add("Opticon – pc-oplysninger ($(Get-Date -Format 'dd-MM-yyyy HH:mm'))")
   [void]$lines.Add('')
   foreach ($p in @(@('System', 'SysOS'), @('Processor', 'SysCpu'), @('Grafikkort', 'SysGpu'), @('Hukommelse', 'SysRam'), @('Bundkort', 'SysBoard'), @('Lager', 'SysDisk'))) {
     $v = $ui[$p[1]].Text; $sub = $ui["$($p[1])sub"].Text
@@ -3829,7 +3910,7 @@ function Start-GpuBench($mode) {
     $def = $l[0]; $min = $l[1]
     if (-not $def) { Msg 'Dit grafikkort tillader ikke, at strømgrænsen ændres (det er fx tilfældet på mange bærbare). Brug i stedet "Test dine egne indstillinger".' 'GPU' | Out-Null; return }
     $steps = @(100, 90, 80, 70 | ForEach-Object { [math]::Max($min, $def * $_ / 100) } | Select-Object -Unique)
-    if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
+    if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  Opticon prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
     $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -in 'ocbase', 'occheck') {
@@ -3943,7 +4024,7 @@ function Show-GpuRes($steps) {
     }
     if ($d.Count) { $lines += "🔋  Med din GPU-profil: $([math]::Round(-($wd | Measure-Object -Average).Average)) % mindre strøm. FPS: $($d -join ' · ')." }
   }
-  $lines += "ℹ  Tallene er fra PC-Tjeks testscene og ikke fra et bestemt spil. Brug dem til at sammenligne opløsninger og indstillinger på din egen pc."
+  $lines += "ℹ  Tallene er fra Opticons testscene og ikke fra et bestemt spil. Brug dem til at sammenligne opløsninger og indstillinger på din egen pc."
   $ui.GpuResVerdict.Text = $lines -join "`n"; $ui.GpuResVerdict.Visibility = 'Visible'
   $ui.GpuResInfo.Text = "Målt $(Get-Date -Format 'HH:mm'). Kør igen efter en ændring i Afterburner for at se forskellen."
   try { [IO.File]::WriteAllText((Join-Path $OutDir 'gpu-oploesning.json'), (ConvertTo-Json -InputObject @($steps) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}
@@ -4018,7 +4099,7 @@ function Show-OcCheck($res, $steps) {
     $nums = "FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %) · strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %) · clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz (laveste $([math]::Round($s.Cmin))) · højeste temp $([math]::Round($s.Tmax)) °C"
   }
   $hot = if ($s -and $s.Tmax -ge 83) { "`n🌡  Højeste temperatur var $([math]::Round($s.Tmax)) °C. Det er varmt: giv blæserkurven lidt mere fart, eller skru lidt ned." } else { '' }
-  $note = "`n`nPC-Tjek kan ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
+  $note = "`n`nOpticon kan ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
   if ($probs.Count) {
     Set-OcBox 'bad' '⛔ Ikke stabilt' ("$($probs -join ' ')`n`nSkru core clock 15-30 MHz ned (eller memory 100-200 MHz) i Afterburner, eller kør NVIDIAs automatiske tuning igen. Tryk så '3 · Tjek OC' igen.$(if ($nums) { "`n`n$nums" })$hot")
     Log "OC-tjek: ustabilt ($($probs -join ' '))"
@@ -4039,12 +4120,12 @@ $ui.BtnOcCheck.Add_Click({ Start-GpuBench 'occheck' })
 $ui.BtnOcTune.Add_Click({
   $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if (-not $script:OcBase) { if ((Msg "Mål udgangspunktet først (trin 1), så PC-Tjek kan se, hvad overclocket giver.`n`nVil du alligevel fortsætte?" 'OC-tjek' 'YesNo' 'Question') -ne 'Yes') { return } }
-  $t = "PC-Tjek overclocker ikke selv. Det kræver NVIDIAs lukkede værktøjer, og et forkert gæt kan give nedbrud. Lad NVIDIAs egen scanner finde et sikkert overclock til netop dit kort:`n`n"
+  if (-not $script:OcBase) { if ((Msg "Mål udgangspunktet først (trin 1), så Opticon kan se, hvad overclocket giver.`n`nVil du alligevel fortsætte?" 'OC-tjek' 'YesNo' 'Question') -ne 'Yes') { return } }
+  $t = "Opticon overclocker ikke selv. Det kræver NVIDIAs lukkede værktøjer, og et forkert gæt kan give nedbrud. Lad NVIDIAs egen scanner finde et sikkert overclock til netop dit kort:`n`n"
   if ($nv) { $t += "NVIDIA App (anbefalet):`n1.  Gå til System → Performance.`n2.  Slå 'Automatic Tuning' til. Den scanner i ca. 10-20 minutter. Brug ikke pc'en imens.`n3.  Kom tilbage, og tryk '3 · Tjek OC'.`n`n" }
   if ($ab) { $t += "MSI Afterburner:`n1.  Tryk Ctrl+F, og klik 'OC Scanner'.`n2.  Klik 'Scan' (ca. 15-20 min.) og derefter 'Apply'.`n3.  Klik Save og et profilnummer. Tryk så '3 · Tjek OC'.`n`n" }
   if (-not $nv -and -not $ab) { $t += "Hverken NVIDIA App eller MSI Afterburner er installeret. Hent NVIDIA App fra NVIDIAs side, og kom tilbage hertil.`n`n" }
-  $t += "Luk Afterburner under PC-Tjeks egne tests, så de ikke kæmper om indstillingerne."
+  $t += "Luk Afterburner under Opticons egne tests, så de ikke kæmper om indstillingerne."
   $open = if ($nv) { 'NVIDIA App' } elseif ($ab) { 'MSI Afterburner' } else { 'NVIDIAs side' }
   if ((Msg "$t`n`nÅbn $open nu?" 'Find overclock automatisk' 'YesNo' 'Information') -ne 'Yes') { return }
   if ($nv) { Start-Process $nv } elseif ($ab) { Start-Process $ab } else { Start-Process 'https://www.nvidia.com/en-us/software/nvidia-app/' }
@@ -4077,7 +4158,7 @@ function Show-GpuAuto($res, $steps) {
     $ui.GpuRecText.Text = "$([math]::Abs($dW)) % mindre strøm ($([math]::Round($base.W)) → $([math]::Round($rec.W)) W), $(if ($dF -le 0) { "$([math]::Abs($dF)) % lavere FPS" } else { "$dF % højere FPS" }), $dT °C køligere$fan. Det er den laveste grænse, hvor du beholdt mindst 97 % af ydelsen i testen."
     $ui.BtnGpuApply.Content = "✅  Brug $($rec.Pct) % fremover"; $ui.BtnGpuApply.Visibility = 'Visible'; $ui.BtnGpuAbHow.Visibility = 'Visible'
     $ui.GpuAbVal.Text = "$($rec.Pct)"; $ui.GpuAbFill.Width = [math]::Round(230 * $rec.Pct / 120)
-    $ui.GpuAbSteps.Text = "1.  Åbn MSI Afterburner.`n2.  Træk 'Power Limit' ned til $($rec.Pct).`n3.  Tryk ✓ (Apply).`n4.  Slå 'Startup' til (Windows-ikonet), så den bruges ved opstart.`n`nBrug enten Afterburner ELLER PC-Tjeks knap, ikke begge."
+    $ui.GpuAbSteps.Text = "1.  Åbn MSI Afterburner.`n2.  Træk 'Power Limit' ned til $($rec.Pct).`n3.  Tryk ✓ (Apply).`n4.  Slå 'Startup' til (Windows-ikonet), så den bruges ved opstart.`n`nBrug enten Afterburner ELLER Opticons knap, ikke begge."
   }
   $ui.GpuAutoInfo.Text = "Test færdig $(Get-Date -Format 'HH:mm'). Samme 3D-scene og belastning ved alle trin$(if ($res.Aborted) { ' (stoppet før tid, så ikke alle trin blev målt)' })."
   Log "GPU-test: anbefalet $($rec.Pct) %"
@@ -4109,7 +4190,7 @@ $ui.BtnGpuApply.Add_Click({
   Log "GPU-strømgrænse sat til $($cfg.Watts) W"
   if (Get-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue) {
     Msg "✓ Strømgrænsen er sat til $($r.Pct) % ($($cfg.Watts) W).`n`nVagten sætter den automatisk igen, hver gang du logger ind. Du kan altid gå tilbage til standard." 'GPU' | Out-Null
-  } elseif ((Msg "✓ Strømgrænsen er sat til $($r.Pct) % nu.`n`nWindows nulstiller den ved genstart. Skal PC-Tjeks Vagt sætte den automatisk ved hvert login? (Vagten passer også på dine downloads.)" 'GPU' 'YesNo' 'Question') -eq 'Yes') { [void](Install-Vagt) }
+  } elseif ((Msg "✓ Strømgrænsen er sat til $($r.Pct) % nu.`n`nWindows nulstiller den ved genstart. Skal Opticons Vagt sætte den automatisk ved hvert login? (Vagten passer også på dine downloads.)" 'GPU' 'YesNo' 'Question') -eq 'Yes') { [void](Install-Vagt) }
   Load-Gpu
 })
 $ui.BtnGpuReset.Add_Click({
@@ -4453,7 +4534,7 @@ $ui.BtnGameSave.Add_Click({
   Log "Spil gemt: $($g.Name) · lukker $($sel -join ', ')"
   $script:GameEdit = $null; $ui.GameSetup.Visibility = 'Collapsed'
   Load-Games
-  $txt = "✓ Gemt.`n`nNår $($g.Name) starter, sætter PC-Tjek selv Spil-tilstand i gang$(if ($sel.Count) { " og lukker $($sel -join ', ')" }). Når du lukker spillet, bliver alt sat tilbage."
+  $txt = "✓ Gemt.`n`nNår $($g.Name) starter, sætter Opticon selv Spil-tilstand i gang$(if ($sel.Count) { " og lukker $($sel -join ', ')" }). Når du lukker spillet, bliver alt sat tilbage."
   if (-not (Get-VagtTask)) {
     if ((Msg "$txt`n`nDet kræver, at Vagten er slået til (den holder øje med, hvornår spillet starter). Slå Vagten til nu?" 'Spil' 'YesNo' 'Question') -eq 'Yes') { [void](Install-Vagt) }
   } else {
@@ -4472,7 +4553,7 @@ $ui.BtnFocStart.Add_Click({
   Update-ModeUi
   $notes = @()
   if ($sites.Count -and (Get-Process msedge, chrome, firefox, brave, opera -ErrorAction SilentlyContinue)) { $notes += 'Sider, der allerede er åbne, kan virke et lille stykke tid endnu. Luk fanen, og åbn den igen.' }
-  if (-not (Test-VagtAlive)) { $notes += 'Vagten kører ikke, så fokus slutter først, når PC-Tjek er åben (eller næste gang du åbner den).' }
+  if (-not (Test-VagtAlive)) { $notes += 'Vagten kører ikke, så fokus slutter først, når Opticon er åben (eller næste gang du åbner den).' }
   $ui.StatusText.Text = "🔕 Fokus i $min min. Slutter kl. $(([datetime]$m.Until).ToString('HH:mm'))."
   if ($notes.Count) { Msg ("Fokus er startet.`n`n" + ($notes -join "`n`n")) 'Fokus' | Out-Null }
 })
@@ -4494,7 +4575,7 @@ $ui.BtnExport.Add_Click({
   $rows = ($r.Findings | Where-Object Niveau -ge 1 | ForEach-Object { "<tr class='r$($_.Niveau)'><td>$($_.Risiko)</td><td>$(& $enc $_.Kategori)</td><td><b>$(& $enc $_.Titel)</b><br><small>$(& $enc $_.Hvorfor)</small></td><td><small>$(& $enc $_.Detalje)<br>$(& $enc $_.Sti)</small></td></tr>" }) -join "`n"
   $tl = ($r.Timeline | Select-Object -First 400 | ForEach-Object { "<tr class='$(if ($_.Fokus) { 'focus' })'><td>$($_.Tid.ToString('dd-MM-yyyy HH:mm'))</td><td>$($_.Type)</td><td>$(& $enc $_.Fokus)</td><td>$(& $enc $_.Hændelse)</td><td><small>$(& $enc $_.Detalje)</small></td></tr>" }) -join "`n"
   $html = @"
-<!DOCTYPE html><html lang="da"><meta charset="utf-8"><title>PC-Tjek rapport $(Get-Date -Format 'yyyy-MM-dd HH:mm')</title>
+<!DOCTYPE html><html lang="da"><meta charset="utf-8"><title>Opticon rapport $(Get-Date -Format 'yyyy-MM-dd HH:mm')</title>
 <style>body{font-family:'Segoe UI',sans-serif;background:#0D0F14;color:#E7E9EE;max-width:1100px;margin:auto;padding:32px}
 h1{background:linear-gradient(90deg,#8B5CF6,#3B9EFF);-webkit-background-clip:text;color:transparent}
 pre{white-space:pre-wrap;background:#161A23;border:1px solid #242A39;padding:20px;border-radius:12px;font-family:'Segoe UI',sans-serif}
@@ -4502,7 +4583,7 @@ table{width:100%;border-collapse:collapse;margin-bottom:32px;background:#161A23;
 td,th{padding:8px 10px;border-bottom:1px solid #242A39;vertical-align:top;text-align:left}th{color:#8A94A7;font-weight:600}small{color:#8A94A7}
 .r4 td:first-child{color:#FF5D6C;font-weight:bold}.r3 td:first-child{color:#FFA24A;font-weight:bold}.r2 td:first-child{color:#F6D44A}.r1 td:first-child{color:#4ADE80}
 .focus{background:#2A1E12}</style>
-<h1>PC-Tjek rapport</h1><p>$(Get-Date -Format 'dd-MM-yyyy HH:mm') · $env:COMPUTERNAME · score $($ui.ScoreText.Text)</p>
+<h1>Opticon rapport</h1><p>$(Get-Date -Format 'dd-MM-yyyy HH:mm') · $env:COMPUTERNAME · score $($ui.ScoreText.Text)</p>
 <h2>Analyse</h2><pre>$(& $enc $ui.Story.Text)</pre>
 <h2>Fund</h2><table><tr><th>Risiko</th><th>Kategori</th><th>Fund</th><th>Detalje</th></tr>$rows</table>
 <h2>Hændelsesforløb</h2><table><tr><th>Tid</th><th>Type</th><th></th><th>Hændelse</th><th>Detalje</th></tr>$tl</table></html>
@@ -4536,7 +4617,7 @@ function Check-AppUpdate([bool]$manual) {
       $ui.UpdateBanner.Visibility = 'Visible'
       $ui.StatusText.Text = "Ny version $($v.version) kan hentes."
     } else {
-      $ui.StatusText.Text = "PC-Tjek $AppVersion er den nyeste version."
+      $ui.StatusText.Text = "Opticon $AppVersion er den nyeste version."
       if ($c.Manual) { Msg "Du har den nyeste version ($AppVersion)." | Out-Null }
     }
   } @{ Manual = $manual }
@@ -4546,13 +4627,13 @@ $ui.BtnUpdateApp.Add_Click({
   $v = $script:PendingUpdate
   if (-not $v) { return }
   $notes = (@($v.notes) | ForEach-Object { "  • $_" }) -join "`n"
-  if ((Msg "Opdatér PC-Tjek fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
+  if ((Msg "Opdatér Opticon fra $AppVersion til $($v.version)?`n`nNyheder:`n$notes`n`nFilernes fingeraftryk (SHA256) bliver tjekket, før noget installeres. Den gamle version gemmes som backup." 'Opdatering' 'YesNo' 'Question') -ne 'Yes') { return }
   $ui.BtnUpdateApp.IsEnabled = $false
   Invoke-Bg $UpdateApplyScript @{ Url = $(if ($v.BaseUrl) { $v.BaseUrl } else { $UpdateUrl }); Files = @($v.files); Dest = $PSScriptRoot; OldVersion = $AppVersion; JobRoot = $JobRoot } {
     param($r, $err, $c)
     if ($err) { $ui.BtnUpdateApp.IsEnabled = $true; Log "Opdatering fejlede: $err"; Msg "Opdateringen blev ikke installeret:`n`n$err" 'Opdatering' 'OK' 'Error' | Out-Null; return }
     Log "Opdateret til $($c.Version)"
-    Msg "PC-Tjek er opdateret til $($c.Version). Appen genstarter nu." 'Opdatering' | Out-Null
+    Msg "Opticon er opdateret til $($c.Version). Appen genstarter nu." 'Opdatering' | Out-Null
     # Genstart: en lille hjælper venter, til dette vindue er lukket, og starter så den nye version (allerede med admin-rettigheder)
     $app = Join-Path $PSScriptRoot 'PC-Tjek-App.ps1'
     $cmd = "Wait-Process -Id $PID -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; Start-Process '$env:SystemRoot\System32\conhost.exe' -ArgumentList '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""$app""'"
@@ -4584,8 +4665,28 @@ function Refresh-VagtVersion {
     }
   } catch {}
 }
+
+# Navneskift: omdøb gamle genveje til det nye navn (én gang)
+function Update-Shortcuts {
+  $old = 'PC' + '-Tjek'   # det gamle navn (skrevet sådan, så det ikke bliver omdøbt)
+  if ($AppName -eq $old) { return }
+  $changed = $false
+  try {
+    $desk = [Environment]::GetFolderPath('Desktop'); $prog = [Environment]::GetFolderPath('Programs')
+    $o = Join-Path $desk "$old.lnk"
+    if ((Test-Path $o) -and -not (Test-Path (Join-Path $desk "$AppName.lnk"))) { Rename-Item $o "$AppName.lnk"; $changed = $true }
+    $om = Join-Path $prog $old; $nm = Join-Path $prog $AppName
+    if ((Test-Path $om) -and -not (Test-Path $nm)) {
+      $l1 = Join-Path $om "$old.lnk"; if (Test-Path $l1) { Rename-Item $l1 "$AppName.lnk" }
+      $l2 = Join-Path $om "Afinstallér $old.lnk"; if (Test-Path $l2) { Rename-Item $l2 "Afinstallér $AppName.lnk" }
+      Rename-Item $om $AppName; $changed = $true
+    }
+  } catch { Log "Genveje kunne ikke omdøbes: $_" }
+  if ($changed) { Log "Genveje omdøbt til $AppName"; try { Start-Process "$env:SystemRoot\System32\ie4uinit.exe" '-show' -WindowStyle Hidden } catch {} }
+}
 $win.Add_ContentRendered({
   Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false
+  Update-Shortcuts
   try { $r = Repair-Modes; if ($r) { Log "Tilstand ryddet op ved start: $($r.Mode) ($($r.Reason))" } } catch { Log "Tilstand-oprydning fejlede: $_" }
   try { Update-ModeUi } catch {}; $modeTimer.Start()
 })

@@ -1,3 +1,3 @@
 @echo off
-title PC-Tjek installation
+title Opticon installation
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-PCTjek.ps1"

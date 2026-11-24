@@ -1,10 +1,10 @@
 ﻿<#
-  Installerer PC-Tjek:
+  Installerer Opticon:
    1. Kopierer appen til  C:\Program Files\PC-Tjek  (kun administratorer kan ændre filerne der)
    2. Opretter en planlagt opgave "PC-Tjek", der må køre appen med administratorrettigheder.
       Den kører KUN, når du selv klikker på ikonet (ingen tidsplan, ingen autostart).
    3. Laver genveje på skrivebordet og i Start-menuen, der åbner appen uden konsolvindue og uden UAC.
-  Afinstallér: Start-menuen → "Afinstallér PC-Tjek", eller kør Uninstall-PCTjek.ps1.
+  Afinstallér: Start-menuen → "Afinstallér Opticon", eller kør Uninstall-PCTjek.ps1.
 #>
 $ErrorActionPreference = 'Stop'
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -12,9 +12,9 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
   return
 }
-$Host.UI.RawUI.WindowTitle = 'PC-Tjek installation'
+$Host.UI.RawUI.WindowTitle = 'Opticon installation'
 Write-Host ''
-Write-Host '  PC-Tjek – installation' -ForegroundColor Magenta
+Write-Host '  Opticon – installation' -ForegroundColor Magenta
 Write-Host '  ----------------------'
 try {
   $src  = $PSScriptRoot
@@ -42,7 +42,7 @@ try {
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
   $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable:$false
   Register-ScheduledTask -TaskName 'PC-Tjek' -TaskPath '\' -Action $action -Principal $principal -Settings $settings `
-    -Description 'Starter PC-Tjek med administratorrettigheder, når du klikker på ikonet. Ingen tidsplan.' -Force | Out-Null
+    -Description 'Starter Opticon med administratorrettigheder, når du klikker på ikonet. Ingen tidsplan.' -Force | Out-Null
 
   Write-Host '  • Laver genveje (skrivebord + Start-menu)'
   $shell = New-Object -ComObject WScript.Shell
@@ -53,16 +53,19 @@ try {
     $l.Save()
   }
   $runArgs = "--headless `"$sys\schtasks.exe`" /run /tn `"\PC-Tjek`""
-  $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'PC-Tjek'
+  $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'Opticon'
+  $old = 'PC' + '-Tjek'   # gammelt navn: fjern gamle genveje
+  Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Desktop')) "$old.lnk")
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Programs')) $old)
   New-Item -ItemType Directory -Force $menu | Out-Null
-  New-Link (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PC-Tjek.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
-  New-Link (Join-Path $menu 'PC-Tjek.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
-  New-Link (Join-Path $menu 'Afinstallér PC-Tjek.lnk') "$sys\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File `"$dest\Uninstall-PCTjek.ps1`"" 'Fjerner PC-Tjek'
+  New-Link (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Opticon.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
+  New-Link (Join-Path $menu 'Opticon.lnk') "$sys\conhost.exe" $runArgs 'Sikkerhed, oprydning og optimering'
+  New-Link (Join-Path $menu 'Afinstallér Opticon.lnk') "$sys\WindowsPowerShell\v1.0\powershell.exe" "-NoProfile -ExecutionPolicy Bypass -File `"$dest\Uninstall-PCTjek.ps1`"" 'Fjerner Opticon'
 
   Write-Host ''
-  Write-Host '  ✓ Færdig! Start PC-Tjek fra ikonet på skrivebordet.' -ForegroundColor Green
+  Write-Host '  ✓ Færdig! Start Opticon fra ikonet på skrivebordet.' -ForegroundColor Green
   Write-Host '    (Dine rapporter gemmes i Overførsler\PC-Tjek-rapport)'
-  $go = Read-Host '  Vil du starte PC-Tjek nu? (J/n)'
+  $go = Read-Host '  Vil du starte Opticon nu? (J/n)'
   if ($go -notmatch '^[nN]') { Start-ScheduledTask -TaskName 'PC-Tjek' }
 } catch {
   Write-Host ''
