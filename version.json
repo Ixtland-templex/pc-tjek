@@ -1,7 +1,11 @@
 {
-  "version": "2.26",
+  "version": "2.28",
   "date": "2026-11-24",
   "notes": [
+    "GPU-funktionerne virker nu også på AMD og Intel (fx Radeon 860M)",
+    "AMD/Intel: Find den bedste strømtilstand afprøver Windows' 3 strømtilstande",
+    "Watt for hele pc'en måles på batteri, belastning måles altid",
+    "Ny: anbefaler producentens eget program til drivere og BIOS (fx Lenovo Vantage, Dell SupportAssist, HP Support Assistant)",
     "Spil-tilstand lukker nu kun programmer pænt (som krydset) og tvinger aldrig noget. Intet er valgt på forhånd",
     "Viser \"Lukket\" og \"Kunne ikke lukkes\"",
     "Gendannelse bliver nu bekræftet. Det, der fejler, prøves igen ved næste start",
@@ -27,11 +31,11 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "47B7AFC0507E6937E5B64E7F3488F38B6D3ECC647EBF3648F3D7C752B247D465"
+      "sha256": "143C514180F2E9C9925307AC35AD86874380CBFBB01A4E2F7C2ADDFFC5E9DE10"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "C253870611C2293DB504060E96B872E79EB6051DB0EDB75DA3D653621DFAD23F"
+      "sha256": "F21CE90330CD7A3B4BC28A757C2810ED43FAACA928AF8826D293AFBA0E33B7C8"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

@@ -96,6 +96,17 @@ function Restore-GpuPl($w) {
   return ($null -ne $now -and [math]::Abs($now - [int]$w) -le 2)
 }
 
+# Windows' strømtilstand (Indstillinger > System > Strøm): virker på alle pc'er, også AMD og Intel
+if (-not ('PcTjek.PowerMode' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerMode -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+$PowerModeList = @(
+  [pscustomobject]@{ Key = 'eff';  Guid = '961cc777-2547-4f9d-8174-7d86181b8a7a'; Name = 'Bedste energieffektivitet' }
+  [pscustomobject]@{ Key = 'bal';  Guid = '00000000-0000-0000-0000-000000000000'; Name = 'Balanceret' }
+  [pscustomobject]@{ Key = 'perf'; Guid = 'ded574b5-45a0-4f42-8737-46345c09c238'; Name = 'Bedste ydeevne' }
+)
+function Get-PowerMode { try { $g = [guid]::Empty; if ([PcTjek.PowerMode]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
+function Set-PowerMode($guid) { try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PowerMode) -eq ([guid]$guid).ToString()) }
+function PowerMode-Name($guid) { $m = $PowerModeList | Where-Object { $_.Guid -eq ([string]$guid) } | Select-Object -First 1; if ($m) { $m.Name } else { 'ukendt' } }
+
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
 $ToastKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
 function Get-Toasts { try { return [int](Get-ItemProperty $ToastKey -Name ToastEnabled -ErrorAction Stop).ToastEnabled } catch { return 1 } }
@@ -232,6 +243,12 @@ function Repair-GpuRestore {
     $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $p = $null; if ($g.Pid) { $p = Get-Process -Id ([int]$g.Pid) -ErrorAction SilentlyContinue }
     if ($p -and $p.ProcessName -eq 'powershell') { return $false }   # testen kører stadig
+    if ($g.Overlay) {
+      if (-not (Set-PowerMode $g.Overlay)) { ModeLog "GPU-testen blev afbrudt, men strømtilstanden kunne ikke bekræftes sat tilbage. Prøver igen senere."; return $false }
+      Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue
+      ModeLog "GPU-testen blev afbrudt. Strømtilstanden er sat tilbage til $(PowerMode-Name $g.Overlay) (bekræftet)."
+      return $true
+    }
     if (-not (Restore-GpuPl $g.Watts)) {   # behold filen, så det prøves igen
       ModeLog "GPU-testen blev afbrudt, men strømgrænsen kunne ikke bekræftes sat tilbage til $($g.Watts) W. Prøver igen senere."
       return $false
@@ -259,7 +276,7 @@ function Restore-Everything($reason) {
   if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
   if (Test-Path $ModeFile) { $s = Stop-Mode $reason }
   if (Test-Path $GpuRestoreFile) {
-    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
+    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; $ok = if ($g.Overlay) { Set-PowerMode $g.Overlay } else { Restore-GpuPl $g.Watts }; if ($ok) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
   }
   Retry-Pending
   return $s

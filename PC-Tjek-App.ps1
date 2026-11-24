@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.26'
+$AppVersion = '2.28'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -183,6 +183,17 @@ function Restore-GpuPl($w) {
   return ($null -ne $now -and [math]::Abs($now - [int]$w) -le 2)
 }
 
+# Windows' strømtilstand (Indstillinger > System > Strøm): virker på alle pc'er, også AMD og Intel
+if (-not ('PcTjek.PowerMode' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerMode -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+$PowerModeList = @(
+  [pscustomobject]@{ Key = 'eff';  Guid = '961cc777-2547-4f9d-8174-7d86181b8a7a'; Name = 'Bedste energieffektivitet' }
+  [pscustomobject]@{ Key = 'bal';  Guid = '00000000-0000-0000-0000-000000000000'; Name = 'Balanceret' }
+  [pscustomobject]@{ Key = 'perf'; Guid = 'ded574b5-45a0-4f42-8737-46345c09c238'; Name = 'Bedste ydeevne' }
+)
+function Get-PowerMode { try { $g = [guid]::Empty; if ([PcTjek.PowerMode]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
+function Set-PowerMode($guid) { try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PowerMode) -eq ([guid]$guid).ToString()) }
+function PowerMode-Name($guid) { $m = $PowerModeList | Where-Object { $_.Guid -eq ([string]$guid) } | Select-Object -First 1; if ($m) { $m.Name } else { 'ukendt' } }
+
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
 $ToastKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
 function Get-Toasts { try { return [int](Get-ItemProperty $ToastKey -Name ToastEnabled -ErrorAction Stop).ToastEnabled } catch { return 1 } }
@@ -319,6 +330,12 @@ function Repair-GpuRestore {
     $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $p = $null; if ($g.Pid) { $p = Get-Process -Id ([int]$g.Pid) -ErrorAction SilentlyContinue }
     if ($p -and $p.ProcessName -eq 'powershell') { return $false }   # testen kører stadig
+    if ($g.Overlay) {
+      if (-not (Set-PowerMode $g.Overlay)) { ModeLog "GPU-testen blev afbrudt, men strømtilstanden kunne ikke bekræftes sat tilbage. Prøver igen senere."; return $false }
+      Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue
+      ModeLog "GPU-testen blev afbrudt. Strømtilstanden er sat tilbage til $(PowerMode-Name $g.Overlay) (bekræftet)."
+      return $true
+    }
     if (-not (Restore-GpuPl $g.Watts)) {   # behold filen, så det prøves igen
       ModeLog "GPU-testen blev afbrudt, men strømgrænsen kunne ikke bekræftes sat tilbage til $($g.Watts) W. Prøver igen senere."
       return $false
@@ -346,7 +363,7 @@ function Restore-Everything($reason) {
   if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
   if (Test-Path $ModeFile) { $s = Stop-Mode $reason }
   if (Test-Path $GpuRestoreFile) {
-    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
+    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; $ok = if ($g.Overlay) { Set-PowerMode $g.Overlay } else { Restore-GpuPl $g.Watts }; if ($ok) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
   }
   Retry-Pending
   return $s
@@ -1225,11 +1242,22 @@ $GpuBenchScript = {
   $ErrorActionPreference = 'Stop'
   $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
   if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
-  if (-not (Test-Path $smi)) { throw 'nvidia-smi blev ikke fundet. Testen kræver et NVIDIA-grafikkort.' }
+  $hasSmi = Test-Path $smi   # NVIDIA: alt måles. AMD/Intel: FPS og belastning, og watt for hele pc'en på batteri.
   $inv = [Globalization.CultureInfo]::InvariantCulture
   function Num($x) { $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
   function Q($fields) { @((& $smi "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
-  $lim = Q 'power.limit,power.default_limit,power.min_limit,power.max_limit'
+  function Sample {
+    if ($hasSmi) { $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'; return [pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] } }
+    $u = $null; try { $u = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
+    $w = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { $w = [math]::Round($bt.DischargeRate / 1000, 1) } } catch {}
+    return [pscustomobject]@{ W = $w; T = $null; F = $null; C = $null; U = $u }
+  }
+  if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+  function Get-PM { try { $g = [guid]::Empty; if ([PcTjek.PowerModeB]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
+  function Set-PM($g) { try { [void][PcTjek.PowerModeB]::PowerSetActiveOverlayScheme([guid]$g) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PM) -eq ([guid]$g).ToString()) }
+  $modeNames = @{ '961cc777-2547-4f9d-8174-7d86181b8a7a' = 'Bedste energieffektivitet'; '00000000-0000-0000-0000-000000000000' = 'Balanceret'; 'ded574b5-45a0-4f42-8737-46345c09c238' = 'Bedste ydeevne' }
+  $origMode = Get-PM; $changedMode = $false
+  $lim = if ($hasSmi) { Q 'power.limit,power.default_limit,power.min_limit,power.max_limit' } else { @($null, $null, $null, $null) }
   $orig = $lim[0]; $def = $lim[1]
   $browser = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
                "$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -1292,7 +1320,12 @@ $GpuBenchScript = {
       $rs = if ($resList.Count) { [string]$arg.Res[$i] } else { '' }
       $script:BState.Res = $rs
       $resTxt = if ($rs) { " · $($rs -replace 'x', '×')" } else { '' }
-      $script:BState.Label = if ($pl -and $rs) { "Trin $($i + 1)/$total$resTxt · $([math]::Round($pl)) W" } elseif ($rs) { "Trin $($i + 1)/$total$resTxt" } elseif ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
+      $md = if ($arg.Modes) { [string]@($arg.Modes)[$i] } else { '' }
+      if ($md) {
+        if (-not $changedMode -and $arg.RestoreFile -and $origMode) { [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Overlay = $origMode; Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress)) }
+        [void](Set-PM $md); $changedMode = $true
+      }
+      $script:BState.Label = if ($md) { "Trin $($i + 1)/$total · $($modeNames[$md])" } elseif ($pl -and $rs) { "Trin $($i + 1)/$total$resTxt · $([math]::Round($pl)) W" } elseif ($rs) { "Trin $($i + 1)/$total$resTxt" } elseif ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
       if ($pl) {
         if (-not $changedPl -and $arg.RestoreFile -and $orig) {   # gem den oprindelige værdi FØR første ændring
           [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Watts = [int][math]::Round($orig); Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress))
@@ -1305,13 +1338,13 @@ $GpuBenchScript = {
       while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
         Pump
         if ((Get-Date) -ge $nextS) {
-          $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'
-          [void]$samples.Add([pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] })
+          $sm = Sample
+          [void]$samples.Add($sm)
           $nextS = $nextS.AddSeconds(1)
           $el = ((Get-Date) - $t0).TotalSeconds
           $sync.Progress = [double](100 * ($i + [math]::Min(1, $el / [double]$arg.StepSec)) / $total)
           $lastF = $script:BFps | Select-Object -Last 1
-          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps · $([int]$v[0]) W · $([int]$v[1]) °C · ⏱ $(Fmt-Rem (Remain)) tilbage"
+          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps$(if ($null -ne $sm.W) { " · $([int]$sm.W) W" })$(if ($null -ne $sm.T) { " · $([int]$sm.T) °C" })$(if ($null -ne $sm.U -and -not $hasSmi) { " · belastning $($sm.U) %" }) · ⏱ $(Fmt-Rem (Remain)) tilbage"
         }
         Start-Sleep -Milliseconds 80
       }
@@ -1322,17 +1355,23 @@ $GpuBenchScript = {
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
       $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
       $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
-      [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
+      [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {
-    if ($changedPl -and $orig) { & $smi -pl ([math]::Round($orig)) 2>&1 | Out-Null }   # gendan altid den oprindelige strømgrænse
-    if ($arg.RestoreFile) { Remove-Item -LiteralPath ([string]$arg.RestoreFile) -Force -ErrorAction SilentlyContinue }
+    # Gendan altid det oprindelige, og fjern først gendannelsesfilen, når det er BEKRÆFTET
+    $okRestore = $true
+    if ($changedPl -and $orig) {
+      & $smi -pl ([math]::Round($orig)) 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
+      $now = (Q 'power.limit')[0]; if ($null -eq $now -or [math]::Abs($now - $orig) -gt 2) { $okRestore = $false }
+    }
+    if ($changedMode -and $origMode) { if (-not (Set-PM $origMode)) { $okRestore = $false } }
+    if ($arg.RestoreFile -and $okRestore) { Remove-Item -LiteralPath ([string]$arg.RestoreFile) -Force -ErrorAction SilentlyContinue }
     $script:BState.Done = $true
     try { WaitPump 1.5 } catch {}
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
     try { $listener.Stop(); $listener.Close() } catch {}
   }
-  return @{ Steps = @($results); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
+  return @{ Steps = @($results); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
 # =====================================================================
@@ -2310,7 +2349,19 @@ $GpuBenchScript = {
       <!-- OPDATERINGER -->
       <Grid Name="PageUpdates" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Opdateringer"/><TextBlock Style="{StaticResource Sub}" Text="Gamle programmer er en af de største sikkerhedsrisici. Bruger Windows' egen pakkehåndtering (winget) til at opdatere i baggrunden."/></StackPanel>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Opdateringer"/><TextBlock Style="{StaticResource Sub}" Text="Gamle programmer er en af de største sikkerhedsrisici. Bruger Windows' egen pakkehåndtering (winget) til at opdatere i baggrunden."/>
+          <Border Name="VendorCard" Visibility="Collapsed" CornerRadius="14" Background="#141B2A" BorderBrush="#2C4A7A" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Button Name="BtnVendorOpen" Style="{StaticResource Primary}" Margin="0"/>
+              </StackPanel>
+              <StackPanel>
+                <TextBlock Name="VendorTitle" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock Name="VendorText" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+        </StackPanel>
         <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="6">
           <DataGrid Name="GridUpdates">
             <DataGrid.Columns>
@@ -2572,7 +2623,7 @@ foreach ($nav in $pages.Keys) {
     param($sender, $e)
     foreach ($k in $pages.Keys) { $ui[$pages[$k]].Visibility = $(if ($ui[$k].IsChecked) { 'Visible' } else { 'Collapsed' }) }
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
-    if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {} }
+    if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {}; try { Show-VendorCard } catch { Log "Producent-fejl: $_" } }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
     if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
@@ -3662,7 +3713,13 @@ function Show-Tweaks {
     if ($oldDrv) { $ui.DrvNow.Foreground = $Brush.ConvertFromString('#F6C344') }
     $ui.DrvStepsText.Text = "Grafikdriver:`n1.  Tryk på 'Opdatér grafikdriver'. Det åbner NVIDIA App / AMD Software (eller Windows Update).`n2.  Gå til Drivere, og tryk Hent/Installér.`n`nBIOS (kun hvis du vil):`n1.  Tryk på 'Find BIOS-opdatering', og åbn producentens side for $($d.Board).`n2.  Læs producentens vejledning grundigt. Sluk ALDRIG pc'en under en BIOS-opdatering.`n3.  Efter opdateringen skal $(if ($t.Ram) { $t.Ram.Prof } else { 'XMP' }) ofte slås til igen."
     $ui.DrvAction.Content = '⬇  Opdatér grafikdriver'; $ui.DrvAction.Visibility = 'Visible'
-    $ui.DrvAction2.Content = '🔎  Find BIOS-opdatering'; $ui.DrvAction2.Visibility = 'Visible'
+    $vi = $null; try { $vi = Get-VendorInfo } catch {}
+    if ($vi -and $vi.Tool -and $vi.Tool.Name -ne 'Windows Update') {
+      $vn = if ($vi.App) { $vi.App.Name } else { $vi.Tool.Name }
+      $ui.DrvAction2.Content = "💻  BIOS og drivere: $(if ($vi.App) { 'åbn' } else { 'hent' }) $vn"
+      $ui.DrvStepsText.Text += "`n`nPå din $($vi.Man): brug hellere $vn. $($vi.Tool.Where)"
+    } else { $ui.DrvAction2.Content = '🔎  Find BIOS-opdatering' }
+    $ui.DrvAction2.Visibility = 'Visible'
   } else { Set-Badge 'Drv' 'info' 'Kunne ikke læses' }
 
   $ui.TweakSummary.Text = if ($tips) { "💡 $tips gratis forbedring$(if ($tips -gt 1) { 'er' }) fundet. Intet ændres, uden at du selv gør det." } else { '✓ Din pc er sat godt op. Der er ingen gratis ydelse at hente lige nu.' }
@@ -3689,6 +3746,8 @@ $ui.DrvAction.Add_Click({
   if ($nv) { Start-Process $nv } elseif (Test-Path $amd) { Start-Process $amd } else { Start-Process 'ms-settings:windowsupdate-optionalupdates' }
 })
 $ui.DrvAction2.Add_Click({
+  $vi = $null; try { $vi = Get-VendorInfo } catch {}
+  if ($vi -and $vi.Tool -and $vi.Tool.Name -ne 'Windows Update') { Open-VendorTool; return }
   $b = if ($script:Tweaks -and $script:Tweaks.Drv) { $script:Tweaks.Drv.Board } else { 'bundkort' }
   Start-Process ("https://www.google.com/search?q=" + [Uri]::EscapeDataString("$b BIOS download support"))
 })
@@ -3948,7 +4007,15 @@ function Get-Smi { $p = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Tes
 function Get-GpuName { (Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage' } | Select-Object -First 1).Name }
 function Update-GpuLive {
   $smi = Get-Smi
-  if (-not $smi) { $ui.GpuLiveW.Text = '–'; return }
+  if (-not $smi) {
+    # AMD/Intel: belastning fra Windows; watt for hele pc'en, når den kører på batteri
+    $u = $null; try { $u = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
+    $bt = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1 } catch {}
+    $ui.GpuLiveU.Text = $(if ($null -ne $u) { "$u %" } else { 'n/a' })
+    $ui.GpuLiveW.Text = $(if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { "$([math]::Round($bt.DischargeRate / 1000)) W (pc)" } elseif ($bt) { 'på strøm' } else { 'n/a' })
+    $ui.GpuLiveT.Text = 'n/a'; $ui.GpuLiveF.Text = 'n/a'; $ui.GpuLiveC.Text = 'n/a'
+    return
+  }
   $q = & $smi --query-gpu=power.draw,power.limit,temperature.gpu,fan.speed,clocks.gr,utilization.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1
   $p = @($q -split ',\s*')
   if ($p.Count -lt 6) { return }
@@ -3972,8 +4039,16 @@ function Smi-Q($fields) {
 function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
 function Start-GpuBench($mode) {
   if (-not (Confirm-ModeFree 'GPU-testen')) { return }
-  if (-not (Get-Smi)) { Msg 'Testen kræver et NVIDIA-grafikkort (nvidia-smi). Til AMD: brug Auto Undervolt i AMD Adrenalin.' 'GPU' | Out-Null; return }
-  if ($mode -eq 'auto') {
+  if ($mode -eq 'auto' -and -not (Get-Smi)) {
+    # AMD/Intel: afprøv Windows' tre strømtilstande i stedet for strømgrænser
+    $cur = Get-PowerMode
+    if (-not $cur) { Msg "Windows' strømtilstande kan ikke styres på denne pc (det sker fx, hvis en anden strømplan end 'Balanceret' er valgt i Kontrolpanel)." 'GPU' | Out-Null; return }
+    $bt = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1 } catch {}
+    $battTxt = if ($bt -and $bt.PowerOnline) { "`n`n🔌 Tip: Tag laderen ud før testen. Så kan Opticon også måle, hvor mange watt pc'en bruger i hver tilstand. Med laderen i måles kun FPS." } elseif ($bt) { "`n`n🔋 Du kører på batteri, så Opticon måler også, hvor mange watt pc'en bruger." } else { '' }
+    if ((Msg "Testen tager ca. 3 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  Opticon prøver Windows' 3 strømtilstande: Bedste energieffektivitet, Balanceret og Bedste ydeevne.`n•  Rør ikke musen, og luk tunge programmer først.`n•  Tryk Esc for at stoppe.$battTxt`n`nDin nuværende tilstand ($(PowerMode-Name $cur)) sættes tilbage bagefter.`n`nStart testen?" 'Find den bedste strømtilstand' 'YesNo' 'Question') -ne 'Yes') { return }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
+    $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
+  } elseif ($mode -eq 'auto') {
     $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'
     $def = $l[0]; $min = $l[1]
     if (-not $def) { Msg 'Dit grafikkort tillader ikke, at strømgrænsen ændres (det er fx tilfældet på mange bærbare). Brug i stedet "Test dine egne indstillinger".' 'GPU' | Out-Null; return }
@@ -4025,7 +4100,8 @@ function Start-GpuBench($mode) {
       return
     }
     try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
-    if ($c.GpuMode -eq 'auto') { Show-GpuAuto $res $steps }
+    if ($c.GpuMode -eq 'auto' -and -not $res.HasSmi) { Show-PowerModes $res $steps }
+    elseif ($c.GpuMode -eq 'auto') { Show-GpuAuto $res $steps }
     elseif ($c.GpuMode -eq 'res') { Show-GpuRes $steps }
     elseif ($c.GpuMode -eq 'ocbase') {
       $script:OcBase = $steps[0]
@@ -4037,7 +4113,7 @@ function Start-GpuBench($mode) {
     elseif ($c.GpuMode -eq 'before') {
       $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $res.Work
       $b = $steps[0]
-      $ui.GpuResult.Text = "FØR: $($b.Fps) fps · $([math]::Round($b.W)) W · $([math]::Round($b.T)) °C · blæser $(if ($null -ne $b.F) { "$([math]::Round($b.F)) %" } else { 'n/a' }) · $([math]::Round($b.C)) MHz"
+      $ui.GpuResult.Text = "FØR: $($b.Fps) fps$(if ($b.P1) { " · laveste 1 % $([math]::Round($b.P1))" })$(if ($null -ne $b.W) { " · $([math]::Round($b.W)) W" })$(if ($null -ne $b.T) { " · $([math]::Round($b.T)) °C" })$(if ($null -ne $b.F) { " · blæser $([math]::Round($b.F)) %" })$(if ($b.C) { " · $([math]::Round($b.C)) MHz" })"
       $ui.GpuVerdict.Text = "Lav nu ÉN ændring i Afterburner (fx en spændingskurve eller et lavere power limit), og tryk så 'Mål EFTER'."
       $ui.BtnGpuAfter.IsEnabled = $true
     } else { $script:GpuAfter = $steps[0]; Show-GpuCompare }
@@ -4101,7 +4177,7 @@ $ui.BtnGpuRes.Add_Click({ Start-GpuBench 'res' })
 # ---------- OC-tjek ----------
 function Show-OcBase {
   $b = $script:OcBase; if (-not $b) { return }
-  $ui.GpuOcBase.Text = "Udgangspunkt (2K): $([math]::Round($b.Fps)) fps · laveste 1 % $(if ($b.P1) { [math]::Round($b.P1) } else { '–' }) fps · $([math]::Round($b.W)) W · $([math]::Round($b.C)) MHz · $([math]::Round($b.T)) °C"
+  $ui.GpuOcBase.Text = "Udgangspunkt (2K): $([math]::Round($b.Fps)) fps · laveste 1 % $(if ($b.P1) { [math]::Round($b.P1) } else { '–' }) fps$(if ($null -ne $b.W) { " · $([math]::Round($b.W)) W" })$(if ($b.C) { " · $([math]::Round($b.C)) MHz" })$(if ($null -ne $b.T) { " · $([math]::Round($b.T)) °C" })$(if ($null -ne $b.U -and $null -eq $b.T) { " · belastning $([math]::Round($b.U)) %" })"
   $ui.GpuOcBase.Visibility = 'Visible'
 }
 function Set-OcBox($kind, $title, $text) {
@@ -4117,6 +4193,23 @@ $KnownOc = @(
 )
 function Show-OcEstimate {
   $b = $script:OcBase; if (-not $b -or -not $b.Fps) { return }
+  if (-not (Get-Smi)) {   # AMD/Intel: ingen strøm-/clockdata at regne på
+    $gn = [string](Get-GpuName)
+    $igpu = $gn -match '(?i)\b\d{3,4}M\b|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d|UHD|Iris|Intel\(R\) Graphics|Arc\(TM\) Graphics'
+    foreach ($n in 'OcEstFps', 'OcEstW', 'OcEstT', 'OcEstN') { $ui[$n].Text = '–' }
+    foreach ($n in 'OcEstFpsSub', 'OcEstWSub', 'OcEstTSub', 'OcEstNSub') { $ui[$n].Text = '' }
+    if ($igpu) {
+      $ui.OcEstFps.Text = 'lidt'; $ui.OcEstFpsSub.Text = 'sjældent mærkbart'
+      $ui.GpuOcEstTitle.Text = "Skøn, ikke målt · 👎 Giver sjældent mening på integreret grafik ($gn)"
+      $ui.GpuOcEstText.Text = "Integreret grafik deler strøm og køling med processoren og bruger din RAM som grafikhukommelse. Overclock giver derfor sjældent meget. Mere effektivt: kør 'Find den bedste strømtilstand' ovenfor, og brug 'Bedste ydeevne' på strøm, når du spiller. Hurtigere RAM hjælper også integreret grafik."
+    } else {
+      $ui.OcEstFps.Text = 'ca. +3-7 %'; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($b.Fps * 1.05)) fps"
+      $ui.GpuOcEstTitle.Text = 'Skøn, ikke målt · 🤷 Måske'
+      $ui.GpuOcEstText.Text = "Nyere grafikkort giver typisk 3-7 % ved overclock, fordi de allerede udnytter det meste fra fabrikken. Opticon kan ikke læse strøm og temperatur på dette kort, så skønnet er groft. Kun trin 3 måler det rigtige tal."
+    }
+    $ui.GpuOcEstBox.Visibility = 'Visible'; $script:OcEstGain = $null
+    return
+  }
   $l = Smi-Q 'power.limit,power.max_limit'
   $pl = $l[0]; $plMax = $l[1]
   $mine = Parse-Gpu (Get-GpuName)
@@ -4155,16 +4248,20 @@ function Show-OcEstimate {
 }
 function Show-OcCheck($res, $steps) {
   $s = @($steps)[0]; $b = $script:OcBase
-  $ev = @(); try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $script:OcStart } -ErrorAction Stop | Where-Object { $_.ProviderName -eq 'nvlddmkm' -or $_.Id -eq 4101 }) } catch {}
+  $ev = @(); try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $script:OcStart } -ErrorAction Stop | Where-Object { $_.ProviderName -match '^(nvlddmkm|amdkmdag|amdkmdap|amdwddmg|igfx|igfxn)$' -or $_.Id -eq 4101 }) } catch {}
   $probs = @()
   if ($res.Lost) { $probs += 'Grafikdriveren gik ned under testen.' }
-  if ($ev.Count) { $probs += "Windows loggede $($ev.Count) fejl fra grafikdriveren (nvlddmkm)." }
+  if ($ev.Count) { $probs += "Windows loggede $($ev.Count) fejl fra grafikdriveren." }
   if ($s -and $s.FpsMin -and $s.Fps -and [double]$s.FpsMin -lt 0.5 * [double]$s.Fps) { $probs += "FPS faldt pludselig til $([math]::Round($s.FpsMin)) (normalt $([math]::Round($s.Fps)))." }
   $nums = ''; $dF = $null
   if ($s -and $s.Fps -and $b -and $b.Fps) {
     $dF = 100 * ([double]$s.Fps - [double]$b.Fps) / [double]$b.Fps
     $dW = if ($b.W) { 100 * ([double]$s.W - [double]$b.W) / [double]$b.W } else { 0 }
-    $nums = "FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %) · strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %) · clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz (laveste $([math]::Round($s.Cmin))) · højeste temp $([math]::Round($s.Tmax)) °C"
+    $bits = @("FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %)")
+    if ($null -ne $b.W -and $null -ne $s.W -and $b.W) { $bits += "strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %)" }
+    if ($b.C -and $s.C) { $bits += "clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz$(if ($s.Cmin) { " (laveste $([math]::Round($s.Cmin)))" })" }
+    if ($null -ne $s.Tmax) { $bits += "højeste temp $([math]::Round($s.Tmax)) °C" }
+    $nums = $bits -join ' · '
   }
   $hot = if ($s -and $s.Tmax -ge 83) { "`n🌡  Højeste temperatur var $([math]::Round($s.Tmax)) °C. Det er varmt: giv blæserkurven lidt mere fart, eller skru lidt ned." } else { '' }
   $note = "`n`nMålt i Opticons testscene (2K, 5 minutter), ikke i et bestemt spil. 5 minutter fanger de værste fejl, men ikke alle. Opticon kan heller ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
@@ -4187,6 +4284,18 @@ function Show-OcCheck($res, $steps) {
 $ui.BtnOcBase.Add_Click({ Start-GpuBench 'ocbase' })
 $ui.BtnOcCheck.Add_Click({ Start-GpuBench 'occheck' })
 $ui.BtnOcTune.Add_Click({
+  if (-not (Get-Smi)) {   # AMD / Intel
+    $amd = "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe"
+    $gn = [string](Get-GpuName)
+    if ($gn -match '(?i)radeon|amd') {
+      $t = "Opticon overclocker ikke selv. Brug AMDs eget program:`n`nAMD Software (Adrenalin):`n1.  Gå til Ydeevne → Tuning.`n2.  Vælg 'Automatisk: Overclock GPU' (eller 'Undervolt GPU' for mindre strøm).`n3.  Kom tilbage, og tryk '3 · Tjek OC'.`n`nPå integreret grafik (fx Radeon 860M) er der ofte få eller ingen tuning-muligheder. Så er 'Find den bedste strømtilstand' den bedste vej."
+      if ((Msg "$t`n`nÅbn AMD Software nu?" 'Find overclock automatisk' 'YesNo' 'Information') -ne 'Yes') { return }
+      if (Test-Path $amd) { Start-Process $amd } else { Start-Process 'https://www.amd.com/en/support/download/drivers.html' }
+    } else {
+      Msg "Intel-grafik har næsten ingen overclock-muligheder. Brug i stedet 'Find den bedste strømtilstand' ovenfor." 'OC-tjek' | Out-Null
+    }
+    return
+  }
   $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   if (-not $script:OcBase) { if ((Msg "Mål udgangspunktet først (trin 1), så Opticon kan se, hvad overclocket giver.`n`nVil du alligevel fortsætte?" 'OC-tjek' 'YesNo' 'Question') -ne 'Yes') { return } }
@@ -4200,7 +4309,40 @@ $ui.BtnOcTune.Add_Click({
   if ($nv) { Start-Process $nv } elseif ($ab) { Start-Process $ab } else { Start-Process 'https://www.nvidia.com/en-us/software/nvidia-app/' }
 })
 
+
+# ---------- AMD/Intel: den bedste strømtilstand ----------
+function Show-PowerModes($res, $steps) {
+  $st = @($steps | Where-Object { $_.Mode })
+  $max = [double](($st | Measure-Object Fps -Maximum).Maximum); if ($max -le 0) { $max = 1 }
+  $rec = $st | Where-Object { [double]$_.Fps -ge 0.97 * $max } | Select-Object -First 1   # rækkefølgen er mest sparsom først
+  $hasW = @($st | Where-Object { $null -ne $_.W }).Count -gt 0
+  $rows = @(foreach ($x in $st) {
+    $r = New-Object PcTjek.Row
+    $r.Status = $(if ($x -eq $rec) { '⭐' } else { '' })
+    $r.Navn = PowerMode-Name $x.Mode
+    $r.Info = $(if ($null -ne $x.W) { "$([math]::Round($x.W)) W (hele pc'en)" } else { '– (på strøm)' })
+    $r.Note = "$([math]::Round($x.Fps)) fps$(if ($x.P1) { " · laveste $([math]::Round($x.P1))" })"
+    $r.Gruppe = $(if ($null -ne $x.U) { "belastning $([math]::Round($x.U)) %" } else { '' })
+    $r })
+  $ui.GridGpuAuto.ItemsSource = $rows; $ui.GridGpuAuto.Visibility = 'Visible'
+  $ui.GpuRecBox.Visibility = 'Visible'; $ui.GpuAbBox.Visibility = 'Collapsed'; $ui.BtnGpuAbHow.Visibility = 'Collapsed'
+  $script:GpuRec = $null; $script:GpuRecMode = $null
+  if (-not $rec) { $ui.GpuRecTitle.Text = 'Testen gav ingen klare tal'; $ui.GpuRecText.Text = 'Kør testen igen, og rør ikke pc’en imens.'; $ui.BtnGpuApply.Visibility = 'Collapsed'; return }
+  $best = $st | Sort-Object Fps -Descending | Select-Object -First 1
+  $script:GpuRecMode = $rec.Mode
+  $name = PowerMode-Name $rec.Mode
+  $dF = [math]::Round(100 * ([double]$rec.Fps - [double]$best.Fps) / [math]::Max(1, [double]$best.Fps))
+  $ui.GpuRecTitle.Text = "⭐ Anbefalet: $name"
+  $txt = if ($rec -eq $best) { "Den giver flest FPS ($([math]::Round($rec.Fps))). De andre tilstande koster mere end 3 % FPS." }
+         else { "Næsten samme ydelse som $(PowerMode-Name $best.Mode) ($dF % FPS)$(if ($hasW -and $null -ne $rec.W -and $null -ne $best.W) { ", men $([math]::Round($best.W - $rec.W)) W mindre for hele pc'en. Det giver længere batteritid og et køligere, mere stille kabinet" })." }
+  if (-not $hasW) { $txt += "`n`nTag laderen ud, og kør testen igen, hvis du også vil se, hvor mange watt hver tilstand bruger." }
+  $txt += "`n`nTallene er fra Opticons testscene. På bærbare kan producentens eget program (fx Lenovo Vantage eller G-Helper) også have tilstande, der overstyrer Windows."
+  $ui.GpuRecText.Text = $txt
+  $ui.BtnGpuApply.Content = "✅  Brug $name"; $ui.BtnGpuApply.Visibility = 'Visible'
+  $ui.BtnGpuReset.Content = '↩  Tilbage til Balanceret'
+}
 function Show-GpuAuto($res, $steps) {
+  $script:GpuRecMode = $null; $ui.BtnGpuReset.Content = '↩  Tilbage til standard'
   $base = $steps[0]
   $rec = $base
   foreach ($s in $steps) { if ($s.Fps -ge 0.97 * $base.Fps -and $s.W -lt $rec.W) { $rec = $s } }
@@ -4234,6 +4376,13 @@ function Show-GpuAuto($res, $steps) {
 }
 function Show-GpuCompare {
   $a = $script:GpuBefore; $b = $script:GpuAfter
+  $parts = @("FPS $($a.Fps) → $($b.Fps)$(Pct-Str $a.Fps $b.Fps)")
+  if ($null -eq $a.W -or $null -eq $b.W) {   # AMD/Intel på strøm: kun FPS
+    $ui.GpuResult.Text = ($parts -join '  ·  ') + $(if ($a.P1 -and $b.P1) { "  ·  laveste 1 % $([math]::Round($a.P1)) → $([math]::Round($b.P1))" })
+    $fPct = ($b.Fps - $a.Fps) / [math]::Max(1, $a.Fps) * 100
+    $ui.GpuVerdict.Text = "FPS ændrede sig $([math]::Round($fPct)) %. Tag laderen ud, og mål igen, hvis du også vil se strømforbruget."
+    $ui.GpuSavePanel.Visibility = 'Visible'; return
+  }
   $parts = @("FPS $($a.Fps) → $($b.Fps)$(Pct-Str $a.Fps $b.Fps)", "Effekt $([math]::Round($a.W)) → $([math]::Round($b.W)) W$(Pct-Str $a.W $b.W)", "Temp $([math]::Round($a.T)) → $([math]::Round($b.T)) °C")
   if ($null -ne $a.F -and $null -ne $b.F) { $parts += "Blæser $([math]::Round($a.F)) → $([math]::Round($b.F)) %" }
   $parts += "Clock $([math]::Round($a.C)) → $([math]::Round($b.C)) MHz"
@@ -4250,6 +4399,13 @@ $ui.BtnGpuBefore.Add_Click({ Start-GpuBench 'before' })
 $ui.BtnGpuAfter.Add_Click({ Start-GpuBench 'after' })
 $ui.BtnGpuAbHow.Add_Click({ $ui.GpuAbBox.Visibility = $(if ($ui.GpuAbBox.Visibility -eq 'Visible') { 'Collapsed' } else { 'Visible' }) })
 $ui.BtnGpuApply.Add_Click({
+  if ($script:GpuRecMode) {
+    if (Set-PowerMode $script:GpuRecMode) {
+      Log "Strømtilstand sat til $(PowerMode-Name $script:GpuRecMode)"
+      Msg "✓ Strømtilstanden er nu '$(PowerMode-Name $script:GpuRecMode)'.`n`nWindows husker den selv, men separat for strøm og batteri. Kør testen igen med eller uden lader for at vælge til den anden." 'GPU' | Out-Null
+    } else { Msg "Windows ville ikke skifte strømtilstand. Prøv i Indstillinger → System → Strøm og batteri." 'GPU' 'OK' 'Warning' | Out-Null }
+    return
+  }
   $r = $script:GpuRec; $smi = Get-Smi
   if (-not $r -or -not $smi) { return }
   $o = & $smi -pl ([math]::Round($r.Pl)) 2>&1
@@ -4263,7 +4419,11 @@ $ui.BtnGpuApply.Add_Click({
   Load-Gpu
 })
 $ui.BtnGpuReset.Add_Click({
-  $smi = Get-Smi; if (-not $smi) { return }
+  if (-not (Get-Smi)) {
+    if (Set-PowerMode '00000000-0000-0000-0000-000000000000') { Msg 'Strømtilstanden er tilbage på Balanceret.' 'GPU' | Out-Null } else { Msg 'Kunne ikke skifte strømtilstand.' 'GPU' 'OK' 'Warning' | Out-Null }
+    return
+  }
+  $smi = Get-Smi
   $def = (Smi-Q 'power.default_limit')[0]
   if ($def) { & $smi -pl ([math]::Round($def)) 2>&1 | Out-Null }
   Remove-Item $GpuPlFile -Force -ErrorAction SilentlyContinue
@@ -4373,7 +4533,12 @@ $ui.BtnGpuAb.Add_Click({
 })
 function Load-Gpu {
   $n = Get-GpuName
-  $ui.GpuName.Text = "$n$(if (-not (Get-Smi)) { ' · live-måling kræver NVIDIA (nvidia-smi)' })"
+  $hasSmi = [bool](Get-Smi)
+  $ui.GpuName.Text = "$n$(if (-not $hasSmi) { " · FPS og belastning måles · watt for hele pc'en på batteri" })"
+  if (-not $hasSmi) {
+    $ui.BtnGpuAuto.Content = '🚀  Find den bedste strømtilstand (ca. 3 min)'
+    if (-not $script:GpuMeasuring -and $ui.GpuRecBox.Visibility -ne 'Visible') { $ui.GpuAutoInfo.Text = "Opticon viser en 3D-testscene i fuld skærm og prøver Windows' 3 strømtilstande. Bagefter får du en anbefaling: mindst strøm uden at miste mærkbar ydelse. Din nuværende tilstand sættes altid tilbage." }
+  }
   $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $ui.BtnGpuAb.Content = $(if ($ab) { '🎚  Åbn MSI Afterburner' } else { '⬇  Hent MSI Afterburner' })
   try { Update-GpuLive } catch {}
@@ -4637,6 +4802,67 @@ $ui.BtnFocNotif.Add_Click({
   if ($a -ne 'Yes') { return }
   try { if ($isChrome) { Start-Process 'chrome.exe' 'chrome://settings/content/notifications' } else { Start-Process 'msedge.exe' 'edge://settings/content/notifications' } } catch {}
 })
+
+
+# =====================================================================
+#  PRODUCENTENS EGET PROGRAM (bærbare og færdigbyggede pc'er)
+#  Drivere, BIOS og firmware fra producenten finder ting, Windows Update kan overse.
+# =====================================================================
+$VendorTools = @(
+  @{ Match = 'lenovo'; Name = 'Lenovo Vantage'; Apps = 'Lenovo Vantage|Lenovo Commercial Vantage|Lenovo PC Manager'; Get = 'ms-windows-store://pdp/?productid=9WZDNCRFJ4MV'; GetBiz = 'ms-windows-store://pdp/?productid=9NR5B8GVVM13'; BizName = 'Lenovo Commercial Vantage'; Biz = '(?i)think'; Where = "Gå til Enhed → Systemopdatering (System Update), og tryk 'Søg efter opdateringer'." }
+  @{ Match = 'dell|alienware'; Name = 'Dell SupportAssist'; Apps = 'SupportAssist|Dell Command \| Update|Dell Update|Alienware Update'; Get = 'https://www.dell.com/support/home'; Where = "Vælg 'Opdatér software' / 'Check for updates', og installer det, den finder." }
+  @{ Match = '^hp|hewlett'; Name = 'HP Support Assistant'; Apps = 'HP Support Assistant'; Get = 'https://support.hp.com/drivers'; Where = "Vælg Opdateringer, og tryk 'Søg efter opdateringer og meddelelser'." }
+  @{ Match = 'asus'; Name = 'G-Helper'; Apps = 'G-Helper|GHelper'; Proc = 'GHelper'; Alt = 'MyASUS|Armoury Crate'; Get = 'https://github.com/seerge/g-helper/releases/latest'; Where = "Tryk 'Updates' nederst i G-Helper. Nye BIOS- og driverversioner står med rødt."; AltWhere = 'G-Helper er et lille gratis open source-alternativ til Armoury Crate (ca. 5 MB), der også finder BIOS- og driveropdateringer. Kan du hellere lide ASUS egne programmer, så brug MyASUS → Live-opdatering.'; Mobile = $true }
+  @{ Match = 'micro-star|msi'; Name = 'MSI Center'; Apps = 'MSI Center|Dragon Center'; Get = 'https://www.msi.com/Landing/MSI-Center'; Where = "Gå til Support → Live Update, og søg efter opdateringer."; Mobile = $true }
+  @{ Match = 'acer'; Name = 'Acer Care Center'; Apps = 'Care Center|Acer Purified'; Get = 'https://www.acer.com/support'; Where = "Vælg Opdatering, og tryk 'Søg efter opdateringer'."; Mobile = $true }
+  @{ Match = 'microsoft'; Name = 'Windows Update'; Apps = ''; Get = 'ms-settings:windowsupdate'; Where = 'Surface-drivere og firmware kommer via Windows Update. Husk også Valgfrie opdateringer.' }
+)
+function Get-VendorInfo {
+  if ($script:VendorInfo) { return $script:VendorInfo }
+  try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    $pr = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
+    $man = [string]$cs.Manufacturer
+    $model = if ($man -match '(?i)lenovo' -and $pr.Version) { [string]$pr.Version } elseif ($cs.SystemFamily -and $cs.SystemFamily -notmatch '(?i)default|to be filled') { "$($cs.SystemFamily) $($cs.Model)".Trim() } else { [string]$cs.Model }
+    $mobile = ($cs.PCSystemType -eq 2)
+    $t = $VendorTools | Where-Object { $man -match "(?i)$($_.Match)" } | Select-Object -First 1
+    if ($t -and $t.Mobile -and -not $mobile) { $t = $null }   # selvbyggede stationære: bundkortets program er ikke det rigtige sted
+    $app = $null
+    if ($t -and $t.Proc) { $gp = Get-Process -Name $t.Proc -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1; if ($gp) { $app = [pscustomobject]@{ Name = $t.Name; AppID = $null; Path = $gp.Path } } }   # bærbare programmer som G-Helper står ikke i Start
+    if (-not $app -and $t -and $t.Apps) { try { $app = Get-StartApps -ErrorAction Stop | Where-Object { $_.Name -match "(?i)^($($t.Apps))" } | Select-Object -First 1 } catch {} }
+    $alt = $null; if (-not $app -and $t -and $t.Alt) { try { $alt = Get-StartApps -ErrorAction Stop | Where-Object { $_.Name -match "(?i)^($($t.Alt))" } | Select-Object -First 1 } catch {} }
+    $biz = $t -and $t.Biz -and ($model -match $t.Biz)
+    $script:VendorInfo = [pscustomobject]@{ Man = $man; Model = $model; Mobile = $mobile; Tool = $t; App = $app; Alt = $alt; Biz = [bool]$biz }
+  } catch { $script:VendorInfo = [pscustomobject]@{ Man = ''; Model = ''; Mobile = $false; Tool = $null; App = $null; Biz = $false } }
+  return $script:VendorInfo
+}
+function Open-VendorTool {
+  $v = Get-VendorInfo; if (-not $v.Tool) { return }
+  if ($v.App -and $v.App.Path) { Start-Process "$env:SystemRoot\explorer.exe" "`"$($v.App.Path)`""; return }
+  if ($v.App) { Start-Process "$env:SystemRoot\explorer.exe" "shell:AppsFolder\$($v.App.AppID)"; return }
+  $url = if ($v.Biz -and $v.Tool.GetBiz) { $v.Tool.GetBiz } else { $v.Tool.Get }
+  Start-Process $url
+}
+function Show-VendorCard {
+  $v = Get-VendorInfo
+  if (-not $v.Tool) { $ui.VendorCard.Visibility = 'Collapsed'; return }
+  $name = if ($v.App) { $v.App.Name } elseif ($v.Biz -and $v.Tool.BizName) { $v.Tool.BizName } else { $v.Tool.Name }
+  $brand = ($v.Man -replace '(?i)\s*(inc\.?|corporation|co\.,? ltd\.?|computer|technologies)\s*', ' ').Trim()
+  if ($brand.Length -gt 3 -and $brand -ceq $brand.ToUpper()) { $brand = (Get-Culture).TextInfo.ToTitleCase($brand.ToLower()) }   # LENOVO -> Lenovo
+  $ui.VendorTitle.Text = "💻  Drivere og BIOS til din $brand$(if ($v.Model) { " ($($v.Model))" })"
+  if ($v.Tool.Name -eq 'Windows Update') {
+    $ui.VendorText.Text = $v.Tool.Where
+    $ui.BtnVendorOpen.Content = '⬆  Åbn Windows Update'
+  } elseif ($v.App) {
+    $ui.VendorText.Text = "Brug $name til drivere, BIOS og firmware. Producentens eget program kender netop din model og finder opdateringer, som Windows Update kan overse. $($v.Tool.Where)"
+    $ui.BtnVendorOpen.Content = "Åbn $name"
+  } else {
+    $ui.VendorText.Text = if ($v.Tool.AltWhere) { "$($v.Tool.AltWhere)$(if ($v.Alt) { " Du har allerede $($v.Alt.Name)." })" } else { "$name er $($brand)s gratis program til drivere, BIOS og firmware til netop din model. Det finder opdateringer, som Windows Update kan overse. Det ser ikke ud til at være installeret." }
+    $ui.BtnVendorOpen.Content = $(if (($(if ($v.Biz -and $v.Tool.GetBiz) { $v.Tool.GetBiz } else { $v.Tool.Get })) -like 'ms-windows-store:*') { "⬇  Hent $name (Microsoft Store)" } else { "⬇  Hent $name" })
+  }
+  $ui.VendorCard.Visibility = 'Visible'
+}
+$ui.BtnVendorOpen.Add_Click({ Open-VendorTool })
 
 # =====================================================================
 #  Eksport
