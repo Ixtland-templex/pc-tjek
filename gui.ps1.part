@@ -769,11 +769,15 @@ let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, cali
 // Opløsningstest: scenen tegnes i præcis den valgte opløsning (lærredet får den størrelse og skaleres til skærmen).
 // Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
 let fw = 0, fh = 0, warmUntil = 0;
+// Skærmen låser normalt billedet til sin Hz (fx 60). For at måle grafikkortet og ikke skærmen tegnes scenen K gange
+// pr. skærmopdatering, og K skrues op, indtil grafikkortet er fuldt optaget. Så er tegnede billeder pr. sekund = FPS
+// uden V-Sync (som i et spil med V-Sync slået fra). Kun sekunder, hvor grafikkortet var fuldt optaget, tæller med.
+let K = 1, hzMax = 0, rafs = 0;
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
   fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
-  warmUntil = performance.now() + 1500; win = []; winStart = performance.now();
+  warmUntil = performance.now() + 3000; win = []; rafs = 0; winStart = performance.now();
 }
 if (resMode) {
   c.style.objectFit = 'contain';
@@ -784,21 +788,28 @@ if (resMode) {
 try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); post('/renderer', { r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
 function frame(now){
   if (done) return;
-  const dt = now - last; last = now; frames++; win.push(dt);
-  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const dt = now - last; last = now; frames++;
+  gl.uniform2f(uR, c.width, c.height);
+  const reps = resMode ? K : 1;
+  for (let k = 0; k < reps; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  for (let k = 0; k < reps; k++) win.push(dt / reps);
+  rafs++;
   if (resMode && now - winStart >= 1000) {
-    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms, raf = 1000 * rafs / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    if (now >= warmUntil) post('/fps', { f, ms, p99 });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; winStart = now;
+    if (K === 1) hzMax = Math.max(hzMax, raf);
+    const busy = hzMax > 0 && raf < 0.9 * hzMax;      // grafikkortet nåede ikke at følge med skærmen = fuldt optaget
+    if (now >= warmUntil && busy) post('/fps', { f, ms, p99 });
+    if (!busy) K = Math.min(256, Math.ceil(K * 1.6)); else if (raf < 12 && K > 1) K = Math.max(1, Math.floor(K / 2));
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${busy ? fps.toFixed(0) + ' fps' : 'finder grafikkortets grænse…'}<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    win = []; rafs = 0; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
     o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; winStart = now;
+    win = []; rafs = 0; winStart = now;
   }
   requestAnimationFrame(frame);
 }

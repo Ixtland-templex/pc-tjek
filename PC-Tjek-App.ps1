@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.42'
+$AppVersion = '2.43'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1667,11 +1667,15 @@ let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, cali
 // Opløsningstest: scenen tegnes i præcis den valgte opløsning (lærredet får den størrelse og skaleres til skærmen).
 // Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
 let fw = 0, fh = 0, warmUntil = 0;
+// Skærmen låser normalt billedet til sin Hz (fx 60). For at måle grafikkortet og ikke skærmen tegnes scenen K gange
+// pr. skærmopdatering, og K skrues op, indtil grafikkortet er fuldt optaget. Så er tegnede billeder pr. sekund = FPS
+// uden V-Sync (som i et spil med V-Sync slået fra). Kun sekunder, hvor grafikkortet var fuldt optaget, tæller med.
+let K = 1, hzMax = 0, rafs = 0;
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
   fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
-  warmUntil = performance.now() + 1500; win = []; winStart = performance.now();
+  warmUntil = performance.now() + 3000; win = []; rafs = 0; winStart = performance.now();
 }
 if (resMode) {
   c.style.objectFit = 'contain';
@@ -1682,21 +1686,28 @@ if (resMode) {
 try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); post('/renderer', { r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
 function frame(now){
   if (done) return;
-  const dt = now - last; last = now; frames++; win.push(dt);
-  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const dt = now - last; last = now; frames++;
+  gl.uniform2f(uR, c.width, c.height);
+  const reps = resMode ? K : 1;
+  for (let k = 0; k < reps; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  for (let k = 0; k < reps; k++) win.push(dt / reps);
+  rafs++;
   if (resMode && now - winStart >= 1000) {
-    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms, raf = 1000 * rafs / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    if (now >= warmUntil) post('/fps', { f, ms, p99 });
-    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; winStart = now;
+    if (K === 1) hzMax = Math.max(hzMax, raf);
+    const busy = hzMax > 0 && raf < 0.9 * hzMax;      // grafikkortet nåede ikke at følge med skærmen = fuldt optaget
+    if (now >= warmUntil && busy) post('/fps', { f, ms, p99 });
+    if (!busy) K = Math.min(256, Math.ceil(K * 1.6)); else if (raf < 12 && K > 1) K = Math.max(1, Math.floor(K / 2));
+    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${busy ? fps.toFixed(0) + ' fps' : 'finder grafikkortets grænse…'}<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    win = []; rafs = 0; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
     o.innerHTML = `Opticon GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; winStart = now;
+    win = []; rafs = 0; winStart = now;
   }
   requestAnimationFrame(frame);
 }
@@ -4347,13 +4358,30 @@ function Show-DriverProtection($rows) {
 $ui.BtnDrvOpen.Add_Click({ Start-Process 'windowsdefender://coreisolation' })
 # ---------- MalwareBazaar-nøgle (valgfri, gemt krypteret med Windows DPAPI for denne bruger) ----------
 $MbKeyFile = Join-Path $JobBase 'abusech-key.dat'
+Add-Type -AssemblyName System.Security
 function Get-MbKey {
+  if (-not (Test-Path $MbKeyFile)) { return $null }
   try {
-    if (-not (Test-Path $MbKeyFile)) { return $null }
-    $ss = ConvertTo-SecureString ([IO.File]::ReadAllText($MbKeyFile).Trim()) -ErrorAction Stop
+    $raw = [IO.File]::ReadAllText($MbKeyFile).Trim()
+    if ($raw -like 'v2:*') {   # Windows DPAPI for denne bruger (kan kun læses af dig på denne pc)
+      $bytes = [Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($raw.Substring(3)), [Text.Encoding]::UTF8.GetBytes('Opticon-MB'), 'CurrentUser')
+      return [Text.Encoding]::UTF8.GetString($bytes)
+    }
+    $ss = ConvertTo-SecureString $raw -ErrorAction Stop   # gammelt format (2.38-2.42)
     $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
     try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
-  } catch { return $null }
+  } catch {
+    if (-not $script:MbErrLogged) { Log "MalwareBazaar-nøgle kunne ikke læses: $($_.Exception.Message)"; $script:MbErrLogged = $true }
+    return $null
+  }
+}
+function Save-MbKey([string]$plain) {
+  $enc = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($plain), [Text.Encoding]::UTF8.GetBytes('Opticon-MB'), 'CurrentUser')
+  $tmp = "$MbKeyFile.tmp"
+  [IO.File]::WriteAllText($tmp, 'v2:' + [Convert]::ToBase64String($enc))
+  Move-Item -LiteralPath $tmp -Destination $MbKeyFile -Force
+  $script:MbErrLogged = $false
+  if ((Get-MbKey) -ne $plain) { throw 'Nøglen blev gemt, men kunne ikke læses tilbage.' }
 }
 function Show-MbState {
   $has = [bool](Get-MbKey)
@@ -4389,19 +4417,18 @@ $ui.BtnMbSave.Add_Click({
     $st = if ($results.Count) { [string]$results[0].Status } elseif ($err) { "fejl: $err" } else { 'intet svar' }
     if ($st -eq 'hash_not_found' -or $st -eq 'ok') {
       try {
-        $enc = ConvertFrom-SecureString $ui.MbKeyBox.SecurePassword
-        [IO.File]::WriteAllText($MbKeyFile, $enc)
+        Save-MbKey $ctx.Key
         $ui.MbKeyBox.Clear()
         Log 'MalwareBazaar-nøgle gemt (krypteret)'
         $ui.MbSub.Text = '✓ Nøglen virker og er gemt krypteret. Nye usignerede filer tjekkes nu ved hver scanning.'; $script:MbMsg = $true
-      } catch { $ui.MbSub.Text = "Nøglen virker, men kunne ikke gemmes: $($_.Exception.Message)"; $script:MbMsg = $true }
+      } catch { Log "MalwareBazaar-nøgle kunne ikke gemmes: $($_.Exception.Message)"; $ui.MbSub.Text = "Nøglen virker, men kunne ikke gemmes: $($_.Exception.Message)"; $script:MbMsg = $true }
     } elseif ($st -eq 'auth' -or $st -match '(?i)auth|key') {
       $ui.MbSub.Text = '✗ abuse.ch kender ikke nøglen. Tjek at du har kopieret hele Auth-Key fra din kontoside.'; $script:MbMsg = $true
     } else {
       $ui.MbSub.Text = "✗ Kunne ikke teste nøglen lige nu ($st). Tjek internettet, og prøv igen."; $script:MbMsg = $true
     }
     Show-MbState
-  } $null
+  } @{ Key = $plain }
 })
 $ui.BtnMbRemove.Add_Click({
   if ((Msg 'Fjern MalwareBazaar-nøglen fra denne pc? Det ekstra virustjek slås fra.' 'MalwareBazaar' 'YesNo' 'Question') -ne 'Yes') { return }
@@ -5210,7 +5237,9 @@ function Start-GpuBench($mode) {
     $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'bench') {
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Res = @('1920x1080'); Work = 0; StepSec = 25; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
+    $nat = Get-NativeRes; $script:BenchNativeRes = $(if ($nat -and $nat -ne '1920x1080') { $nat } else { $null })
+    $resL = @('1920x1080'); if ($script:BenchNativeRes) { $resL += $script:BenchNativeRes }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($resL | ForEach-Object { $null }); Res = $resL; Work = 0; StepSec = 25; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
   } elseif ($mode -in 'ocbase', 'occheck') {
     if ($mode -eq 'occheck' -and -not $script:OcBase) { Msg 'Mål udgangspunktet først (trin 1), før du overclocker.' 'OC-tjek' | Out-Null; return }
     if ($mode -eq 'occheck') {
@@ -5256,7 +5285,9 @@ function Start-GpuBench($mode) {
     if ($c.GpuMode -eq 'bench') {
       $script:LastGpuRenderer = if ($res -and -not ($res -is [array])) { [string]$res.Renderer } else { '' }
       $why = if ($err) { $err } elseif ($steps.Count) { $null } elseif ($res -and $res.Lost) { 'grafikdriveren nulstillede testscenen' } elseif ($res -and $res.Aborted) { 'testen blev stoppet' } elseif ($res -and -not $res.FpsPosts) { 'testscenen tegnede ingen billeder (lå den bag et andet vindue?)' } else { 'ingen målinger' }
-      Finish-Bench $(if ($steps.Count) { $steps[0] } else { $null }) $why; return
+      $s1080 = @($steps | Where-Object { $_.Res -eq '1920x1080' })[0]; $sNat = @($steps | Where-Object { $_.Res -and $_.Res -ne '1920x1080' })[0]
+      if (-not $s1080 -and $steps.Count) { $why = 'grafikdelen (1080p) fejlede' }
+      Finish-Bench $s1080 $why $sNat; return
     }
     if ($err -or -not $steps.Count) {
       $msg = if ($err) { $err } elseif ($res -and $res.Lost) { 'Grafikdriveren nulstillede testscenen undervejs.' } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } elseif ($res -and -not $res.FpsPosts) { "Testscenen tegnede ingen billeder. Det sker typisk, hvis testvinduet lå bag et andet vindue. Prøv igen, og klik på testscenen, hvis den ikke kommer forrest.$(if ($res.JsErr) { " (Sidefejl: $($res.JsErr))" })" } else { 'Testscenen gav ingen målinger.' }
@@ -5291,7 +5322,7 @@ function Start-GpuBench($mode) {
       if (-not $j) { return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
-      elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
+      elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(if ($script:BenchNativeRes) { " og $(($script:BenchNativeRes) -replace 'x', '×')" })$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
       elseif ($j.Ctx.GpuMode -like 'oc*') { if ($p -ge 0) { $ui.GpuOcBar.Value = $p }; if ($j.S.Status) { $ui.GpuOcInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'res') { if ($p -ge 0) { $ui.GpuResBar.Value = $p }; if ($j.S.Status) { $ui.GpuResInfo.Text = $j.S.Status } }
       else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
@@ -6228,7 +6259,7 @@ function Show-Bench($r) {
   $ui.BSusSub.Text = $(if ($r.Sustain -ge 95) { 'Holder farten fint, når den bliver varm' } elseif ($r.Sustain -ge 85) { 'Taber lidt fart, når den bliver varm' } else { 'Taber mærkbart fart, når den bliver varm. Tjek køling og støv.' })
   $ui.BRam.Text = "$($r.Ram) GB/s"; $ui.BRamSub.Text = 'kopierer data i hukommelsen'
   $ui.BDisk.Text = "$($r.DiskR) MB/s"; $ui.BDiskSub.Text = "læs · skriv $($r.DiskW) MB/s · $($r.Iops) små læsninger/sek"
-  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { "laveste 1 %: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · Opticons testscene i 1080p" } else { 'grafikdelen blev ikke målt' })
+  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { "laveste 1 %: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · Opticons testscene i 1080p$(if ($r.GpuNative) { " · på din skærm ($(([string]$r.GpuNativeRes) -replace 'x', '×')): $($r.GpuNative) fps" })" } else { 'grafikdelen blev ikke målt' })
   $ui.BtnBenchShare.IsEnabled = [bool]$r.Score
   try { Show-BenchAdvice $r } catch { Log "Råd-fejl: $_" }
   # Forskel i forhold til testen før denne (så du kan se, om en ændring i Optimering hjalp)
@@ -6272,7 +6303,15 @@ $benchTimer.Add_Tick({
   if ($p -ge 0) { $ui.BenchBar.Value = $p * 0.75 }
   if ($j.S.Status) { $ui.BenchStatus.Text = "$($j.S.Status)$(Bench-Remain ([math]::Max(0, $p) * 0.75))" }
 })
-function Finish-Bench($gpuStep, $gpuErr) {
+# Skærmens egen opløsning (det, spil typisk kører i): den største aktive skærm
+function Get-NativeRes {
+  try {
+    $v = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.CurrentHorizontalResolution -gt 0 } | Sort-Object { [int64]$_.CurrentHorizontalResolution * $_.CurrentVerticalResolution } -Descending)[0]
+    if ($v) { return "$($v.CurrentHorizontalResolution)x$($v.CurrentVerticalResolution)" }
+  } catch {}
+  return $null
+}
+function Finish-Bench($gpuStep, $gpuErr, $nativeStep) {
   $b = $script:BenchPart
   $ui.BtnBench.IsEnabled = $true; $ui.BenchBar.Visibility = 'Collapsed'
   try { $win.Activate() | Out-Null } catch {}
@@ -6280,7 +6319,8 @@ function Finish-Bench($gpuStep, $gpuErr) {
   $r = [ordered]@{ V = $BenchTestVersion; Date = (Get-Date).ToString('s'); App = $AppVersion; Hw = $b.Hw
                    Cpu1 = $b.Cpu1; CpuN = $b.CpuN; Sustain = $b.Sustain; Ram = $b.Ram; DiskR = $b.DiskR; DiskW = $b.DiskW; Iops = $b.Iops
                    GpuRenderer = $script:LastGpuRenderer
-                   Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.P1) { [math]::Round([double]$gpuStep.P1) } else { $null }); Score = 0 }
+                   Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.P1) { [math]::Round([double]$gpuStep.P1) } else { $null })
+                   GpuNative = $(if ($nativeStep -and $nativeStep.Fps) { [math]::Round([double]$nativeStep.Fps) } else { $null }); GpuNativeRes = $(if ($nativeStep -and $nativeStep.Fps) { [string]$nativeStep.Res } else { $null }); Score = 0 }
   $r.Score = Bench-Total $r
   $h = @(Get-BenchHist) + @([pscustomobject]$r)
   try { [IO.File]::WriteAllText($BenchHistFile, (ConvertTo-Json -InputObject @($h | Select-Object -Last 50) -Depth 5), (New-Object Text.UTF8Encoding $false)) } catch {}
@@ -6590,8 +6630,14 @@ if (-not $ok -and (Test-Path -LiteralPath $bk)) {
 '@
     $cmd = $tpl.Replace('__PID__', [string]$PID).Replace('__LOG__', $LogFile.Replace("'", "''")).Replace('__DEST__', $PSScriptRoot.Replace("'", "''")).Replace('__BK__', $bk.Replace("'", "''")).Replace('__NEW__', [string]$c.Version).Replace('__OLD__', $AppVersion)
     # Hjælperen gemmes som en almindelig, læsbar .ps1-fil (ingen kodet kommando)
-    $helper = Join-Path $JobRoot 'opdater-genstart.ps1'
-    [IO.File]::WriteAllText($helper, $cmd, (New-Object Text.UTF8Encoding $true))
+    Get-ChildItem $JobRoot -Filter 'opdater-genstart*.ps1' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $helper = Join-Path $JobRoot ('opdater-genstart-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+    try { [IO.File]::WriteAllText($helper, $cmd, (New-Object Text.UTF8Encoding $true)) }
+    catch {
+      Log "Genstart-hjælper kunne ikke gemmes: $($_.Exception.Message)"
+      Msg "Opdateringen til $($c.Version) er installeret. Luk Opticon, og åbn den igen for at bruge den nye version." 'Opdatering' 'OK' 'Information' | Out-Null
+      return
+    }
     Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File `"$helper`""
     $win.Close()
   } @{ Version = $v.version }
