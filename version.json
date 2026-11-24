@@ -1,7 +1,17 @@
 {
-  "version": "2.31",
+  "version": "2.34",
   "date": "2026-11-24",
   "notes": [
+    "Ny: ✅ Hjalp det? – én historik over dine ændringer med måling før og efter",
+    "Opstart måles ved de næste opstarter, oprydning som ledig plads, GPU-profiler i samme test",
+    "Knap: Jeg har ændret noget – kører den store test og sammenligner med testen før",
+    "Grafiktal i opløsningstest, OC-tjek og benchmark hedder nu tegninger/s (ikke FPS), og testversionen er hævet",
+    "Delvise benchmarks får ingen samlet score",
+    "Kun bekræftede GPU-indstillinger indgår i anbefalinger",
+    "Opdateringer skifter og ruller hele pakken samlet",
+    "Rettet: grafiktestene målte ingen FPS, når testvinduet lå bagved",
+    "Rettet: Opticon så sin egen starter som et nyt fund",
+    "Optimering: vælg hvad du vil opnå, og se kun det",
     "Ny: 🏁 Benchmark – én stor test af CPU, hukommelse, disk og grafik med Opticon-score og historik",
     "Sammenlign med andre med samme processor og grafikkort (bærbar og stationær hver for sig), og del dit resultat",
     "Selvreparation: ikonet starter via en lille starter, der sætter den forrige version tilbage, hvis appen har en skrivefejl",
@@ -37,7 +47,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "856A18B29A04C583E31F620FF9CDF4FE03F76DAC5806B48D6584B93A68882797"
+      "sha256": "A770FB0B3EC781B30925EB4839B2748BC6BB90E7E6AE7F68DD65C8F57AA74671"
     },
     {
       "name": "PC-Tjek-Start.ps1",
@@ -45,11 +55,11 @@
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "3539BFFA4320B545E272E67104B0F6342225BC2CC857654AAC6CAF60BD53CDD2"
+      "sha256": "373180DB44C04575125F358E8C298B5B2818B4816D5D16DBB6DE8A276BF227D4"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
-      "sha256": "A6A81083F197E6FC99087C2ABCE16A6B795B2E1198F85F0E96EEE48691C1F84D"
+      "sha256": "C19A066A392787263BF34E898B01A241A7F18E176F0FAAE6C9C9F7BAEF251D9F"
     },
     {
       "name": "PC-Tjek.ico",

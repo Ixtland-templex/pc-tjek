@@ -81,12 +81,12 @@ function Exe-Key($exe) { ([IO.Path]::GetFileNameWithoutExtension([string]$exe)).
 function Get-SmiPath { foreach ($p in "$env:SystemRoot\System32\nvidia-smi.exe", "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe") { if (Test-Path $p) { return $p } }; return $null }
 function Get-GpuPlNow {
   $s = Get-SmiPath; if (-not $s) { return $null }
-  $v = & $s --query-gpu=power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+  $v = & $s -i 0 --query-gpu=power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1
   $d = 0.0
   if ([double]::TryParse(([string]$v).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d) -and $d -gt 0) { return [int][math]::Round($d) }
   return $null
 }
-function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
+function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -i 0 -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
 # Sæt OG bekræft: læs værdien tilbage, før det kaldes en succes
 function Restore-GpuPl($w) {
   if (-not ([int]$w -gt 0)) { return $true }
@@ -693,7 +693,7 @@ if (Test-Path $GpuPlFile) {
   try {
     $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json
     $smi = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
-    if ((Test-Path $smi) -and [int]$g.Watts -gt 0) { $null = & $smi -pl ([int]$g.Watts) 2>&1; VLog 'Vagt' 'info' "Grafikkortets strømgrænse sat til $($g.Pct) % ($($g.Watts) W)" '' '' }
+    if ((Test-Path $smi) -and [int]$g.Watts -gt 0) { $null = & $smi -i 0 -pl ([int]$g.Watts) 2>&1; VLog 'Vagt' 'info' "Grafikkortets strømgrænse sat til $($g.Pct) % ($($g.Watts) W)" '' '' }
   } catch {}
 }
 $timer = New-Object Windows.Threading.DispatcherTimer

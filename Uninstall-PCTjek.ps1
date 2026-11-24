@@ -13,7 +13,12 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Silen
 $appFile = Join-Path $PSScriptRoot 'PC-Tjek-App.ps1'
 if (Test-Path $appFile) {
   Write-Host '  • Sætter alt tilbage, som Opticon har ændret midlertidigt...'
-  & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $appFile -RestoreOnly | Out-Null
+  $out = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $appFile -RestoreOnly
+  if ($LASTEXITCODE -ne 0) {
+    $what = ($out | Where-Object { $_ -like 'MANGLER:*' } | Select-Object -First 1) -replace '^MANGLER:\s*', ''
+    Write-Host "  ⚠ Dette kunne ikke sættes tilbage: $what" -ForegroundColor Yellow
+    Write-Host '    Genstart pc''en: grafikkortets strømgrænse nulstilles ved genstart. Tjek også Indstillinger → System → Meddelelser og Strøm.' -ForegroundColor Yellow
+  } else { Write-Host '  ✓ Alt midlertidigt er sat tilbage' -ForegroundColor Green }
 }
 Unregister-ScheduledTask -TaskName 'PC-Tjek Vagt' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Opticon.lnk')
