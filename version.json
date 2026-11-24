@@ -1,9 +1,11 @@
 {
-  "version": "2.44",
+  "version": "2.45",
   "date": "2026-11-24",
   "notes": [
+    "Grafiktesten måler nu direkte, hvor lang tid grafikkortet bruger pr. billede (FPS uden V-Sync). Mere stabilt, og virker også i din skærms opløsning",
+    "Grafik-feltet viser FPS i din skærms opløsning (fx 2560×1440) som det store tal, og 1080p til sammenligning",
+    "Grafiktal fra før 2.45 sammenlignes ikke med de nye (de var låst til skærmens Hz), og scoren er justeret til den nye måling",
     "Rettet: filer i Opticons låste mappe (C:\\ProgramData\\PC-Tjek) kunne ende helt uden adgang efter en genstart. Det ramte bl.a. MalwareBazaar-nøglen og genstarten efter opdatering. De repareres automatisk nu",
-    "Grafiktesten måler nu grafikkortet og ikke skærmen: scenen tegnes flere gange pr. skærmopdatering, indtil grafikkortet er fuldt optaget (FPS uden V-Sync)",
     "Benchmark tester også grafikken i din skærms egen opløsning (fx 2560×1440 eller 1920×1200), ud over 1080p til sammenligning",
     "Rettet: MalwareBazaar-nøglen blev ikke husket efter genstart (gemmes nu på en ny måde og tjekkes med det samme)",
     "Rettet: appen genstartede ikke selv efter en opdatering",
@@ -71,7 +73,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "779CA1E674DB1DEB05DF57C3F399523EB820051C21D9F7495BE2B426EA182A96"
+      "sha256": "12E5AA23E8F0AAA90FFC6D59CFBD58C7C8D5551BE1FE902CD7AD2D05C9B1B87B"
     },
     {
       "name": "PC-Tjek-Start.ps1",

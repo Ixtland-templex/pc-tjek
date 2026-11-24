@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.44'
+$AppVersion = '2.45'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1673,14 +1673,14 @@ let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, cali
 // Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
 let fw = 0, fh = 0, warmUntil = 0;
 // Skærmen låser normalt billedet til sin Hz (fx 60). For at måle grafikkortet og ikke skærmen tegnes scenen K gange
-// pr. skærmopdatering, og K skrues op, indtil grafikkortet er fuldt optaget. Så er tegnede billeder pr. sekund = FPS
-// uden V-Sync (som i et spil med V-Sync slået fra). Kun sekunder, hvor grafikkortet var fuldt optaget, tæller med.
-let K = 1, hzMax = 0, rafs = 0;
+// i træk, og der ventes, til grafikkortet er færdigt (gl.finish). Tiden pr. billede giver FPS uden V-Sync, ligesom et
+// spil med V-Sync slået fra. K justeres, så hver omgang tager ca. 10 ms.
+let K = 1, rafs = 0, draws = 0, gpuMs = 0;
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
   fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
-  warmUntil = performance.now() + 3000; win = []; rafs = 0; winStart = performance.now();
+  warmUntil = performance.now() + 2500; win = []; rafs = 0; draws = 0; gpuMs = 0; winStart = performance.now();
 }
 if (resMode) {
   c.style.objectFit = 'contain';
@@ -1693,19 +1693,23 @@ function frame(now){
   if (done) return;
   const dt = now - last; last = now; frames++;
   gl.uniform2f(uR, c.width, c.height);
-  const reps = resMode ? K : 1;
-  for (let k = 0; k < reps; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
-  for (let k = 0; k < reps; k++) win.push(dt / reps);
   rafs++;
+  if (resMode) {
+    const ts = performance.now();
+    for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+    gl.finish();                                    // vent, til grafikkortet har tegnet alle K billeder
+    const g = Math.max(0.01, performance.now() - ts);
+    draws += K; gpuMs += g; win.push(g / K);
+    if (g < 7 && K < 1024) K = Math.ceil(K * 1.4); else if (g > 16 && K > 1) K = Math.max(1, Math.floor(K * 0.7));
+  } else {
+    gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); win.push(dt);
+  }
   if (resMode && now - winStart >= 1000) {
-    const ms = now - winStart, f = win.length, fps = 1000 * f / ms, raf = 1000 * rafs / ms;
+    const f = draws, ms = gpuMs, fps = ms > 0 ? 1000 * f / ms : 0;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    if (K === 1) hzMax = Math.max(hzMax, raf);
-    const busy = hzMax > 0 && raf < 0.9 * hzMax;      // grafikkortet nåede ikke at følge med skærmen = fuldt optaget
-    if (now >= warmUntil && busy) post('/fps', { f, ms, p99 });
-    if (!busy) K = Math.min(256, Math.ceil(K * 1.6)); else if (raf < 12 && K > 1) K = Math.max(1, Math.floor(K / 2));
-    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${busy ? fps.toFixed(0) + ' fps' : 'finder grafikkortets grænse…'}<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; rafs = 0; winStart = now;
+    if (now >= warmUntil && f > 0) post('/fps', { f, ms, p99 });
+    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    win = []; rafs = 0; draws = 0; gpuMs = 0; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
@@ -2540,7 +2544,7 @@ $BenchScript = {
                 <TextBlock Name="BDiskSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
               </StackPanel></Border>
               <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
-                <TextBlock Text="GRAFIK · FPS (1080p-SCENE)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BGpuTitle" Text="GRAFIK · FPS" FontSize="11" Foreground="{StaticResource Muted}"/>
                 <TextBlock Name="BGpu" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
                 <TextBlock Name="BGpuSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
               </StackPanel></Border>
@@ -6098,8 +6102,10 @@ $ui.BtnVendorOpen.Add_Click({ Open-VendorTool })
 # =====================================================================
 $BenchTestVersion = 3   # 3: grafik måles som rigtige FPS uden skærmens Hz-loft; delvise tests får ingen samlet score
 $BenchHistFile = Join-Path $OutDir 'benchmark-historik.json'
-$BenchRef = @{ Cpu1 = 1000; CpuN = 8000; Ram = 15; DiskR = 2000; Gpu = 60 }   # faste pejlemærker: 1000 point i alt
+$BenchRef = @{ Cpu1 = 1000; CpuN = 8000; Ram = 15; DiskR = 2000; Gpu = 1000 }   # Gpu: FPS uden V-Sync i 1080p (målemetode 2)
+$BenchGpuV = 2   # grafikkens målemetode: 2 = uden skærmlås (fra 2.45)   # faste pejlemærker: 1000 point i alt
 function Bench-Total($r) {
+  if ([int]$r.GpuV -ne $BenchGpuV) { return $null }   # grafik målt med den gamle metode (låst til skærmen): ingen samlet score
   $parts = @(); foreach ($k in 'Cpu1', 'CpuN', 'Ram', 'DiskR', 'Gpu') { if ($r.$k -and [double]$r.$k -gt 0) { $parts += [math]::Log([double]$r.$k / $BenchRef[$k]) } else { return $null } }   # mangler en del: ingen samlet score
   return [int][math]::Round(1000 * [math]::Exp(($parts | Measure-Object -Average).Average))
 }
@@ -6245,7 +6251,7 @@ function Get-BenchAdvice($r) {
     if ([string]$r.GpuRenderer -notmatch "(?i)$vend") { & $add "Grafiktesten kørte på $($r.GpuRenderer) og ikke på dit $($hw.Gpu)." 'Windows valgte den indbyggede grafik til browseren.' "Indstillinger → System → Skærm → Grafik → vælg Microsoft Edge (og dine spil) → 'Høj ydeevne'." }
   }
   try { if (Test-BgRecording) { [void]$out.Add("ℹ  Optagelse i baggrunden (Game Bar) er slået til. Den optager hele tiden, mens du spiller, og kan give små hak. Slå den fra under Ydelse og helbred, hvis du ikke bruger den.") } } catch {}
-  if ($r.Gpu -and (Test-HzCap ([pscustomobject]@{ Fps = $r.Gpu; P1 = $r.GpuLow }))) { [void]$out.Add("ℹ  Grafikken lå lige på $($r.Gpu) fps, som er en almindelig skærmfrekvens. Tallet kan være begrænset af skærmen og ikke af grafikkortet.") }
+  if ($r.Gpu -and [int]$r.GpuV -ne $BenchGpuV -and (Test-HzCap ([pscustomobject]@{ Fps = $r.Gpu; P1 = $r.GpuLow }))) { [void]$out.Add("ℹ  Grafikken lå lige på $($r.Gpu) fps, som er en almindelig skærmfrekvens. Tallet kan være begrænset af skærmen og ikke af grafikkortet.") }
   if ((Get-Smi) -and (Test-Path $GpuPlFile)) { try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; [void]$out.Add("ℹ  Du har valgt en lavere strømgrænse til grafikkortet ($($g.Pct) %, $($g.Watts) W). Det sparer strøm, men kan koste lidt FPS. Nulstil den under Optimering, hvis du vil se kortets fulde ydelse.") } catch {} }
   return @($out)
 }
@@ -6265,7 +6271,16 @@ function Show-Bench($r) {
   $ui.BSusSub.Text = $(if ($r.Sustain -ge 95) { 'Holder farten fint, når den bliver varm' } elseif ($r.Sustain -ge 85) { 'Taber lidt fart, når den bliver varm' } else { 'Taber mærkbart fart, når den bliver varm. Tjek køling og støv.' })
   $ui.BRam.Text = "$($r.Ram) GB/s"; $ui.BRamSub.Text = 'kopierer data i hukommelsen'
   $ui.BDisk.Text = "$($r.DiskR) MB/s"; $ui.BDiskSub.Text = "læs · skriv $($r.DiskW) MB/s · $($r.Iops) små læsninger/sek"
-  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { "laveste 1 %: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · Opticons testscene i 1080p$(if ($r.GpuNative) { " · på din skærm ($(([string]$r.GpuNativeRes) -replace 'x', '×')): $($r.GpuNative) fps" })" } else { 'grafikdelen blev ikke målt' })
+  $sameGpuV = ([int]$r.GpuV -eq $BenchGpuV)
+  if ($r.GpuNative) {
+    $ui.BGpuTitle.Text = "GRAFIK · FPS PÅ DIN SKÆRM ($(([string]$r.GpuNativeRes) -replace 'x', '×'))"
+    $ui.BGpu.Text = "$($r.GpuNative) fps"
+    $ui.BGpuSub.Text = "1080p til sammenligning: $($r.Gpu) fps · uden V-Sync, i Opticons testscene"
+  } else {
+    $ui.BGpuTitle.Text = 'GRAFIK · FPS (1080p)'
+    $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' })
+    $ui.BGpuSub.Text = $(if ($r.Gpu -and $sameGpuV) { "laveste sekund: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · uden V-Sync, i Opticons testscene" } elseif ($r.Gpu) { 'målt med den gamle metode (låst til skærmens Hz)' } else { 'grafikdelen blev ikke målt' })
+  }
   $ui.BtnBenchShare.IsEnabled = [bool]$r.Score
   try { Show-BenchAdvice $r } catch { Log "Råd-fejl: $_" }
   # Forskel i forhold til testen før denne (så du kan se, om en ændring i Optimering hjalp)
@@ -6276,8 +6291,9 @@ function Show-Bench($r) {
     $dl = { param($now, $was) if (-not $now -or -not $was -or [double]$was -le 0) { return '' }; $d = 100 * ([double]$now - [double]$was) / [double]$was; if ([math]::Abs($d) -lt 1.5) { return "  ·  ≈ som sidst" }; "  ·  $(if ($d -gt 0) { '▲' } else { '▼' }) $('{0:+0;-0}' -f $d) % siden sidst" }
     $ui.BCpu1Sub.Text += (& $dl $r.Cpu1 $prev.Cpu1); $ui.BCpuNSub.Text += (& $dl $r.CpuN $prev.CpuN)
     $ui.BRamSub.Text += (& $dl $r.Ram $prev.Ram); $ui.BDiskSub.Text += (& $dl $r.DiskR $prev.DiskR)
-    if ($prev.V -eq $r.V) { $ui.BGpuSub.Text += (& $dl $r.Gpu $prev.Gpu) }   # grafik blev målt anderledes i testversion 1
-    if ($r.Score -and $prev.Score -and $prev.V -eq $r.V) { $ui.BenchScoreSub.Text = "Testet $(([datetime]$r.Date).ToString('dd-MM HH:mm')).$((& $dl $r.Score $prev.Score) -replace '^  ·  ', ' ') Sidste test: $($prev.Score) point ($(([datetime]$prev.Date).ToString('dd-MM HH:mm')))." }
+    $gpuSame = ($prev.V -eq $r.V -and [int]$prev.GpuV -eq [int]$r.GpuV)   # grafik blev målt anderledes før 2.45
+    if ($gpuSame) { $ui.BGpuSub.Text += (& $dl $(if ($r.GpuNative -and $prev.GpuNative -and $prev.GpuNativeRes -eq $r.GpuNativeRes) { $r.GpuNative } else { $r.Gpu }) $(if ($r.GpuNative -and $prev.GpuNative -and $prev.GpuNativeRes -eq $r.GpuNativeRes) { $prev.GpuNative } else { $prev.Gpu })) }
+    if ($r.Score -and $prev.Score -and $gpuSame) { $ui.BenchScoreSub.Text = "Testet $(([datetime]$r.Date).ToString('dd-MM HH:mm')).$((& $dl $r.Score $prev.Score) -replace '^  ·  ', ' ') Sidste test: $($prev.Score) point ($(([datetime]$prev.Date).ToString('dd-MM HH:mm')))." }
   }
 }
 function Start-Bench {
@@ -6325,7 +6341,7 @@ function Finish-Bench($gpuStep, $gpuErr, $nativeStep) {
   $r = [ordered]@{ V = $BenchTestVersion; Date = (Get-Date).ToString('s'); App = $AppVersion; Hw = $b.Hw
                    Cpu1 = $b.Cpu1; CpuN = $b.CpuN; Sustain = $b.Sustain; Ram = $b.Ram; DiskR = $b.DiskR; DiskW = $b.DiskW; Iops = $b.Iops
                    GpuRenderer = $script:LastGpuRenderer
-                   Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.P1) { [math]::Round([double]$gpuStep.P1) } else { $null })
+                   Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.FpsMin) { [math]::Round([double]$gpuStep.FpsMin) } else { $null }); GpuV = $BenchGpuV
                    GpuNative = $(if ($nativeStep -and $nativeStep.Fps) { [math]::Round([double]$nativeStep.Fps) } else { $null }); GpuNativeRes = $(if ($nativeStep -and $nativeStep.Fps) { [string]$nativeStep.Res } else { $null }); Score = 0 }
   $r.Score = Bench-Total $r
   $h = @(Get-BenchHist) + @([pscustomobject]$r)
@@ -6334,7 +6350,7 @@ function Finish-Bench($gpuStep, $gpuErr, $nativeStep) {
   Show-Bench $script:BenchLast; Show-BenchHist
   if (-not $r.Gpu -and $gpuErr) { $ui.BGpuSub.Text = "ikke målt: $gpuErr" }
   $prev = if ($h.Count -ge 2) { $h[-2] } else { $null }
-  $ui.BenchStatus.Text = "$(if ($r.Score) { "✓ Færdig: $($r.Score) point" } else { '⚠ Delvis test: ikke alle dele blev målt' })$(if ($r.Score -and $prev -and $prev.Score -and $prev.V -eq $r.V) { " (sidst: $($prev.Score), $('{0:+0;-0;0}' -f (100 * ($r.Score - $prev.Score) / [math]::Max(1, $prev.Score))) %)" })$(if ($gpuErr) { " · grafikdelen fejlede: $gpuErr" })"
+  $ui.BenchStatus.Text = "$(if ($r.Score) { "✓ Færdig: $($r.Score) point" } else { '⚠ Delvis test: ikke alle dele blev målt' })$(if ($r.Score -and $prev -and $prev.Score -and $prev.V -eq $r.V -and [int]$prev.GpuV -eq [int]$r.GpuV) { " (sidst: $($prev.Score), $('{0:+0;-0;0}' -f (100 * ($r.Score - $prev.Score) / [math]::Max(1, $prev.Score))) %)" })$(if ($gpuErr) { " · grafikdelen fejlede: $gpuErr" })"
   try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
   try { Complete-BenchChange $r } catch { Log "Hjalp det-fejl: $_" }
   Log "Benchmark: $(if ($r.Score) { "$($r.Score) point" } else { 'delvis test' })"
@@ -6350,7 +6366,7 @@ function Load-BenchCompare {
     $all = @($res | ForEach-Object { $_ } | Where-Object { $_ -and $_.v -eq $BenchTestVersion -and -not $_.battery })
     $myCpu = Norm-Hw $me.Hw.Cpu; $myGpu = Norm-Hw $me.Hw.Gpu; $myLap = [bool]$me.Hw.Laptop
     $sameCpu = @($all | Where-Object { (Norm-Hw $_.cpu) -eq $myCpu -and [bool]$_.laptop -eq $myLap })
-    $sameGpu = @($all | Where-Object { (Norm-Hw $_.gpu) -eq $myGpu -and [bool]$_.laptop -eq $myLap })
+    $sameGpu = @($all | Where-Object { (Norm-Hw $_.gpu) -eq $myGpu -and [bool]$_.laptop -eq $myLap -and $(try { [version]([string]$_.app) -ge [version]'2.45' } catch { $false }) })
     $med = { param($list, $prop) $x = @($list | ForEach-Object { $_.scores.$prop } | Where-Object { $_ -and [double]$_ -gt 0 } | ForEach-Object { [double]$_ } | Sort-Object); if (-not $x.Count) { return $null }; if ($x.Count % 2) { $x[[int][math]::Floor($x.Count / 2)] } else { ($x[$x.Count / 2 - 1] + $x[$x.Count / 2]) / 2 } }
     $kind = if ($myLap) { 'bærbare' } else { 'stationære' }
     $defs = @(
