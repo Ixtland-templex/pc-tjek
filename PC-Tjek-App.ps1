@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.36'
+$AppVersion = '2.37'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1038,6 +1038,14 @@ $SecScript = {
       $pua = (Get-MpPreference -ErrorAction SilentlyContinue).PUAProtection
       if ($pua -eq 1) { Add-Sec 'pua' 2 'Bloker uønskede programmer' 'Til' 'Stopper adware og skjulte cryptominere i installere' '' '' '' }
       else { Add-Sec 'pua' 1 'Bloker uønskede programmer' 'Fra' 'Gratis programmer har ofte adware, værktøjslinjer eller cryptominere med i installeren. Defender kan stoppe dem.' 'Opticon kan slå det til for dig. Det ændrer ikke dine programmer.' 'pua' 'windowsdefender://appbrowser' }
+      # Microsofts "standardbeskyttelse": 3 ASR-regler, som Microsoft anbefaler at slå til uden test
+      $asrStd = @('56a863a9-875e-4185-98a7-b882c64b5ce5', '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2', 'e6db77e5-3df2-4cf1-b95a-636979351e5b')
+      $mpp = Get-MpPreference -ErrorAction SilentlyContinue
+      $ids = @($mpp.AttackSurfaceReductionRules_Ids | ForEach-Object { ([string]$_).ToLowerInvariant() }); $acts = @($mpp.AttackSurfaceReductionRules_Actions)
+      $asrOn = 0
+      foreach ($g in $asrStd) { $ix = [array]::IndexOf($ids, $g); if ($ix -ge 0 -and $ix -lt $acts.Count -and @(1, 6) -contains [int]$acts[$ix]) { $asrOn++ } }
+      if ($asrOn -eq $asrStd.Count) { Add-Sec 'asr' 2 'Ekstra Defender-regler (ASR)' 'Til (3 af 3)' 'Stopper misbrug af sårbare drivere, tyveri af adgangskoder fra hukommelsen og skjult autostart via WMI' '' '' '' }
+      else { Add-Sec 'asr' 1 'Ekstra Defender-regler (ASR)' "$asrOn af 3 slået til" 'Tre regler, som Microsoft anbefaler alle at slå til: de stopper misbrug af sårbare drivere, tyveri af adgangskoder fra hukommelsen og skjult autostart via WMI. De mærkes normalt ikke i hverdagen.' 'Opticon kan slå de tre regler til. Et meget gammelt RGB-, blæser- eller overclock-værktøj kan blive blokeret, indtil du opdaterer det. Bliver noget blokeret, viser Windows Sikkerhed en besked om det.' 'asr' '' }
     }
   } catch { Add-Sec 'av' 3 'Antivirus' 'Kunne ikke læses' '' '' '' 'windowsdefender://threat' }
 
@@ -1154,6 +1162,12 @@ $SecFixScript = {
   switch ($id) {
     'sigs'      { Update-MpSignature -ErrorAction Stop; return 'Virusdefinitioner opdateret.' }
     'pua'       { Set-MpPreference -PUAProtection Enabled -ErrorAction Stop; return 'Blokering af uønskede programmer er slået til.' }
+    'asr'       {
+      foreach ($g in '56a863a9-875e-4185-98a7-b882c64b5ce5', '9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2', 'e6db77e5-3df2-4cf1-b95a-636979351e5b') {
+        Add-MpPreference -AttackSurfaceReductionRules_Ids $g -AttackSurfaceReductionRules_Actions Enabled -ErrorAction Stop
+      }
+      return 'De 3 ekstra Defender-regler er slået til.'
+    }
     'fw'        { Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True -ErrorAction Stop; return 'Firewall er slået til på alle netværk.' }
     'uac'       {
       $k = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
@@ -1261,6 +1275,123 @@ $DrvScanScript = {
   }
   $sync.Progress = 1.0
   return [pscustomobject]@{ Hits = @($hits); Checked = $checked; ListAge = $listAge; Lists = ($sets['malicious'].Count + $sets['vulnerable'].Count) }
+}
+
+# =====================================================================
+#  Mål i mit spil: Intel PresentMon (github.com/GameTechDev/PresentMon, MIT)
+# =====================================================================
+$GameMeasureScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $tools = [string]$arg.Tools
+  if (-not (Test-Path $tools)) { New-Item -ItemType Directory -Force $tools | Out-Null }
+  $pm = Join-Path $tools 'PresentMon.exe'
+  function Test-IntelSigned($p) {
+    if (-not (Test-Path $p)) { return $false }
+    $sig = Get-AuthenticodeSignature -FilePath $p
+    return ($sig.Status -eq 'Valid' -and [string]$sig.SignerCertificate.Subject -match 'Intel')
+  }
+  if (-not (Test-IntelSigned $pm)) {
+    $sync.Status = 'Henter Intel PresentMon (kun første gang)...'
+    $url = $null
+    try {
+      $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/GameTechDev/PresentMon/releases?per_page=15' -UseBasicParsing -TimeoutSec 20 -Headers @{ 'User-Agent' = 'Opticon' }
+      foreach ($r in @($rel)) {
+        if ($r.prerelease -or $r.draft) { continue }
+        $a = @($r.assets | Where-Object { $_.name -match '^PresentMon-[\d.]+-x64\.exe$' })
+        if ($a.Count) { $url = $a[0].browser_download_url; break }
+      }
+    } catch {}
+    if (-not $url) { $url = 'https://github.com/GameTechDev/PresentMon/releases/download/v2.3.1/PresentMon-2.3.1-x64.exe' }
+    $tmp = Join-Path $tools 'PresentMon-ny.exe'
+    $wc = New-Object Net.WebClient; $wc.Headers['User-Agent'] = 'Opticon'
+    $wc.DownloadFile($url, $tmp)
+    if (-not (Test-IntelSigned $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw 'PresentMon-filen var ikke gyldigt signeret af Intel, så Opticon brugte den ikke.' }
+    Move-Item $tmp $pm -Force
+  }
+
+  $dur = [int]$arg.Seconds
+  for ($i = 10; $i -gt 0; $i--) { $sync.Status = "Skift til dit spil nu. Målingen starter om $i sek..."; $sync.Progress = -1.0; Start-Sleep 1 }
+  Get-ChildItem $tools -Filter 'capture-*.csv' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 2 | Remove-Item -Force -ErrorAction SilentlyContinue
+  $csv = Join-Path $tools ('capture-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.csv')
+  try { [Media.SystemSounds]::Asterisk.Play() } catch {}
+  $pmArgs = @('--output_file', ('"' + $csv + '"'), '--timed', [string]$dur, '--terminate_after_timed', '--stop_existing_session', '--session_name', 'Opticon', '--no_console_stats', '--no_track_input')
+  $p = Start-Process -FilePath $pm -ArgumentList $pmArgs -WindowStyle Hidden -PassThru
+  $t0 = Get-Date
+  while (-not $p.HasExited) {
+    $el = ((Get-Date) - $t0).TotalSeconds
+    $sync.Status = "Måler dit spil... $([math]::Max(0, [int]($dur - $el))) sek tilbage"
+    $sync.Progress = [double][math]::Min(1.0, $el / $dur)
+    if ($el -gt $dur + 30) { try { $p.Kill() } catch {}; break }
+    Start-Sleep -Milliseconds 500
+  }
+  try { [Media.SystemSounds]::Exclamation.Play() } catch {}
+  Start-Sleep -Milliseconds 500
+  if (-not (Test-Path $csv)) { throw "PresentMon gemte ingen måling (kode $($p.ExitCode))." }
+
+  $sync.Status = 'Regner resultatet ud...'
+  $lines = [IO.File]::ReadAllLines($csv)
+  if ($lines.Count -lt 30) { throw 'Fandt næsten ingen billeder. Var spillet i gang og i forgrunden, mens den målte?' }
+  $hdr = $lines[0].Split(',')
+  function Find-Col([string[]]$names) { foreach ($nm in $names) { $ix = [array]::IndexOf($hdr, $nm); if ($ix -ge 0) { return $ix } }; return -1 }
+  $iApp = Find-Col @('Application', 'ProcessName')
+  $iFt = Find-Col @('MsBetweenPresents', 'FrameTime', 'MsBetweenAppStart')
+  $iGpu = Find-Col @('MsGPUBusy', 'GPUBusy')
+  $iCpu = Find-Col @('MsCPUBusy', 'CPUBusy')
+  $iMode = Find-Col @('PresentMode')
+  $iSync = Find-Col @('SyncInterval')
+  $iRt = Find-Col @('PresentRuntime')
+  if ($iApp -lt 0 -or $iFt -lt 0) { throw 'Kunne ikke læse PresentMons resultat (ukendte kolonner).' }
+  $skip = '(?i)^(dwm|explorer|powershell|pwsh|conhost|msedge|msedgewebview2|chrome|firefox|opera|brave|discord|steamwebhelper|steam|epicgameslauncher|eadesktop|battle\.net|overwolf|nvcontainer|nvidia overlay|nvidia app|applicationframehost|searchhost|searchapp|startmenuexperiencehost|textinputhost|shellexperiencehost|ms-teams|teams|spotify|obs64|code|windowsterminal|gamebar|xboxgamebar|xboxpcapp|presentmon.*|lghub|rtss|widgets|photos|mspaint|notepad|claude|chatgpt|codex)(\.exe)?$'
+  $count = @{}
+  for ($i = 1; $i -lt $lines.Count; $i++) {
+    $c = $lines[$i].Split(',')
+    if ($c.Count -le $iFt) { continue }
+    $a = $c[$iApp]
+    if ($a -match $skip) { continue }
+    $count[$a] = 1 + [int]$count[$a]
+  }
+  if (-not $count.Count) { throw 'Fandt intet spil i målingen. Var spillet i forgrunden, mens den målte?' }
+  $game = ($count.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key
+
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $ft = New-Object 'System.Collections.Generic.List[double]'
+  $gb = 0.0; $ng = 0; $cb = 0.0; $nc = 0; $vs = 0; $nAll = 0; $modes = @{}; $rt = ''
+  for ($i = 1; $i -lt $lines.Count; $i++) {
+    $c = $lines[$i].Split(',')
+    if ($c.Count -le $iFt -or $c[$iApp] -ne $game) { continue }
+    $v = 0.0
+    if (-not [double]::TryParse($c[$iFt], [Globalization.NumberStyles]::Float, $inv, [ref]$v) -or $v -le 0 -or $v -gt 2000) { continue }
+    $ft.Add($v); $nAll++
+    $w = 0.0
+    if ($iGpu -ge 0 -and $c.Count -gt $iGpu -and [double]::TryParse($c[$iGpu], [Globalization.NumberStyles]::Float, $inv, [ref]$w)) { $gb += $w; $ng++ }
+    if ($iCpu -ge 0 -and $c.Count -gt $iCpu -and [double]::TryParse($c[$iCpu], [Globalization.NumberStyles]::Float, $inv, [ref]$w)) { $cb += $w; $nc++ }
+    if ($iSync -ge 0 -and $c.Count -gt $iSync -and $c[$iSync] -match '^[1-9]') { $vs++ }
+    if ($iMode -ge 0 -and $c.Count -gt $iMode) { $modes[$c[$iMode]] = 1 + [int]$modes[$c[$iMode]] }
+    if (-not $rt -and $iRt -ge 0 -and $c.Count -gt $iRt) { $rt = $c[$iRt] }
+  }
+  if ($ft.Count -lt 30) { throw "For få billeder fra $game til en måling. Prøv igen, og bliv inde i spillet hele tiden." }
+  $arr = $ft.ToArray(); [array]::Sort($arr)
+  $total = 0.0; foreach ($v in $arr) { $total += $v }
+  $avgFt = $total / $arr.Count
+  $med = $arr[[int][math]::Floor(0.5 * ($arr.Count - 1))]
+  $p99 = $arr[[int][math]::Floor(0.99 * ($arr.Count - 1))]
+  $p999 = $arr[[int][math]::Floor(0.999 * ($arr.Count - 1))]
+  $hakLim = [math]::Max(2.5 * $med, $med + 12)
+  $hak = 0; foreach ($v in $arr) { if ($v -ge $hakLim) { $hak++ } }
+  $secs = $total / 1000.0
+  $gpuShare = if ($ng) { ($gb / $ng) / $avgFt } else { $null }
+  $cpuShare = if ($nc) { ($cb / $nc) / $avgFt } else { $null }
+  $vsShare = if ($nAll) { $vs / $nAll } else { 0 }
+  $limit = if ($null -eq $gpuShare) { 'ukendt' } elseif ($gpuShare -ge 0.9) { 'gpu' } elseif ($null -ne $cpuShare -and $cpuShare -ge 0.85) { 'cpu' } elseif ($gpuShare -lt 0.8) { 'cap' } else { 'mixed' }
+  $mode = if ($modes.Count) { ($modes.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1).Key } else { '' }
+  return [pscustomobject]@{
+    Date = (Get-Date).ToString('o'); Game = ($game -replace '(?i)\.exe$', ''); Seconds = [math]::Round($secs, 1); Frames = $arr.Count
+    Fps = [math]::Round(1000.0 / $avgFt, 1); Low1 = [math]::Round(1000.0 / $p99, 1); Low01 = [math]::Round(1000.0 / $p999, 1)
+    Hak = $hak; HakMin = [math]::Round($hak / [math]::Max(0.1, $secs / 60.0), 1)
+    Limit = $limit; GpuShare = $(if ($null -ne $gpuShare) { [math]::Round($gpuShare * 100) } else { $null }); CpuShare = $(if ($null -ne $cpuShare) { [math]::Round($cpuShare * 100) } else { $null })
+    VSync = [math]::Round($vsShare * 100); Mode = $mode; Runtime = $rt
+  }
 }
 
 $UpdateCheckScript = {
@@ -2371,6 +2502,39 @@ namespace OptiBench
             <StackPanel>
               <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                  <ComboBox Name="GameDur" Width="110" Margin="0,0,8,0" SelectedIndex="1">
+                    <ComboBoxItem Content="30 sek"/><ComboBoxItem Content="60 sek"/><ComboBoxItem Content="2 min"/>
+                  </ComboBox>
+                  <Button Name="BtnGameMeasure" Content="🎮  Mål i mit spil" Style="{StaticResource Primary}" Margin="0"/>
+                </StackPanel>
+                <StackPanel>
+                  <TextBlock Text="🎮  Mål i mit spil" FontSize="16" FontWeight="SemiBold"/>
+                  <TextBlock Name="GameSub" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Rigtig FPS, 1 % low og hak i dit eget spil, målt med Intels gratis PresentMon. Start spillet, tryk på knappen, og skift til spillet. Du hører et bip, når målingen starter, og igen når den stopper."/>
+                </StackPanel>
+              </DockPanel>
+              <UniformGrid Name="GameTiles" Columns="4" Margin="0,12,0,0" Visibility="Collapsed">
+                <StackPanel Margin="0,0,10,0"><TextBlock Text="GENNEMSNIT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameFps" FontSize="24" FontWeight="Bold"/><TextBlock Name="GameFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                <StackPanel Margin="0,0,10,0"><TextBlock Text="1 % LOW" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameLow" FontSize="24" FontWeight="Bold"/><TextBlock Name="GameLowSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                <StackPanel Margin="0,0,10,0"><TextBlock Text="HAK PR. MINUT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameHak" FontSize="24" FontWeight="Bold"/><TextBlock Name="GameHakSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                <StackPanel><TextBlock Text="HVAD BREMSER?" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameLimit" FontSize="18" FontWeight="Bold" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel>
+              </UniformGrid>
+              <TextBlock Name="GameAdvice" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,12,0,0" LineHeight="21" Foreground="#C3CAD6"/>
+              <DataGrid Name="GridGameHist" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="220" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="DATO" Binding="{Binding Navn}" Width="1.1*"/>
+                  <DataGridTextColumn Header="SPIL" Binding="{Binding Gruppe}" Width="1.3*"/>
+                  <DataGridTextColumn Header="FPS" Binding="{Binding Info}" Width="0.8*"/>
+                  <DataGridTextColumn Header="1 % LOW" Binding="{Binding Status}" Width="0.8*"/>
+                  <DataGridTextColumn Header="HAK/MIN" Binding="{Binding Sti}" Width="0.7*"/>
+                  <DataGridTextColumn Header="MOD SIDST" Binding="{Binding Note}" Width="1.6*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
                   <Button Name="BtnBenchGb" Content="🔎  Se andre i Geekbench"/>
                   <Button Name="BtnBenchShare" Content="🌍  Del mit resultat" Style="{StaticResource Primary}" Margin="0" IsEnabled="False"/>
                 </StackPanel>
@@ -3210,6 +3374,7 @@ namespace OptiBench
           <Button Name="BtnPowerHigh" Content="⚡  Strømplan: Høj ydelse"/>
           <Button Name="BtnPowerBal" Content="🍃  Strømplan: Balanceret"/>
           <Button Name="BtnGameMode" Content="🎮  Slå spiltilstand til"/>
+          <Button Name="BtnDvrOff" Content="🎥  Slå baggrundsoptagelse fra" IsEnabled="False"/>
           <Button Name="BtnOfflineScan" Content="🛡  Defender Offline-scan"/>
         </WrapPanel>
       </Grid>
@@ -4054,12 +4219,15 @@ function Load-Health {
   [void]$rows.Add((HRow $(if ($script:GameModeOn) { 2 } else { 1 }) 'Spiltilstand' $(if ($script:GameModeOn) { 'Til' } else { 'Fra' }) $(if ($script:GameModeOn) { 'Windows prioriterer spil' } else { 'Slå den til: Windows prioriterer spil og pauser opdateringer under spil' })))
   $hags = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
   [void]$rows.Add((HRow $(if ($hags -eq 2) { 2 } else { 3 }) 'Hardware-accelereret GPU-planlægning' $(if ($hags -eq 2) { 'Til' } else { 'Fra' }) 'Kan slås til i Indstillinger → Skærm → Grafik (kræver genstart). Giver lavere latens i nogle spil'))
+  $script:DvrOn = Test-BgRecording
+  [void]$rows.Add((HRow $(if ($script:DvrOn) { 1 } else { 2 }) 'Optagelse i baggrunden (Game Bar)' $(if ($script:DvrOn) { 'Til' } else { 'Fra' }) $(if ($script:DvrOn) { 'Optager hele tiden de sidste minutter af dine spil. Det holder grafikkortets videochip i gang og kan give små hak. Slå den fra, hvis du ikke bruger "Optag hvad der skete"' } else { 'Godt: intet optages i baggrunden, mens du spiller' })))
   $boot = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 -ErrorAction SilentlyContinue |
     ForEach-Object { (([xml]$_.ToXml()).Event.EventData.Data | Where-Object Name -eq 'BootTime').'#text' }
   if ($boot) { $bs = [math]::Round([int]$boot / 1000); [void]$rows.Add((HRow $(if ($bs -lt 40) { 2 } elseif ($bs -lt 90) { 1 } else { 0 }) 'Seneste opstartstid' "$bs sek" $(if ($bs -lt 40) { 'Hurtig' } else { 'Langsom: slå opstartsprogrammer fra under Opstart' }))) }
   $ui.GridHealth.ItemsSource = @($rows)
   $ui.BtnPowerHigh.IsEnabled = -not $script:PlanIsHigh
   $ui.BtnGameMode.IsEnabled = -not $script:GameModeOn
+  $ui.BtnDvrOff.IsEnabled = [bool]$script:DvrOn
   $script:HealthLoaded = $true
 }
 $ui.BtnHealthRefresh.Add_Click({ Load-Health; try { Show-Reboot; Show-Boot } catch {}; Show-Crashes })
@@ -4076,6 +4244,19 @@ $ui.BtnGameMode.Add_Click({
   New-Item 'HKCU:\Software\Microsoft\GameBar' -Force -ErrorAction SilentlyContinue | Out-Null
   Set-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -Value 1 -Type DWord
   Log 'Spiltilstand til'; Load-Health
+})
+function Test-BgRecording {
+  $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Name HistoricalCaptureEnabled -ErrorAction SilentlyContinue).HistoricalCaptureEnabled
+  return ($v -eq 1)
+}
+$ui.BtnDvrOff.Add_Click({
+  try {
+    New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Name HistoricalCaptureEnabled -Value 0 -Type DWord -ErrorAction Stop
+    Log 'Baggrundsoptagelse slået fra'
+    $ui.StatusText.Text = 'Baggrundsoptagelse er slået fra. Du kan stadig optage med Win+Alt+R.'
+  } catch { Msg "Det lykkedes ikke: $($_.Exception.Message)" | Out-Null }
+  Load-Health
 })
 $ui.BtnOfflineScan.Add_Click({ Start-Process 'windowsdefender://threatsettings' })
 
@@ -5820,6 +6001,7 @@ function Load-Bench {
   $h = @(Get-BenchHist)
   if ($h.Count -and -not $script:BenchLast) { $script:BenchLast = $h[-1]; Show-Bench $script:BenchLast; Load-BenchCompare }
   Show-BenchHist
+  try { Show-GameHist } catch { Log "Spil-historik: $_" }
 }
 function Show-BenchHist {
   $h = @(Get-BenchHist)
@@ -5828,6 +6010,89 @@ function Show-BenchHist {
   $ui.GridBenchHist.ItemsSource = $rows
   $ui.GridBenchHist.Visibility = $(if ($rows.Count) { 'Visible' } else { 'Collapsed' }); $ui.BenchHistEmpty.Visibility = $(if ($rows.Count) { 'Collapsed' } else { 'Visible' })
 }
+
+# ---------- Mål i mit spil ----------
+$GameHistFile = Join-Path $OutDir 'spil-maalinger.json'
+function Get-GameHist { if (Test-Path $GameHistFile) { try { return @(Get-Content $GameHistFile -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) } catch {} }; return @() }
+function Save-GameHist($r) {
+  $h = @(Get-GameHist) + @($r)
+  if ($h.Count -gt 200) { $h = $h[($h.Count - 200)..($h.Count - 1)] }
+  try { if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force $OutDir | Out-Null }; [IO.File]::WriteAllText($GameHistFile, (ConvertTo-Json -InputObject @($h) -Depth 4), (New-Object Text.UTF8Encoding $false)) } catch { Log "Spil-historik FEJL: $_" }
+}
+function Fmt-Delta($now, $before, $unit) {
+  if ($null -eq $before -or [double]$before -eq 0) { return '' }
+  $d = [double]$now - [double]$before; $pct = 100 * $d / [double]$before
+  $sign = if ($d -ge 0) { '+' } else { '' }
+  return "$sign$([math]::Round($d))$unit ($sign$([math]::Round($pct)) %)"
+}
+function Show-GameHist {
+  $h = @(Get-GameHist)
+  $rows = New-Object System.Collections.ArrayList
+  for ($i = $h.Count - 1; $i -ge 0; $i--) {
+    $x = $h[$i]
+    $prev = $null
+    for ($k = $i - 1; $k -ge 0; $k--) { if ($h[$k].Game -eq $x.Game) { $prev = $h[$k]; break } }
+    $r = New-Object PcTjek.Row
+    $r.Navn = ([datetime]$x.Date).ToString('dd-MM HH:mm'); $r.Gruppe = [string]$x.Game
+    $r.Info = "$($x.Fps)"; $r.Status = "$($x.Low1)"; $r.Sti = "$($x.HakMin)"
+    $r.Note = if ($prev) { "FPS $(Fmt-Delta $x.Fps $prev.Fps '') · 1 % low $(Fmt-Delta $x.Low1 $prev.Low1 '')" } else { 'første måling' }
+    [void]$rows.Add($r)
+  }
+  $ui.GridGameHist.ItemsSource = @($rows)
+  $ui.GridGameHist.Visibility = $(if ($rows.Count) { 'Visible' } else { 'Collapsed' })
+  if ($h.Count -and -not $script:GameShown) { $script:GameShown = $true; Show-GameResult $h[-1] $null }
+}
+function Show-GameResult($r, $prev) {
+  $ui.GameTiles.Visibility = 'Visible'
+  $ui.GameFps.Text = "$($r.Fps)"; $ui.GameLow.Text = "$($r.Low1)"; $ui.GameHak.Text = "$($r.HakMin)"
+  $ui.GameFpsSub.Text = "$($r.Game) · $($r.Seconds) sek$(if ($prev) { ' · ' + (Fmt-Delta $r.Fps $prev.Fps ' fps') + ' mod sidst' })"
+  $ui.GameLowSub.Text = $(if ($prev) { (Fmt-Delta $r.Low1 $prev.Low1 ' fps') + ' mod sidst' } else { 'de langsomste 1 % af billederne' })
+  $ui.GameHakSub.Text = $(if ([double]$r.HakMin -lt 3) { 'jævnt' } elseif ([double]$r.HakMin -lt 12) { 'enkelte hak' } else { 'mange hak' })
+  $ui.GameHak.Foreground = $Brush.ConvertFromString($(if ([double]$r.HakMin -lt 3) { '#34D399' } elseif ([double]$r.HakMin -lt 12) { '#F6C344' } else { '#F87171' }))
+  $ui.GameLimit.Text = switch ($r.Limit) { 'gpu' { "Grafikkortet ($($r.GpuShare) % travlt)" } 'cpu' { 'Processoren' } 'cap' { 'Et FPS-loft' } 'mixed' { 'Lidt af begge' } default { 'Ukendt' } }
+  $adv = New-Object System.Collections.ArrayList
+  switch ($r.Limit) {
+    'gpu'   { [void]$adv.Add('🎯  Grafikkortet arbejder for fuld kraft. Det er normalt i krævende spil. Vil du have flere FPS: slå DLSS/FSR/XeSS til, sænk opløsning eller de tungeste grafikindstillinger (skygger, ray tracing), eller prøv din GPU-profil under Optimering.') }
+    'cpu'   { [void]$adv.Add('🎯  Processoren sætter grænsen, mens grafikkortet venter. Grafikindstillinger hjælper næsten ikke her. Prøv: luk programmer i baggrunden (Spil-tilstand under Tilstande), slå XMP/EXPO til hvis Benchmark foreslår det, og sænk indstillinger der rammer processoren (sigtbarhed, antal personer, fysik).') }
+    'cap'   { [void]$adv.Add("🎯  Hverken processor eller grafikkort er fuldt brugt (grafikkortet $($r.GpuShare) %). Spillet holdes nede af et loft: V-Sync, en FPS-grænse i spillet eller driveren, eller skærmens Hz. Er det med vilje, er det fint: det giver mindre strøm, varme og larm.") }
+    'mixed' { [void]$adv.Add('🎯  Processor og grafikkort deles om at bremse. Spillet er ret godt afstemt til din pc.') }
+  }
+  if ([double]$r.Low1 -lt 0.5 * [double]$r.Fps) { [void]$adv.Add("〰  Stor forskel på gennemsnit ($($r.Fps)) og 1 % low ($($r.Low1)). Spillet føles mindre jævnt, end gennemsnittet siger.") }
+  if ([double]$r.HakMin -ge 12) {
+    $dvr = $false; try { $dvr = Test-BgRecording } catch {}
+    [void]$adv.Add("⚠  Mange hak ($($r.HakMin) pr. minut). Ofte skyldes det, at spillet bygger shadere første gang: spil et par minutter mere, og mål igen. Ellers: programmer i baggrunden, en næsten fuld disk eller for lidt RAM.$(if ($dvr) { ' Baggrundsoptagelse er slået til: slå den fra under Ydelse og helbred.' })")
+  }
+  if ($r.Mode -match 'Copy with (CPU|GPU) GDI') { [void]$adv.Add("🪟  Spillet kører i en gammeldags vinduestilstand ($($r.Mode)), som koster FPS og forsinkelse. Vælg fuldskærm eller kantløs fuldskærm i spillet, og slå 'Optimeringer for spil i vinduer' til (Indstillinger → System → Skærm → Grafik).") }
+  if ([int]$r.VSync -ge 50 -and $r.Limit -ne 'gpu') { [void]$adv.Add('ℹ  V-Sync er slået til i spillet. Har du en G-Sync/FreeSync-skærm, giver det ofte lavere forsinkelse at slå V-Sync fra i spillet og sætte en FPS-grænse lige under skærmens Hz.') }
+  [void]$adv.Add('💡  Lav en ændring, mål igen samme sted i spillet, og se forskellen under "Mod sidst".')
+  $ui.GameAdvice.Text = $adv -join "`n`n"; $ui.GameAdvice.Visibility = 'Visible'
+}
+$ui.BtnGameMeasure.Add_Click({
+  $secs = @(30, 60, 120)[[math]::Max(0, $ui.GameDur.SelectedIndex)]
+  $ok = Msg "Sådan gør du:`n`n1. Start dit spil, og gå ind et sted, hvor du kan spille normalt.`n2. Tryk OK. Opticon gemmer sig, og du har 10 sek til at skifte til spillet.`n3. Bip = målingen starter. Spil normalt i $secs sek.`n4. Nyt bip = færdig. Kig i Opticon bagefter.`n`nFørste gang henter Opticon Intels gratis PresentMon (ca. 5 MB) fra GitHub." 'Mål i mit spil' 'OKCancel' 'Information'
+  if ($ok -ne 'OK') { return }
+  $ui.BtnGameMeasure.IsEnabled = $false
+  $ui.GameSub.Text = "Måler i $secs sek. Skift til dit spil..."
+  try { $win.WindowState = 'Minimized' } catch {}
+  Invoke-Bg $GameMeasureScript @{ Tools = (Join-Path $JobBase 'tools'); Seconds = $secs } {
+    param($res, $err, $c)
+    $ui.BtnGameMeasure.IsEnabled = $true
+    if ($res -is [array]) { $res = @($res | Where-Object { $_.Fps })[-1] }
+    if ($err -or -not $res) {
+      $ui.GameSub.Text = "Målingen lykkedes ikke: $err"; Log "Spilmåling FEJL: $err"
+      try { $win.WindowState = 'Normal'; [void]$win.Activate() } catch {}
+      return
+    }
+    $prev = @(Get-GameHist | Where-Object { $_.Game -eq $res.Game })
+    $prev = if ($prev.Count) { $prev[-1] } else { $null }
+    Save-GameHist $res
+    Log "Spilmåling: $($res.Game) $($res.Fps) fps, 1% low $($res.Low1), hak/min $($res.HakMin), bremse $($res.Limit), GPU $($res.GpuShare) %, CPU $($res.CpuShare) %, mode $($res.Mode)"
+    $ui.GameSub.Text = "Målt $($res.Frames) billeder i $($res.Game). Kør en ny måling efter en ændring for at se, om den hjalp."
+    Show-GameResult $res $prev
+    $script:GameShown = $true
+    Show-GameHist
+  } $null
+})
 
 # ---------- "Hvad betyder dine tal?" ----------
 function Test-HzCap($s) {
@@ -5862,6 +6127,7 @@ function Get-BenchAdvice($r) {
     $vend = if ($hw.Gpu -match '(?i)nvidia') { 'nvidia' } elseif ($hw.Gpu -match '(?i)arc') { 'arc' } else { 'radeon' }
     if ([string]$r.GpuRenderer -notmatch "(?i)$vend") { & $add "Grafiktesten kørte på $($r.GpuRenderer) og ikke på dit $($hw.Gpu)." 'Windows valgte den indbyggede grafik til browseren.' "Indstillinger → System → Skærm → Grafik → vælg Microsoft Edge (og dine spil) → 'Høj ydeevne'." }
   }
+  try { if (Test-BgRecording) { [void]$out.Add("ℹ  Optagelse i baggrunden (Game Bar) er slået til. Den optager hele tiden, mens du spiller, og kan give små hak. Slå den fra under Ydelse og helbred, hvis du ikke bruger den.") } } catch {}
   if ($r.Gpu -and (Test-HzCap ([pscustomobject]@{ Fps = $r.Gpu; P1 = $r.GpuLow }))) { [void]$out.Add("ℹ  Grafikken lå lige på $($r.Gpu) fps, som er en almindelig skærmfrekvens. Tallet kan være begrænset af skærmen og ikke af grafikkortet.") }
   if ((Get-Smi) -and (Test-Path $GpuPlFile)) { try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; [void]$out.Add("ℹ  Du har valgt en lavere strømgrænse til grafikkortet ($($g.Pct) %, $($g.Watts) W). Det sparer strøm, men kan koste lidt FPS. Nulstil den under Optimering, hvis du vil se kortets fulde ydelse.") } catch {} }
   return @($out)

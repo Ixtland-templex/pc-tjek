@@ -1,7 +1,7 @@
 import hashlib, json, re, datetime
 R='/home/claude/pc-tjek/'
 rd=lambda f: open(R+f,encoding='utf-8-sig').read().replace('\r\n','\n')
-ver='2.36'
+ver='2.37'
 BRAND='Opticon'   # skift navnet her
 head=re.sub(r"\$AppVersion = '[\d.]+'", f"$AppVersion = '{ver}'", rd('head.ps1.part'))
 app=head+rd('modes.ps1.part')+rd('engine.ps1.part')+rd('gui.ps1.part')+rd('logic.ps1.part')
@@ -25,7 +25,11 @@ w('PC-Tjek-App.ps1',app); w('PC-Tjek-Vagt.ps1',vagt)
 files=[]
 for f in ['PC-Tjek-App.ps1','PC-Tjek-Start.ps1','PC-Tjek-Vagt.ps1','Uninstall-PCTjek.ps1','PC-Tjek.ico']:
     files.append({'name':f,'sha256':hashlib.sha256(open(R+f,'rb').read()).hexdigest().upper()})
-notes=["Ny: 🔐 Sikkerhedstjek – er Windows' beskyttelser slået til? Røde og gule punkter med en forklaring, og knappen Ret det for mig, hvor det er sikkert",
+notes=["Ny: 🎮 Mål i mit spil (under Benchmark) – rigtig FPS, 1 % low og hak i dit eget spil med Intel PresentMon, og om det er grafikkort, processor eller et FPS-loft, der bremser",
+ "Spilmålinger gemmes, så du kan se om en ændring hjalp (Mod sidst)",
+ "Sikkerhedstjek: 3 ekstra Defender-regler (ASR), som Microsoft anbefaler alle at slå til",
+ "Ydelse og helbred: tjekker om Game Bar optager i baggrunden, og kan slå det fra med ét klik",
+ "Ny: 🔐 Sikkerhedstjek – er Windows' beskyttelser slået til? Røde og gule punkter med en forklaring, og knappen Ret det for mig, hvor det er sikkert",
  "Ny: 🧩 Farlige drivere – sammenligner dine drivere med LOLDrivers' liste over drivere, som angribere misbruger",
  "Disk-helbred: fejl der ikke kunne rettes, temperatur mod diskens maks., og hvor længe den har været tændt. Overblik advarer, hvis disken er ved at gå i stykker",
  "Grafiktest giver nu rigtige FPS uden skærmens Hz-loft (testversion 3)",

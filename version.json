@@ -1,7 +1,11 @@
 {
-  "version": "2.36",
+  "version": "2.37",
   "date": "2026-11-24",
   "notes": [
+    "Ny: 🎮 Mål i mit spil (under Benchmark) – rigtig FPS, 1 % low og hak i dit eget spil med Intel PresentMon, og om det er grafikkort, processor eller et FPS-loft, der bremser",
+    "Spilmålinger gemmes, så du kan se om en ændring hjalp (Mod sidst)",
+    "Sikkerhedstjek: 3 ekstra Defender-regler (ASR), som Microsoft anbefaler alle at slå til",
+    "Ydelse og helbred: tjekker om Game Bar optager i baggrunden, og kan slå det fra med ét klik",
     "Ny: 🔐 Sikkerhedstjek – er Windows' beskyttelser slået til? Røde og gule punkter med en forklaring, og knappen Ret det for mig, hvor det er sikkert",
     "Ny: 🧩 Farlige drivere – sammenligner dine drivere med LOLDrivers' liste over drivere, som angribere misbruger",
     "Disk-helbred: fejl der ikke kunne rettes, temperatur mod diskens maks., og hvor længe den har været tændt. Overblik advarer, hvis disken er ved at gå i stykker",
@@ -53,7 +57,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "8B8D0E4B49D9D49221A9F176E36F7E9DD13862E6E409D86BA9CB0A39F8A15560"
+      "sha256": "820DC64CC6D3AAF7338DA421F95964CF48C92FACF2447A0588652386028046A9"
     },
     {
       "name": "PC-Tjek-Start.ps1",
