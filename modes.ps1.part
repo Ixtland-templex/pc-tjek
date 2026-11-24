@@ -43,14 +43,27 @@ function Save-Games($list) { [IO.File]::WriteAllText($GamesFile, (ConvertTo-Json
 function Exe-Key($exe) { ([IO.Path]::GetFileNameWithoutExtension([string]$exe)).ToLower() }
 
 function Get-SmiPath { foreach ($p in "$env:SystemRoot\System32\nvidia-smi.exe", "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe") { if (Test-Path $p) { return $p } }; return $null }
+# Grafikkortets faste ID (UUID). Bruges i stedet for "kort nr. 0", så indstillinger altid rammer det rigtige kort,
+# også hvis pc'en har flere grafikkort, eller rækkefølgen ændrer sig.
+function Get-GpuId {
+  if ($script:GpuIdCache) { return $script:GpuIdCache }
+  $s = Get-SmiPath; if (-not $s) { return '0' }
+  try { $u = ([string](& $s --query-gpu=uuid --format=csv,noheader 2>$null | Select-Object -First 1)).Trim(); if ($u -like 'GPU-*') { $script:GpuIdCache = $u; return $u } } catch {}
+  return '0'
+}
+function Test-GpuIdPresent([string]$id) {
+  if (-not $id -or $id -eq '0') { return $true }
+  $s = Get-SmiPath; if (-not $s) { return $false }
+  try { return [bool](@(& $s --query-gpu=uuid --format=csv,noheader 2>$null) | Where-Object { ([string]$_).Trim() -eq $id }) } catch { return $false }
+}
 function Get-GpuPlNow {
   $s = Get-SmiPath; if (-not $s) { return $null }
-  $v = & $s -i 0 --query-gpu=power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+  $v = & $s -i (Get-GpuId) --query-gpu=power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1
   $d = 0.0
   if ([double]::TryParse(([string]$v).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d) -and $d -gt 0) { return [int][math]::Round($d) }
   return $null
 }
-function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -i 0 -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
+function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -i (Get-GpuId) -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
 # Sæt OG bekræft: læs værdien tilbage, før det kaldes en succes
 function Restore-GpuPl($w) {
   if (-not ([int]$w -gt 0)) { return $true }
@@ -196,35 +209,50 @@ function Stop-Mode($reason) {
   ModeLog "$($sum.Mode) sluttede ($reason): $(@($done) -join ' · ')"
   return $sum
 }
+# Appen og Vagten må ikke gendanne på samme tid: de deler denne lås
+function Invoke-ModeLocked([scriptblock]$Body) {
+  $mx = New-Object System.Threading.Mutex($false, 'Global\OpticonModeRestore'); $got = $false
+  try { $got = $mx.WaitOne(20000) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+  try { & $Body } finally { if ($got) { try { $mx.ReleaseMutex() } catch {} }; $mx.Dispose() }
+}
 # Sætter beskeder, sider og grafikkort tilbage, og BEKRÆFTER hver del. Det, der fejler, gemmes og prøves igen senere.
 function Restore-Parts($prevToast, $sites, $prevPl) {
+  Invoke-ModeLocked { Restore-PartsCore $prevToast $sites $prevPl }
+}
+function Restore-PartsCore($prevToast, $sites, $prevPl) {
   $ok = New-Object System.Collections.ArrayList; $fail = New-Object System.Collections.ArrayList
+  $tried = New-Object System.Collections.ArrayList   # hvilke dele der blev forsøgt nu (kun dem må fjernes fra journalen)
   if ($null -ne $prevToast) {
-    Set-Toasts ([int]$prevToast)
+    [void]$tried.Add('toast'); Set-Toasts ([int]$prevToast)
     if ((Get-Toasts) -eq [int]$prevToast) { [void]$ok.Add('Windows-beskeder er som før') } else { [void]$fail.Add(@{ Kind = 'toast'; Value = [int]$prevToast; Text = 'Windows-beskeder kunne ikke slås til igen' }) }
   }
   $hostsNeeded = @($sites).Count -or ((Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*"))
   if ($hostsNeeded) {
-    try { Remove-HostsBlock } catch {}
+    [void]$tried.Add('hosts'); try { Remove-HostsBlock } catch {}
     $still = (Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*")
     if ($still) { [void]$fail.Add(@{ Kind = 'hosts'; Value = $null; Text = 'Blokeringen af sider kunne ikke fjernes' }) }
     elseif (@($sites).Count) { [void]$ok.Add("Siderne er åbne igen ($(@($sites) -join ', '))") }
   }
   if ($prevPl) {
+    [void]$tried.Add('gpu')
     if (Restore-GpuPl $prevPl) { [void]$ok.Add("Grafikkortet er tilbage på $($prevPl) W (bekræftet)") }
     else { [void]$fail.Add(@{ Kind = 'gpu'; Value = [int]$prevPl; Text = "Grafikkortet kunne ikke sættes tilbage til $($prevPl) W" }) }
   }
-  # Gem det, der fejlede, så det prøves igen ved næste start
+  # Journal: behold alt, der ikke blev forsøgt nu, og det der fejlede. Kun det, der er BEKRÆFTET sat tilbage, fjernes.
   $old = @(); if (Test-Path $ModePending) { try { $old = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch {} }
-  $keep = @(@($old | Where-Object { $k = $_.Kind; -not ($fail | Where-Object { $_.Kind -eq $k }) }) + @($fail))
-  if ($fail.Count) { try { [IO.File]::WriteAllText($ModePending, (ConvertTo-Json -InputObject @($keep) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}; ModeLog "Kunne ikke sætte tilbage: $(@($fail | ForEach-Object { $_.Text }) -join ' · ')" }
+  $keep = @(@($old | Where-Object { $tried -notcontains [string]$_.Kind }) + @($fail))
+  try {
+    if ($keep.Count) { $tmp = "$ModePending.tmp"; [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject @($keep) -Depth 3), (New-Object Text.UTF8Encoding $false)); Move-Item -LiteralPath $tmp -Destination $ModePending -Force -ErrorAction Stop }
+    elseif (Test-Path $ModePending) { Remove-Item $ModePending -Force -ErrorAction Stop }
+  } catch { ModeLog "Gendannelsesjournalen kunne ikke opdateres: $($_.Exception.Message)" }
+  if ($fail.Count) { ModeLog "Kunne ikke sætte tilbage: $(@($fail | ForEach-Object { $_.Text }) -join ' · ')" }
   return @{ Ok = @($ok); Fail = @($fail) }
 }
 # Prøv igen at sætte det tilbage, der fejlede sidst
 function Retry-Pending {
   if (-not (Test-Path $ModePending)) { return }
   $items = @(); try { $items = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return }
-  Remove-Item $ModePending -Force -ErrorAction SilentlyContinue
+  # Journalen slettes IKKE her. Restore-Parts fjerner kun de dele, der er bekræftet sat tilbage.
   $t = ($items | Where-Object Kind -eq 'toast' | Select-Object -First 1); $g = ($items | Where-Object Kind -eq 'gpu' | Select-Object -First 1); $h = ($items | Where-Object Kind -eq 'hosts')
   $r = Restore-Parts $(if ($t) { $t.Value } else { $null }) $(if ($h) { @('x') } else { @() }) $(if ($g) { $g.Value } else { $null })
   if (-not $r.Fail.Count) { ModeLog 'Det, der manglede at blive sat tilbage, er nu på plads' }

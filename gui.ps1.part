@@ -114,6 +114,26 @@ $FilesScript = {
 
 $WingetListScript = {
   param($sync, $arg)
+  # 1) Microsofts eget PowerShell-modul (Microsoft.WinGet.Client): giver pakkerne som rigtige objekter.
+  #    Hentes fra PowerShell Gallery første gang. Virker det ikke, bruges winget-kommandoen som før.
+  try {
+    if (-not (Get-Module -ListAvailable -Name Microsoft.WinGet.Client)) {
+      $sync.Status = 'Henter Microsofts WinGet-modul (kun første gang, ca. 30 sek)...'
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      $ProgressPreference = 'SilentlyContinue'
+      if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue | Where-Object { $_.Version -ge [version]'2.8.5.201' })) {
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers -Confirm:$false -ErrorAction Stop | Out-Null
+      }
+      Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop | Out-Null
+    }
+    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+    $sync.Status = 'Spørger WinGet om opdateringer...'
+    $pk = @(Get-WinGetPackage -ErrorAction Stop | Where-Object { $_.IsUpdateAvailable })
+    return @($pk | ForEach-Object { [pscustomobject]@{ Navn = [string]$_.Name; Id = [string]$_.Id; Version = [string]$_.InstalledVersion; Ny = [string](@($_.AvailableVersions)[0]); Via = 'modul' } })
+  } catch {
+    if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText([string]$arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  WinGet-modul kunne ikke bruges, bruger winget direkte: {1}`r`n" -f (Get-Date), $_.Exception.Message), [Text.Encoding]::UTF8) } catch {} }
+  }
+  # 2) Reserve: winget-kommandoen (læser tabellen)
   $sync.Status = 'Spørger winget om opdateringer (kan tage et minut)...'
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget blev ikke fundet. Installér "App Installer" fra Microsoft Store.' }
   [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -147,8 +167,20 @@ $WingetUpgradeScript = {
   foreach ($id in $arg.Ids) {
     $i++
     $sync.Status = "Opdaterer $id ($i af $($arg.Ids.Count))..."
-    $o = & winget upgrade --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { [string]$_ }
-    $res[$id] = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Fejl ($LASTEXITCODE)" }
+    $done = $false
+    if (Get-Module -ListAvailable -Name Microsoft.WinGet.Client) {
+      try {
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        $u = Update-WinGetPackage -Id $id -MatchOption Equals -Mode Silent -ErrorAction Stop
+        $st = [string]$u.Status
+        $res[$id] = if ($st -eq 'Ok') { $(if ($u.RebootRequired) { 'OK (genstart pc''en)' } else { 'OK' }) } else { "Fejl ($st)" }
+        $done = $true
+      } catch {}
+    }
+    if (-not $done) {
+      $o = & winget upgrade --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { [string]$_ }
+      $res[$id] = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Fejl ($LASTEXITCODE)" }
+    }
   }
   return $res
 }
@@ -425,9 +457,22 @@ $GameMeasureScript = {
   $csv = Join-Path $tools ('capture-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.csv')
   try { [Media.SystemSounds]::Asterisk.Play() } catch {}
   $pmArgs = @('--output_file', ('"' + $csv + '"'), '--timed', [string]$dur, '--terminate_after_timed', '--stop_existing_session', '--session_name', 'Opticon', '--no_console_stats', '--no_track_input')
+  # Grafikkortets strøm, temperatur og clock undervejs (NVIDIA), så før/efter-tests kan vise watt
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  $hasSmi = Test-Path $smi; $gid = if ($arg.GpuId) { [string]$arg.GpuId } else { '0' }
+  $inv0 = [Globalization.CultureInfo]::InvariantCulture
+  $ctxDrv = $null; $ctxPl = $null
+  if ($hasSmi) { try { $q0 = ([string](& $smi -i $gid --query-gpu=driver_version,power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1)) -split ',\s*'; $ctxDrv = $q0[0].Trim(); $ctxPl = [math]::Round([double]::Parse($q0[1].Trim(), $inv0)) } catch {} }
+  $wS = New-Object System.Collections.ArrayList; $tS = New-Object System.Collections.ArrayList; $nextS = Get-Date
   $p = Start-Process -FilePath $pm -ArgumentList $pmArgs -WindowStyle Hidden -PassThru
   $t0 = Get-Date
   while (-not $p.HasExited) {
+    if ($hasSmi -and (Get-Date) -ge $nextS) {
+      $nextS = (Get-Date).AddSeconds(1)
+      try { $q1 = ([string](& $smi -i $gid --query-gpu=power.draw,temperature.gpu --format=csv,noheader,nounits 2>$null | Select-Object -First 1)) -split ',\s*'; $wv = 0.0; $tv = 0.0
+            if ([double]::TryParse($q1[0].Trim(), [Globalization.NumberStyles]::Float, $inv0, [ref]$wv)) { [void]$wS.Add($wv) }
+            if ([double]::TryParse($q1[1].Trim(), [Globalization.NumberStyles]::Float, $inv0, [ref]$tv)) { [void]$tS.Add($tv) } } catch {}
+    }
     $el = ((Get-Date) - $t0).TotalSeconds
     $sync.Status = "Måler dit spil... $([math]::Max(0, [int]($dur - $el))) sek tilbage"
     $sync.Progress = [double][math]::Min(1.0, $el / $dur)
@@ -480,6 +525,9 @@ $GameMeasureScript = {
     if (-not $rt -and $iRt -ge 0 -and $c.Count -gt $iRt) { $rt = $c[$iRt] }
   }
   if ($ft.Count -lt 30) { throw "For få billeder fra $game til en måling. Prøv igen, og bliv inde i spillet hele tiden." }
+  # FPS pr. 10 sekunder (i målingens rækkefølge): viser, hvor meget FPS svinger af sig selv
+  $seg = New-Object System.Collections.ArrayList; $acc = 0.0; $cnt = 0
+  foreach ($v in $ft) { $acc += $v; $cnt++; if ($acc -ge 10000) { [void]$seg.Add([math]::Round(1000.0 * $cnt / $acc, 1)); $acc = 0.0; $cnt = 0 } }
   $arr = $ft.ToArray(); [array]::Sort($arr)
   $total = 0.0; foreach ($v in $arr) { $total += $v }
   $avgFt = $total / $arr.Count
@@ -500,6 +548,8 @@ $GameMeasureScript = {
     Hak = $hak; HakMin = [math]::Round($hak / [math]::Max(0.1, $secs / 60.0), 1)
     Limit = $limit; GpuShare = $(if ($null -ne $gpuShare) { [math]::Round($gpuShare * 100) } else { $null }); CpuShare = $(if ($null -ne $cpuShare) { [math]::Round($cpuShare * 100) } else { $null })
     VSync = [math]::Round($vsShare * 100); Mode = $mode; Runtime = $rt
+    Seg = @($seg); W = $(if ($wS.Count) { [math]::Round((($wS | Measure-Object -Average).Average), 1) } else { $null }); Tmax = $(if ($tS.Count) { ($tS | Measure-Object -Maximum).Maximum } else { $null })
+    Driver = $ctxDrv; PowerLimit = $ctxPl
   }
 }
 
@@ -524,6 +574,69 @@ $MbLookupScript = {
     [void]$out.Add([pscustomobject]$o)
   }
   return [pscustomobject]@{ Results = @($out) }
+}
+
+# =====================================================================
+#  Hvad fylder siden sidst? Måler drev og de mapper, der typisk vokser (kører i baggrunden)
+# =====================================================================
+$SpaceScanScript = {
+  param($sync, $arg)
+  $sync.Status = 'Måler, hvad der fylder...'
+  $t0 = Get-Date; $budget = 120
+  $uprof = [Environment]::GetFolderPath('UserProfile')
+  function Get-DirSize([string]$path) {
+    $size = [int64]0; $n = 0
+    $stack = New-Object System.Collections.Stack; $stack.Push($path)
+    while ($stack.Count) {
+      if (((Get-Date) - $t0).TotalSeconds -gt $budget) { return @($size, $n, $true) }
+      $d = [string]$stack.Pop()
+      try { $di = New-Object IO.DirectoryInfo $d; foreach ($f in $di.GetFiles()) { if (([int]$f.Attributes -band 0x400000) -eq 0) { $size += $f.Length }; $n++ } } catch {}   # 0x400000 = kun i skyen (fylder ikke på disken)
+      try { foreach ($s in (New-Object IO.DirectoryInfo $d).GetDirectories()) { if (([int]$s.Attributes -band 0x400) -eq 0) { $stack.Push($s.FullName) } } } catch {}   # spring genveje (reparse points) over
+    }
+    return @($size, $n, $false)
+  }
+  $roots = New-Object System.Collections.ArrayList
+  function Add-Root($p, $label, $kind) { if ($p -and (Test-Path -LiteralPath $p)) { [void]$roots.Add(@{ P = (Resolve-Path -LiteralPath $p).Path; L = $label; K = $kind }) } }
+  Add-Root (Join-Path $uprof 'Downloads') 'Overførsler' 'user'
+  Add-Root ([Environment]::GetFolderPath('MyVideos')) 'Videoer' 'user'
+  Add-Root ([Environment]::GetFolderPath('MyPictures')) 'Billeder' 'user'
+  Add-Root ([Environment]::GetFolderPath('MyDocuments')) 'Dokumenter' 'user'
+  Add-Root ([Environment]::GetFolderPath('Desktop')) 'Skrivebord' 'user'
+  Add-Root ([Environment]::GetFolderPath('MyMusic')) 'Musik' 'user'
+  Add-Root $env:TEMP 'Midlertidige filer' 'temp'
+  Add-Root "$env:SystemRoot\SoftwareDistribution\Download" 'Windows Update-filer' 'temp'
+  foreach ($x in @($arg.Extra)) { Add-Root $x (Split-Path $x -Leaf) 'user' }
+  # Spilbiblioteker: Steam (alle biblioteker), Epic, Xbox, EA, Ubisoft, Battle.net
+  $libs = New-Object System.Collections.ArrayList
+  try {
+    $steam = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction Stop).SteamPath
+    if ($steam) {
+      $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+      [void]$libs.Add((Join-Path $steam 'steamapps\common'))
+      if (Test-Path $vdf) { foreach ($m in [regex]::Matches([IO.File]::ReadAllText($vdf), '"path"\s+"([^"]+)"')) { [void]$libs.Add((Join-Path ($m.Groups[1].Value -replace '\\\\', '\') 'steamapps\common')) } }
+    }
+  } catch {}
+  foreach ($p in "$env:ProgramFiles\Epic Games", "$env:SystemDrive\XboxGames", "$env:ProgramFiles\EA Games", "${env:ProgramFiles(x86)}\Ubisoft\Ubisoft Game Launcher\games", "${env:ProgramFiles(x86)}\Battle.net") { [void]$libs.Add($p) }
+  foreach ($l in @($libs | Select-Object -Unique)) { Add-Root $l "Spil ($(Split-Path (Split-Path $l -Parent) -Leaf))" 'games' }
+
+  $folders = New-Object System.Collections.ArrayList
+  $i = 0
+  foreach ($r in $roots) {
+    $i++; $sync.Progress = [double](100 * $i / [math]::Max(1, $roots.Count)); $sync.Status = "Måler $($r.L)..."
+    $total = [int64]0
+    $kids = @(); try { $kids = @((New-Object IO.DirectoryInfo $r.P).GetDirectories() | Where-Object { ([int]$_.Attributes -band 0x400) -eq 0 }) } catch {}
+    foreach ($k in $kids) {
+      $res = Get-DirSize $k.FullName
+      $total += $res[0]
+      if ($res[0] -ge 200MB) { [void]$folders.Add([pscustomobject]@{ Path = $k.FullName; Label = "$($r.L)\$($k.Name)"; Size = $res[0]; Kind = $r.K; Parent = $r.P }) }
+    }
+    try { foreach ($f in (New-Object IO.DirectoryInfo $r.P).GetFiles()) { if (([int]$f.Attributes -band 0x400000) -eq 0) { $total += $f.Length } } } catch {}
+    [void]$folders.Add([pscustomobject]@{ Path = $r.P; Label = $r.L; Size = $total; Kind = $r.K; Parent = '' })
+  }
+  $drives = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.DeviceID; Size = [int64]$_.Size; Free = [int64]$_.FreeSpace } })
+  $rb = [int64]0
+  foreach ($d in $drives) { $p = "$($d.Name)\`$Recycle.Bin"; if (Test-Path -LiteralPath $p) { $rb += (Get-DirSize $p)[0] } }
+  return [pscustomobject]@{ Date = (Get-Date).ToString('s'); Drives = $drives; Folders = @($folders); RecycleBin = $rb; Partial = (((Get-Date) - $t0).TotalSeconds -gt $budget) }
 }
 
 $UpdateCheckScript = {
@@ -838,7 +951,8 @@ $GpuBenchScript = {
   $hasSmi = Test-Path $smi   # NVIDIA: alt måles. AMD/Intel: FPS og belastning, og watt for hele pc'en på batteri.
   $inv = [Globalization.CultureInfo]::InvariantCulture
   function Num($x) { $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
-  function Q($fields) { @((& $smi -i 0 "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
+  $gid = if ($arg.GpuId) { [string]$arg.GpuId } else { '0' }   # samme fysiske kort hele vejen (UUID)
+  function Q($fields) { @((& $smi -i $gid "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
   function Sample {
     if ($hasSmi) { $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'; return [pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] } }
     $u = $null; try { $u = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
@@ -928,9 +1042,9 @@ $GpuBenchScript = {
       $script:BState.Label = if ($md) { "Trin $($i + 1)/$total · $($modeNames[$md])" } elseif ($pl -and $rs) { "Trin $($i + 1)/$total$resTxt · $([math]::Round($pl)) W" } elseif ($rs) { "Trin $($i + 1)/$total$resTxt" } elseif ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
       if ($pl) {
         if (-not $changedPl -and $arg.RestoreFile -and $orig) {   # gem den oprindelige værdi FØR første ændring
-          [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Watts = [int][math]::Round($orig); Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress))
+          [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Watts = [int][math]::Round($orig); Uuid = $gid; Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress))
         }
-        & $smi -i 0 -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true
+        & $smi -i $gid -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true
         Start-Sleep -Milliseconds 300; $nowPl = (Q 'power.limit')[0]
         $applied = ($null -ne $nowPl -and [math]::Abs($nowPl - [math]::Round($pl)) -le 2)   # bekræftet ved at læse grænsen tilbage
       }
@@ -969,7 +1083,7 @@ $GpuBenchScript = {
     # Gendan altid det oprindelige, og fjern først gendannelsesfilen, når det er BEKRÆFTET
     $okRestore = $true
     if ($changedPl -and $orig) {
-      & $smi -i 0 -pl ([math]::Round($orig)) 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
+      & $smi -i $gid -pl ([math]::Round($orig)) 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
       $now = (Q 'power.limit')[0]; if ($null -eq $now -or [math]::Abs($now - $orig) -gt 2) { $okRestore = $false }
     }
     if ($changedMode -and $origMode) { if (-not (Set-PM $origMode)) { $okRestore = $false } }
@@ -1575,7 +1689,10 @@ $BenchScript = {
         </StackPanel>
         <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="18,14" Margin="0,0,0,14">
           <DockPanel>
-            <Button Name="BtnHelpedBench" DockPanel.Dock="Right" Content="📌  Jeg har ændret noget: hjalp det?" Style="{StaticResource Primary}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="BtnHelpedGame" Content="🔬  Test en ændring i et spil" Margin="12,0,8,0"/>
+              <Button Name="BtnHelpedBench" Content="📌  Jeg har ændret noget: hjalp det?" Style="{StaticResource Primary}" Margin="0"/>
+            </StackPanel>
             <StackPanel>
               <TextBlock Name="HelpedSummary" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Text="Ingen ændringer registreret endnu."/>
               <TextBlock Name="HelpedSub" Style="{StaticResource Sub}" FontSize="12" Margin="0,4,0,0" Text="Har du fx ændret noget i BIOS, Afterburner eller Windows? Tryk på knappen. Opticon kører den store test og sammenligner med testen før ændringen."/>
@@ -1665,6 +1782,7 @@ $BenchScript = {
                   <ComboBox Name="GameDur" Width="110" Margin="0,0,8,0" SelectedIndex="1">
                     <ComboBoxItem Content="30 sek"/><ComboBoxItem Content="60 sek"/><ComboBoxItem Content="2 min"/>
                   </ComboBox>
+                  <Button Name="BtnGameAb" Content="🔬  Hjalp det i mit spil?" Margin="0,0,8,0"/>
                   <Button Name="BtnGameMeasure" Content="🎮  Mål i mit spil" Style="{StaticResource Primary}" Margin="0"/>
                 </StackPanel>
                 <StackPanel>
@@ -1672,6 +1790,18 @@ $BenchScript = {
                   <TextBlock Name="GameSub" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Rigtig FPS, 1 % low og hak i dit eget spil, målt med Intels gratis PresentMon. Start spillet, tryk på knappen, og skift til spillet. Du hører et bip, når målingen starter, og igen når den stopper."/>
                 </StackPanel>
               </DockPanel>
+              <Border Name="GameAbBox" Visibility="Collapsed" CornerRadius="10" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="14,12" Margin="0,12,0,0">
+                <DockPanel>
+                  <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Name="BtnGameAbNext" Content="Mål EFTER" Style="{StaticResource Primary}" Margin="12,0,8,0"/>
+                    <Button Name="BtnGameAbCancel" Content="Annullér" Margin="0"/>
+                  </StackPanel>
+                  <StackPanel>
+                    <TextBlock Name="GameAbTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="GameAbText" Style="{StaticResource Sub}" Margin="0,4,0,0" LineHeight="20"/>
+                  </StackPanel>
+                </DockPanel>
+              </Border>
               <UniformGrid Name="GameTiles" Columns="4" Margin="0,12,0,0" Visibility="Collapsed">
                 <StackPanel Margin="0,0,10,0"><TextBlock Text="GENNEMSNIT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameFps" FontSize="24" FontWeight="Bold"/><TextBlock Name="GameFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
                 <StackPanel Margin="0,0,10,0"><TextBlock Text="1 % LOW" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GameLow" FontSize="24" FontWeight="Bold"/><TextBlock Name="GameLowSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
@@ -2409,7 +2539,30 @@ $BenchScript = {
       <!-- FILER -->
       <Grid Name="PageFiles" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Filer"/><TextBlock Style="{StaticResource Sub}" Text="Dubletter, gamle installere og de største filer i dine mapper. Slettede filer flyttes til papirkurven, så du kan fortryde."/></StackPanel>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Filer"/><TextBlock Style="{StaticResource Sub}" Text="Hvor pladsen er blevet af, dubletter, gamle installere og de største filer i dine mapper. Slettede filer flyttes til papirkurven, så du kan fortryde."/>
+          <Border Style="{StaticResource CardB}" Padding="18,14" Margin="0,12,0,0">
+            <StackPanel>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                  <Button Name="BtnSpaceOpen" Content="📂  Åbn mappen" IsEnabled="False"/>
+                  <Button Name="BtnSpaceScan" Content="📊  Mål nu" Style="{StaticResource Primary}" Margin="0"/>
+                </StackPanel>
+                <StackPanel>
+                  <TextBlock Text="📊  Hvad fylder siden sidst?" FontSize="15.5" FontWeight="SemiBold"/>
+                  <TextBlock Name="SpaceSummary" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Opticon måler dine drev og de mapper, der typisk vokser (overførsler, videoer, spil), og viser næste gang, hvor pladsen er blevet af."/>
+                </StackPanel>
+              </DockPanel>
+              <DataGrid Name="GridSpace" IsReadOnly="True" Margin="0,10,0,0" MaxHeight="220" SelectionMode="Single" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="MAPPE" Binding="{Binding Navn}" Width="3*"/>
+                  <DataGridTextColumn Header="FYLDER NU" Binding="{Binding Info}" Width="1*"/>
+                  <DataGridTextColumn Header="SIDEN SIDST" Binding="{Binding Status}" Width="1*"/>
+                  <DataGridTextColumn Header="HVAD" Binding="{Binding Note}" Width="2*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
           <Button Name="BtnFilesScan" Content="🔎  Analysér mine filer" Style="{StaticResource Primary}"/>
           <ComboBox Name="FilesFilter" Width="170" SelectedIndex="0" Margin="4,0,0,0" VerticalContentAlignment="Center">

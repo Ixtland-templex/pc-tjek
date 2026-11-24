@@ -446,7 +446,8 @@ if (Test-Path $GpuPlFile) {
   try {
     $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json
     $smi = "$env:SystemRoot\System32\nvidia-smi.exe"; if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
-    if ((Test-Path $smi) -and [int]$g.Watts -gt 0) { $null = & $smi -i 0 -pl ([int]$g.Watts) 2>&1; VLog 'Vagt' 'info' "Grafikkortets strømgrænse sat til $($g.Pct) % ($($g.Watts) W)" '' '' }
+    if ($g.Uuid -and -not (Test-GpuIdPresent ([string]$g.Uuid))) { VLog 'Vagt' 'info' 'GPU-profilen hører til et andet grafikkort end det, der sidder i nu, så den bruges ikke.' }
+    elseif ((Test-Path $smi) -and [int]$g.Watts -gt 0) { $null = & $smi -i $(if ($g.Uuid) { [string]$g.Uuid } else { Get-GpuId }) -pl ([int]$g.Watts) 2>&1; VLog 'Vagt' 'info' "Grafikkortets strømgrænse sat til $($g.Pct) % ($($g.Watts) W)" '' '' }
   } catch {}
 }
 $timer = New-Object Windows.Threading.DispatcherTimer

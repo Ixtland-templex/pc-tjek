@@ -1,14 +1,15 @@
 {
-  "version": "2.50",
+  "version": "2.52",
   "date": "2026-11-24",
   "notes": [
-    "Benchmark tester nu også grafikken i 4K (3840×2160), ud over 1080p og din skærms opløsning",
-    "Grafiktesten virker nu i alle opløsninger uden at hænge"
+    "Ny: 🔬 Hjalp det i mit spil? Mål FØR, lav én ændring (fx DLSS, undervolt eller strømgrænse), mål EFTER. Opticon siger, om FPS, 1 % low, hak og strømforbrug blev bedre, og om forskellen er større end det normale udsving",
+    "Spilmålinger viser nu også grafikkortets strømforbrug og temperatur (NVIDIA)",
+    "Resultaterne gemmes under Hjalp det?, hvor der også er en knap til at starte en test"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "668FAA97429F4B948F449CE61AA65191C73D4A8738814920000629D2C0F1D52F"
+      "sha256": "242B0E1B0AC8F248597F519B39ACE31F0E4BECC32D12268E845A9D037E8CDA3B"
     },
     {
       "name": "PC-Tjek-Start.ps1",
@@ -16,7 +17,7 @@
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "91A95A7050A8F0FAF2116B295D6EC39710BA9C9C8D4D7FE40781D278FE66E609"
+      "sha256": "C6EEBA3527FF6AA3AE374BB56CB51089C801096A9943E963365AC1C919C9BA1E"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
