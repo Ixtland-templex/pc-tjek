@@ -1,7 +1,11 @@
 {
-  "version": "2.22",
+  "version": "2.24",
   "date": "2026-11-24",
   "notes": [
+    "Ny: skøn efter trin 1 i OC-tjek: hvad overclock giver i FPS, strøm, varme og larm, og om det giver mening",
+    "Rettet: testscenen kunne ikke starte (Edge kunne ikke bruge sin datamappe)",
+    "Ny: nedtælling i testscenen og i appen",
+    "Ny: ⚡ OC-tjek – mål udgangspunkt, lad NVIDIA finde dit overclock, og tjek at det holder i 5 min",
     "Ny: 📺 FPS ved Full HD, 2K og 4K med strøm og FPS pr. watt (under Optimering)",
     "Kan sammenligne med din GPU-profil i alle tre opløsninger",
     "Ny: 🎮 Tilstande – Spil og Fokus. Alt sættes tilbage bagefter",
@@ -15,7 +19,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "25D4F4434E1AB7DA0B09CF6ED8EEF91976DEB6D7EB2C2A7E69E3E30FE3D7D2A2"
+      "sha256": "9E5BEC35B93D0FA553CE54A5EBF92D808311FF2758BF0B50707FB364F7821E09"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",

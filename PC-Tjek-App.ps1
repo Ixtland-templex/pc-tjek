@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.22'
+$AppVersion = '2.24'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -1047,6 +1047,8 @@ let work = parseFloat(q.get('work')) || 0;
 const resMode = q.get('res') === '1';   // fast opløsning (1080p/1440p/4K), uafhængig af skærmen
 if (resMode) work = 1.0;
 const fixed = resMode || work > 0; if (!fixed) work = 1.0;
+let remain = null;
+const fmtR = x => x == null ? '' : ` · ⏱ ${Math.floor(x / 60)}:${String(x % 60).padStart(2, '0')} tilbage`;
 const post = (p, d) => fetch(p, { method: 'POST', body: JSON.stringify(d || {}) }).catch(() => {});
 const c = document.getElementById('c'), o = document.getElementById('o');
 const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
@@ -1091,6 +1093,7 @@ const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.v
 const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
 function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRatio * work)); c.height = Math.max(180, Math.round(innerHeight * devicePixelRatio * work)); gl.viewport(0, 0, c.width, c.height); }
 resize(); addEventListener('resize', resize);
+c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'PC-Tjek GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
 addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
 // Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
@@ -1130,21 +1133,21 @@ function frame(now){
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     const fps = rfps * K;
     if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label} · Esc for at stoppe</small>`;
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
-    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label} · Esc for at stoppe</small>`;
+    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 setInterval(() => fetch('/state').then(r => r.json()).then(s => {
-  label = s.Label || ''; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+  label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
 }).catch(() => {}), resMode ? 400 : 1000);
 </script></body></html>
 '@
@@ -1170,7 +1173,10 @@ $GpuBenchScript = {
   $resList = @($arg.Res | Where-Object { $_ })
   $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false; Res = $(if ($resList.Count) { [string]$resList[0] } else { '' }) }
   $script:BFps = New-Object System.Collections.ArrayList
-  $script:BAbort = $false; $script:BErr = $null
+  $script:BAbort = $false; $script:BErr = $null; $script:BLost = $false
+  $script:BStepStart = $null; $script:BLeftAfter = 0; $script:BPerStep = 5 + [double]$arg.StepSec
+  function Remain { if (-not $script:BStepStart) { return [int]((@($arg.Steps).Count) * $script:BPerStep) }; [int][math]::Max(0, $script:BLeftAfter + $script:BPerStep - ((Get-Date) - $script:BStepStart).TotalSeconds) }
+  function Fmt-Rem([int]$x) { '{0}:{1:00}' -f [math]::Floor($x / 60), ($x % 60) }
   $script:BWork = [double]$arg.Work; $script:BCalib = ($script:BWork -gt 0)
   $script:BTask = $listener.GetContextAsync()
   $htmlBytes = [Text.Encoding]::UTF8.GetBytes([string]$arg.Html)
@@ -1183,17 +1189,20 @@ $GpuBenchScript = {
       $out = [Text.Encoding]::UTF8.GetBytes('ok'); $type = 'text/plain'
       switch ($path) {
         '/'      { $out = $htmlBytes; $type = 'text/html; charset=utf-8' }
-        '/state' { $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
+        '/state' { $script:BState.Remain = Remain; $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
         '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = Get-Date; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch {} }
         '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
         '/abort' { $script:BAbort = $true }
+        '/lost'  { $script:BLost = $true; $script:BAbort = $true }
         '/error' { try { $script:BErr = [string]($body | ConvertFrom-Json).e } catch { $script:BErr = 'Fejl i testsiden' }; $script:BAbort = $true }
       }
       try { $ctx.Response.ContentType = $type; $ctx.Response.Headers.Add('Cache-Control', 'no-store'); $ctx.Response.OutputStream.Write($out, 0, $out.Length); $ctx.Response.Close() } catch {}
     }
   }
   function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 80 } }
-  $prof = Join-Path $arg.Dir 'browser'
+  # Browserens profil skal ligge i din egen mappe: Edge/Chrome kan ikke arbejde i den låste ProgramData-mappe
+  $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser'
+  New-Item -ItemType Directory -Force $prof | Out-Null
   $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))$(if ($resList.Count) { "&res=1&r0=$($resList[0])" })"
   $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate" }
            else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check `"$url`"" }
@@ -1212,6 +1221,7 @@ $GpuBenchScript = {
       if ($script:BAbort) { break }
       $pl = $steps[$i]
       $script:BState.Step = $i + 1
+      $script:BStepStart = Get-Date; $script:BLeftAfter = ($total - $i - 1) * $script:BPerStep
       $rs = if ($resList.Count) { [string]$arg.Res[$i] } else { '' }
       $script:BState.Res = $rs
       $resTxt = if ($rs) { " · $($rs -replace 'x', '×')" } else { '' }
@@ -1222,7 +1232,7 @@ $GpuBenchScript = {
         }
         & $smi -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true
       }
-      $sync.Status = "$($script:BState.Label): stabiliserer..."
+      $sync.Status = "$($script:BState.Label): stabiliserer... · ⏱ $(Fmt-Rem (Remain)) tilbage"
       WaitPump 5
       $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
       while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
@@ -1234,7 +1244,7 @@ $GpuBenchScript = {
           $el = ((Get-Date) - $t0).TotalSeconds
           $sync.Progress = [double](100 * ($i + [math]::Min(1, $el / [double]$arg.StepSec)) / $total)
           $lastF = $script:BFps | Select-Object -Last 1
-          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps · $([int]$v[0]) W · $([int]$v[1]) °C"
+          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps · $([int]$v[0]) W · $([int]$v[1]) °C · ⏱ $(Fmt-Rem (Remain)) tilbage"
         }
         Start-Sleep -Milliseconds 80
       }
@@ -1243,7 +1253,9 @@ $GpuBenchScript = {
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
-      [void]$results.Add([pscustomobject]@{ Res = $rs; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
+      $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
+      $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
+      [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {
     if ($changedPl -and $orig) { & $smi -pl ([math]::Round($orig)) 2>&1 | Out-Null }   # gendan altid den oprindelige strømgrænse
@@ -1253,7 +1265,7 @@ $GpuBenchScript = {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
     try { $listener.Stop(); $listener.Close() } catch {}
   }
-  return @{ Steps = @($results); Work = $script:BWork; Aborted = $script:BAbort; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
+  return @{ Steps = @($results); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
 # =====================================================================
@@ -1929,6 +1941,38 @@ $GpuBenchScript = {
                   </DataGrid.Columns>
                 </DataGrid>
                 <TextBlock Name="GpuResVerdict" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+              </StackPanel>
+            </Border>
+            <!-- OC-tjek -->
+            <Border Background="#10131A" BorderBrush="#5F3A1E" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="⚡  OC-tjek: flere FPS, og holder det?" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Name="GpuOcInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Lad NVIDIAs egen automatiske tuning finde dit overclock, og lad PC-Tjek måle, om det giver flere FPS og kører stabilt. Testen kører i 2K, så det er grafikkortet, der bliver presset."/>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnOcBase" Content="1 · Mål udgangspunkt (1 min)" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnOcTune" Content="2 · Find overclock automatisk"/>
+                  <Button Name="BtnOcCheck" Content="3 · Tjek OC (5 min)" IsEnabled="False"/>
+                </WrapPanel>
+                <ProgressBar Name="GpuOcBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="#F59E0B" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="GpuOcBase" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+                <Border Name="GpuOcEstBox" Visibility="Collapsed" CornerRadius="10" Background="#151A26" BorderBrush="#3B4A6B" BorderThickness="1" Padding="14,12" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuOcEstTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <UniformGrid Columns="4" Margin="0,10,0,6">
+                      <StackPanel><TextBlock Text="FPS" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstFps" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="STRØM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstW" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstWSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="VARME" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstT" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstTSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="LARM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstN" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstNSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                    </UniformGrid>
+                    <TextBlock Name="GpuOcEstText" Foreground="#C3CAD6" TextWrapping="Wrap" LineHeight="20"/>
+                  </StackPanel>
+                </Border>
+                <Border Name="GpuOcBox" Visibility="Collapsed" CornerRadius="10" BorderThickness="1" Padding="14,12" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuOcTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="GpuOcText" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="20"/>
+                  </StackPanel>
+                </Border>
               </StackPanel>
             </Border>
             <!-- mål før/efter (egne indstillinger) -->
@@ -3788,6 +3832,14 @@ function Start-GpuBench($mode) {
     if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
     $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
+  } elseif ($mode -in 'ocbase', 'occheck') {
+    if ($mode -eq 'occheck' -and -not $script:OcBase) { Msg 'Mål udgangspunktet først (trin 1), før du overclocker.' 'OC-tjek' | Out-Null; return }
+    if ($mode -eq 'occheck') {
+      if ((Msg "OC-tjekket kører testscenen i 2K i 5 minutter og holder øje med:`n`n•  om grafikdriveren går ned eller genstarter`n•  om Windows logger fejl fra grafikkortet`n•  pludselige FPS-fald, clock og temperatur`n`nBliver skærmen sort et øjeblik, er det driveren, der genstarter. Det er netop det, testen leder efter. Gem dit arbejde først, og rør ikke musen.`n`nStart?" 'OC-tjek' 'YesNo' 'Question') -ne 'Yes') { return }
+    }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Res = @('2560x1440'); Work = 0; StepSec = $(if ($mode -eq 'ocbase') { 50 } else { 300 }); Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
+    $script:OcStart = Get-Date
+    $ui.GpuOcBar.Visibility = 'Visible'; $ui.GpuOcBar.Value = 0; $ui.GpuOcBox.Visibility = 'Collapsed'
   } elseif ($mode -eq 'res') {
     $cur = (Smi-Q 'power.limit')[0]
     $prof = Get-GpuProfileW
@@ -3808,23 +3860,31 @@ function Start-GpuBench($mode) {
     $ui.GpuVerdict.Text = ''
   }
   $script:GpuMeasuring = $true
-  $ui.BtnGpuAuto.IsEnabled = $false; $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false; $ui.BtnGpuRes.IsEnabled = $false
+  $ui.BtnGpuAuto.IsEnabled = $false; $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false; $ui.BtnGpuRes.IsEnabled = $false; $ui.BtnOcBase.IsEnabled = $false; $ui.BtnOcCheck.IsEnabled = $false
   Invoke-Bg $GpuBenchScript $arg {
     param($res, $err, $c)
     $script:GpuMeasuring = $false
-    $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork; $ui.BtnGpuRes.IsEnabled = $true
-    $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'
+    $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork; $ui.BtnGpuRes.IsEnabled = $true; $ui.BtnOcBase.IsEnabled = $true; $ui.BtnOcCheck.IsEnabled = [bool]$script:OcBase
+    $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'; $ui.GpuOcBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
     $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
+    if ($c.GpuMode -eq 'occheck' -and $res -and $res.Lost) { Show-OcCheck $res $steps; return }   # et nedbrud ER resultatet
     if ($err -or -not $steps.Count) {
       $msg = if ($err) { $err } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } else { 'Testscenen gav ingen målinger.' }
-      if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
+      if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -like 'oc*') { $ui.GpuOcInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
       return
     }
     try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
     if ($c.GpuMode -eq 'auto') { Show-GpuAuto $res $steps }
     elseif ($c.GpuMode -eq 'res') { Show-GpuRes $steps }
+    elseif ($c.GpuMode -eq 'ocbase') {
+      $script:OcBase = $steps[0]
+      try { [IO.File]::WriteAllText((Join-Path $OutDir 'gpu-oc-udgangspunkt.json'), ($steps[0] | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
+      Show-OcBase; try { Show-OcEstimate } catch { Log "OC-skøn fejl: $_" }; $ui.BtnOcCheck.IsEnabled = $true
+      $ui.GpuOcInfo.Text = "✓ Udgangspunktet er gemt. Overclock nu (trin 2), og tryk så '3 · Tjek OC'."
+    }
+    elseif ($c.GpuMode -eq 'occheck') { Show-OcCheck $res $steps }
     elseif ($c.GpuMode -eq 'before') {
       $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $res.Work
       $b = $steps[0]
@@ -3842,6 +3902,7 @@ function Start-GpuBench($mode) {
       if (-not $j) { return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
+      elseif ($j.Ctx.GpuMode -like 'oc*') { if ($p -ge 0) { $ui.GpuOcBar.Value = $p }; if ($j.S.Status) { $ui.GpuOcInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'res') { if ($p -ge 0) { $ui.GpuResBar.Value = $p }; if ($j.S.Status) { $ui.GpuResInfo.Text = $j.S.Status } }
       else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
     })
@@ -3888,6 +3949,107 @@ function Show-GpuRes($steps) {
   try { [IO.File]::WriteAllText((Join-Path $OutDir 'gpu-oploesning.json'), (ConvertTo-Json -InputObject @($steps) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}
 }
 $ui.BtnGpuRes.Add_Click({ Start-GpuBench 'res' })
+# ---------- OC-tjek ----------
+function Show-OcBase {
+  $b = $script:OcBase; if (-not $b) { return }
+  $ui.GpuOcBase.Text = "Udgangspunkt (2K): $([math]::Round($b.Fps)) fps · laveste 1 % $(if ($b.P1) { [math]::Round($b.P1) } else { '–' }) fps · $([math]::Round($b.W)) W · $([math]::Round($b.C)) MHz · $([math]::Round($b.T)) °C"
+  $ui.GpuOcBase.Visibility = 'Visible'
+}
+function Set-OcBox($kind, $title, $text) {
+  $c = @{ ok = @('#173325', '#22C55E', '#C3E8D0'); warn = @('#2A2210', '#F6C344', '#EBDDB0'); bad = @('#2E1418', '#FF5D6C', '#F2C4C9') }[$kind]
+  $ui.GpuOcBox.Background = $Brush.ConvertFromString($c[0]); $ui.GpuOcBox.BorderBrush = $Brush.ConvertFromString($c[1])
+  $ui.GpuOcText.Foreground = $Brush.ConvertFromString($c[2])
+  $ui.GpuOcTitle.Text = $title; $ui.GpuOcText.Text = $text; $ui.GpuOcBox.Visibility = 'Visible'
+}
+
+# Typiske OC-resultater fra anmeldelser (FPS-gevinst %, ekstra strøm %, kilde)
+$KnownOc = @(
+  @{ Match = '3070\s*TI'; Gain = 7.5; Pw = 9; Src = "The FPS Review fik ca. 7-8 % flere FPS for 9 % mere strøm med +130 MHz på et RTX 3070 Ti Founders Edition." }
+)
+function Show-OcEstimate {
+  $b = $script:OcBase; if (-not $b -or -not $b.Fps) { return }
+  $l = Smi-Q 'power.limit,power.max_limit'
+  $pl = $l[0]; $plMax = $l[1]
+  $mine = Parse-Gpu (Get-GpuName)
+  $ref = $null; if ($mine) { $ref = $KnownOc | Where-Object { $mine.Key -match $_.Match } | Select-Object -First 1 }
+  $g = if ($ref) { [double]$ref.Gain } else { 5.0 }       # typisk for nyere NVIDIA-kort: ca. 3-8 %
+  $pw = if ($ref) { [double]$ref.Pw } else { 7.0 }
+  $why = @()
+  $W = [double]$b.W; $T = [double]$b.T; $F = if ($null -ne $b.F) { [double]$b.F } else { $null }
+  # Rammer kortet allerede sin strømgrænse? Så kan et højere clock ikke holdes uden mere strøm
+  if ($pl -and $W -ge 0.95 * $pl) {
+    $head = if ($plMax -and $pl) { ($plMax - $pl) / $pl } else { 0 }
+    if ($head -lt 0.05) { $g *= 0.5; $why += "⚡ Kortet bruger allerede hele sin strømgrænse ($([math]::Round($W)) af $([math]::Round($pl)) W), og den kan kun hæves $([math]::Round($head * 100)) %. Så er der ikke meget plads til højere clock." }
+    else { $why += "⚡ Kortet rammer sin strømgrænse ($([math]::Round($pl)) W). Den skal hæves (op til $([math]::Round($plMax)) W) for at få gevinsten." }
+  }
+  if ($T -ge 83) { $g *= 0.4; $why += "🌡 Kortet er allerede ved varmegrænsen ($([math]::Round($T)) °C). Så skruer det selv ned, og et overclock giver næsten intet." }
+  elseif ($T -ge 78) { $g *= 0.7; $why += "🌡 Kortet er varmt ($([math]::Round($T)) °C). Mere varme kan få det til at skrue ned igen." }
+  $pw = $pw * ($g / $(if ($ref) { [double]$ref.Gain } else { 5.0 }))
+  $fpsNew = [double]$b.Fps * (1 + $g / 100)
+  $wAdd = $W * $pw / 100
+  $tAdd = [math]::Max(1, ($T - 25) * $pw / 100)
+  $ui.OcEstFps.Text = "+$([math]::Round($g, 1)) %"; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($fpsNew)) fps i testen"
+  $ui.OcEstW.Text = "+$([math]::Round($wAdd)) W"; $ui.OcEstWSub.Text = "ca. $([math]::Round($W)) → $([math]::Round($W + $wAdd)) W (+$([math]::Round($pw)) %)"
+  $ui.OcEstT.Text = "+$([math]::Round($tAdd)) °C"; $ui.OcEstTSub.Text = "ca. $([math]::Round($T)) → $([math]::Round($T + $tAdd)) °C"
+  if ($null -eq $F -or $F -eq 0) { $ui.OcEstN.Text = 'lidt mere'; $ui.OcEstNSub.Text = 'blæseren stod stille eller kunne ikke læses' }
+  elseif ($F -ge 70) { $ui.OcEstN.Text = 'mærkbart'; $ui.OcEstNSub.Text = "blæseren kører allerede $([math]::Round($F)) %" }
+  else { $ui.OcEstN.Text = "+$([math]::Round([math]::Max(2, $tAdd * 2))) %"; $ui.OcEstNSub.Text = "blæser ca. $([math]::Round($F)) → $([math]::Round([math]::Min(100, $F + [math]::Max(2, $tAdd * 2)))) %" }
+  $verdict = if ($g -lt 3) { "👎 Giver næppe mening: ca. +$([math]::Round($g, 1)) % FPS" } elseif ($g -lt 6) { "🤷 Måske: ca. +$([math]::Round($g, 1)) % FPS" } else { "👍 Værd at prøve: ca. +$([math]::Round($g, 1)) % FPS" }
+  $ui.GpuOcEstTitle.Text = "Skøn før du overclocker · $verdict"
+  $tail = if ($g -lt 3) { "Brug hellere 'Find det bedste punkt' til mindre strøm, varme og larm. Det mærker du mere." }
+          elseif ($g -lt 6) { "Det er svært at mærke i spil (fx 60 → $([math]::Round(60 * (1 + $g / 100))) fps). Det kan være værd det, hvis du ligger lige under din skærms Hz." }
+          else { "Det kan mærkes lidt i tunge spil (fx 60 → $([math]::Round(60 * (1 + $g / 100))) fps). Til gengæld bliver kortet varmere og lidt mere højlydt." }
+  $src = if ($ref) { $ref.Src } else { 'Skønnet bygger på, at nyere NVIDIA-kort typisk giver 3-8 % ved overclock, fordi GPU Boost allerede udnytter det meste fra fabrikken.' }
+  $ui.GpuOcEstText.Text = (@($why) + @($tail, "", "ℹ  $src Det er et skøn. Din chip kan være bedre eller dårligere. Trin 3 viser det rigtige tal.")) -join "`n"
+  $ui.GpuOcEstBox.Visibility = 'Visible'
+  $script:OcEstGain = $g
+}
+function Show-OcCheck($res, $steps) {
+  $s = @($steps)[0]; $b = $script:OcBase
+  $ev = @(); try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $script:OcStart } -ErrorAction Stop | Where-Object { $_.ProviderName -eq 'nvlddmkm' -or $_.Id -eq 4101 }) } catch {}
+  $probs = @()
+  if ($res.Lost) { $probs += 'Grafikdriveren gik ned under testen.' }
+  if ($ev.Count) { $probs += "Windows loggede $($ev.Count) fejl fra grafikdriveren (nvlddmkm)." }
+  if ($s -and $s.FpsMin -and $s.Fps -and [double]$s.FpsMin -lt 0.5 * [double]$s.Fps) { $probs += "FPS faldt pludselig til $([math]::Round($s.FpsMin)) (normalt $([math]::Round($s.Fps)))." }
+  $nums = ''; $dF = $null
+  if ($s -and $s.Fps -and $b -and $b.Fps) {
+    $dF = 100 * ([double]$s.Fps - [double]$b.Fps) / [double]$b.Fps
+    $dW = if ($b.W) { 100 * ([double]$s.W - [double]$b.W) / [double]$b.W } else { 0 }
+    $nums = "FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %) · strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %) · clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz (laveste $([math]::Round($s.Cmin))) · højeste temp $([math]::Round($s.Tmax)) °C"
+  }
+  $hot = if ($s -and $s.Tmax -ge 83) { "`n🌡  Højeste temperatur var $([math]::Round($s.Tmax)) °C. Det er varmt: giv blæserkurven lidt mere fart, eller skru lidt ned." } else { '' }
+  $note = "`n`nPC-Tjek kan ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
+  if ($probs.Count) {
+    Set-OcBox 'bad' '⛔ Ikke stabilt' ("$($probs -join ' ')`n`nSkru core clock 15-30 MHz ned (eller memory 100-200 MHz) i Afterburner, eller kør NVIDIAs automatiske tuning igen. Tryk så '3 · Tjek OC' igen.$(if ($nums) { "`n`n$nums" })$hot")
+    Log "OC-tjek: ustabilt ($($probs -join ' '))"
+  } elseif ($res.Aborted) {
+    Set-OcBox 'warn' 'Stoppet før tid' "Testen skal køre alle 5 minutter, før du kan stole på, at overclocket holder.$(if ($nums) { "`n`n$nums" })"
+  } elseif ($null -eq $dF) {
+    Set-OcBox 'warn' 'Ingen sammenligning' 'Testen gav ingen brugbare tal at sammenligne med. Mål udgangspunktet igen (trin 1).'
+  } elseif ($dF -ge 2) {
+    Set-OcBox 'ok' "✅ Stabilt i 5 minutter · $('{0:+0.0}' -f $dF) % FPS" ("$nums$(if ($script:OcEstGain) { "`nSkønnet var ca. +$([math]::Round($script:OcEstGain, 1)) %." })$hot`n`nNæste skridt: gem profilen (NVIDIA App gemmer selv; i Afterburner trykker du Save og et nummer). Spil et par timer. Går et spil ned, så skru 15 MHz ned.$note")
+    Log "OC-tjek: stabilt, $('{0:+0.0}' -f $dF) % FPS"
+  } else {
+    Set-OcBox 'warn' "Stabilt, men kun $('{0:+0.0;-0.0;0}' -f $dF) % FPS" ("$nums$hot`n`nOverclocket giver næsten ingenting her. Det er ofte smartere at gå tilbage til standard og bruge 'Find det bedste punkt' til mindre strøm og støj i stedet.$note")
+  }
+  $ui.GpuOcInfo.Text = "Tjekket kl. $(Get-Date -Format 'HH:mm'). Ændr noget, og tjek igen for at sammenligne med udgangspunktet."
+}
+$ui.BtnOcBase.Add_Click({ Start-GpuBench 'ocbase' })
+$ui.BtnOcCheck.Add_Click({ Start-GpuBench 'occheck' })
+$ui.BtnOcTune.Add_Click({
+  $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  $ab = @("${env:ProgramFiles(x86)}\MSI Afterburner\MSIAfterburner.exe", "$env:ProgramFiles\MSI Afterburner\MSIAfterburner.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $script:OcBase) { if ((Msg "Mål udgangspunktet først (trin 1), så PC-Tjek kan se, hvad overclocket giver.`n`nVil du alligevel fortsætte?" 'OC-tjek' 'YesNo' 'Question') -ne 'Yes') { return } }
+  $t = "PC-Tjek overclocker ikke selv. Det kræver NVIDIAs lukkede værktøjer, og et forkert gæt kan give nedbrud. Lad NVIDIAs egen scanner finde et sikkert overclock til netop dit kort:`n`n"
+  if ($nv) { $t += "NVIDIA App (anbefalet):`n1.  Gå til System → Performance.`n2.  Slå 'Automatic Tuning' til. Den scanner i ca. 10-20 minutter. Brug ikke pc'en imens.`n3.  Kom tilbage, og tryk '3 · Tjek OC'.`n`n" }
+  if ($ab) { $t += "MSI Afterburner:`n1.  Tryk Ctrl+F, og klik 'OC Scanner'.`n2.  Klik 'Scan' (ca. 15-20 min.) og derefter 'Apply'.`n3.  Klik Save og et profilnummer. Tryk så '3 · Tjek OC'.`n`n" }
+  if (-not $nv -and -not $ab) { $t += "Hverken NVIDIA App eller MSI Afterburner er installeret. Hent NVIDIA App fra NVIDIAs side, og kom tilbage hertil.`n`n" }
+  $t += "Luk Afterburner under PC-Tjeks egne tests, så de ikke kæmper om indstillingerne."
+  $open = if ($nv) { 'NVIDIA App' } elseif ($ab) { 'MSI Afterburner' } else { 'NVIDIAs side' }
+  if ((Msg "$t`n`nÅbn $open nu?" 'Find overclock automatisk' 'YesNo' 'Information') -ne 'Yes') { return }
+  if ($nv) { Start-Process $nv } elseif ($ab) { Start-Process $ab } else { Start-Process 'https://www.nvidia.com/en-us/software/nvidia-app/' }
+})
+
 function Show-GpuAuto($res, $steps) {
   $base = $steps[0]
   $rec = $base
@@ -4068,6 +4230,8 @@ function Load-Gpu {
   if (-not $script:GpuMeasuring -and (Test-Path $GpuPlFile)) {
     try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; $ui.GpuAutoInfo.Text = "✓ Aktiv: strømgrænse $($g.Pct) % ($($g.Watts) W) siden $(([datetime]$g.Date).ToString('dd-MM')). Kør testen igen for at genberegne, eller nulstil efter en test." } catch {}
   }
+  if (-not $script:OcBase) { $f = Join-Path $OutDir 'gpu-oc-udgangspunkt.json'; if (Test-Path $f) { try { $script:OcBase = Get-Content $f -Raw | ConvertFrom-Json } catch {} } }
+  if ($script:OcBase) { Show-OcBase; try { Show-OcEstimate } catch {}; if (-not $script:GpuMeasuring) { $ui.BtnOcCheck.IsEnabled = $true } }
   $pw = Get-GpuProfileW
   $ui.ChkGpuResCmp.IsEnabled = ($pw -gt 0)
   $ui.ChkGpuResCmp.Content = $(if ($pw -gt 0) { "Sammenlign med min GPU-profil ($pw W) · ca. 3 minutter" } else { "Sammenlign med min GPU-profil (kør 'Find det bedste punkt' først)" })

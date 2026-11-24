@@ -14,6 +14,8 @@ let work = parseFloat(q.get('work')) || 0;
 const resMode = q.get('res') === '1';   // fast opløsning (1080p/1440p/4K), uafhængig af skærmen
 if (resMode) work = 1.0;
 const fixed = resMode || work > 0; if (!fixed) work = 1.0;
+let remain = null;
+const fmtR = x => x == null ? '' : ` · ⏱ ${Math.floor(x / 60)}:${String(x % 60).padStart(2, '0')} tilbage`;
 const post = (p, d) => fetch(p, { method: 'POST', body: JSON.stringify(d || {}) }).catch(() => {});
 const c = document.getElementById('c'), o = document.getElementById('o');
 const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
@@ -58,6 +60,7 @@ const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.v
 const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
 function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRatio * work)); c.height = Math.max(180, Math.round(innerHeight * devicePixelRatio * work)); gl.viewport(0, 0, c.width, c.height); }
 resize(); addEventListener('resize', resize);
+c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'PC-Tjek GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
 addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
 // Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
@@ -97,20 +100,20 @@ function frame(now){
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     const fps = rfps * K;
     if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label} · Esc for at stoppe</small>`;
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
-    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label} · Esc for at stoppe</small>`;
+    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 setInterval(() => fetch('/state').then(r => r.json()).then(s => {
-  label = s.Label || ''; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+  label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
 }).catch(() => {}), resMode ? 400 : 1000);
 </script></body></html>
