@@ -20,7 +20,7 @@ if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.20'
+$AppVersion = '2.22'
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
 New-Item -ItemType Directory -Force $OutDir, $SnapDir | Out-Null
@@ -119,6 +119,176 @@ namespace PcTjek {
 }
 '@ }
 
+
+# =====================================================================
+#  TILSTANDE (Spil / Fokus) + SIKKER GENDANNELSE  -  deles af appen og Vagten
+#  Princip: alt, der ændres, skrives i mode.json FØR det ændres. Så kan det altid
+#  sættes tilbage, også hvis appen, Vagten eller pc'en går ned midt i det hele.
+# =====================================================================
+$ModeBase       = Join-Path $env:ProgramData 'PC-Tjek'
+$ModeFile       = Join-Path $ModeBase 'mode.json'
+$ModeEnding     = Join-Path $ModeBase 'mode-ending.json'
+$ModeLast       = Join-Path $ModeBase 'mode-last.json'
+$ModeStopFlag   = Join-Path $ModeBase 'mode-stop.flag'
+$GamesFile      = Join-Path $ModeBase 'spil.json'
+$GpuRestoreFile = Join-Path $ModeBase 'gpu-restore.json'
+$HostsFile      = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+$HostsBegin     = '# >>> PC-Tjek Fokus (fjernes automatisk, når fokus slutter)'
+$HostsEnd       = '# <<< PC-Tjek Fokus'
+# Vises aldrig som "må lukkes": Windows, sikkerhed, drivere, lyd og anti-cheat
+$ModeNever = @('system','idle','registry','smss','csrss','wininit','winlogon','services','lsass','lsaiso','svchost','dwm','explorer','fontdrvhost','sihost','ctfmon',
+  'taskhostw','runtimebroker','searchhost','searchindexer','startmenuexperiencehost','shellexperiencehost','textinputhost','dllhost','conhost','audiodg','msmpeng','nissrv',
+  'securityhealthservice','securityhealthsystray','mpdefendercoreservice','smartscreen','spoolsv','wmiprvse','wuauclt','tiworker','trustedinstaller','mousocoreworker',
+  'usoclient','powershell','pwsh','nvcontainer','nvdisplay.container','nvsphelper64','nvidia share','nvidia overlay','nvidia-smi','nvidia app','amdrsserv','atiesrxx',
+  'atieclxx','radeonsoftware','easyanticheat','easyanticheat_eos','beservice','bedaisy','vgc','vgtray','faceit','faceitservice','eaanticheat.gameservice','applicationframehost',
+  'systemsettings','lockapp','msedgewebview2','useroobebroker','securityhealthhost','memcompression','secure system','wudfhost','igfxem','rtkaudupd64','rtkauduservice64',
+  'nahimicsvc64','realtekaudioservice','msiafterburner','rtss')
+# Bruges ofte under spil: vises, men er ikke valgt
+$ModeUsual = @('steam','steamwebhelper','steamservice','epicgameslauncher','epicwebhelper','battle.net','agent','eadesktop','eabackgroundservice','upc','ubisoftconnect',
+  'riotclientservices','riotclientux','galaxyclient','discord','obs64','obs32','spotify','teams','ms-teams','lghub','lghub_agent','icue','razer synapse 3','steelseriesgg',
+  'armourycrate','logioptionsplus','voicemeeter','voicemeeter8x64')
+$ModeLaunchers = @('steam','steamwebhelper','epicgameslauncher','battle.net','agent','eadesktop','upc','ubisoftconnect','riotclientservices','galaxyclient')
+
+function ModeLog($msg) {
+  if (Get-Command VLog -CommandType Function -ErrorAction SilentlyContinue) { VLog 'Tilstand' 'info' $msg '' '' }
+  elseif (Get-Command Log -CommandType Function -ErrorAction SilentlyContinue) { Log $msg }
+}
+function Get-ModeState { if (Test-Path $ModeFile) { try { return (Get-Content $ModeFile -Raw -ErrorAction Stop | ConvertFrom-Json) } catch {} }; return $null }
+function Save-ModeState($m) { [IO.File]::WriteAllText($ModeFile, ($m | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false)) }
+function Get-Games {
+  if (-not (Test-Path $GamesFile)) { return @() }
+  try { return @(Get-Content $GamesFile -Raw -ErrorAction Stop | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.Exe }) } catch { return @() }
+}
+function Save-Games($list) { [IO.File]::WriteAllText($GamesFile, (ConvertTo-Json -InputObject @($list) -Depth 5), (New-Object Text.UTF8Encoding $false)) }
+function Exe-Key($exe) { ([IO.Path]::GetFileNameWithoutExtension([string]$exe)).ToLower() }
+
+function Get-SmiPath { foreach ($p in "$env:SystemRoot\System32\nvidia-smi.exe", "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe") { if (Test-Path $p) { return $p } }; return $null }
+function Get-GpuPlNow {
+  $s = Get-SmiPath; if (-not $s) { return $null }
+  $v = & $s --query-gpu=power.limit --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+  $d = 0.0
+  if ([double]::TryParse(([string]$v).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d) -and $d -gt 0) { return [int][math]::Round($d) }
+  return $null
+}
+function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
+
+# Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
+$ToastKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
+function Get-Toasts { try { return [int](Get-ItemProperty $ToastKey -Name ToastEnabled -ErrorAction Stop).ToastEnabled } catch { return 1 } }
+function Set-Toasts([int]$on) { try { if (-not (Test-Path $ToastKey)) { New-Item $ToastKey -Force | Out-Null }; Set-ItemProperty $ToastKey -Name ToastEnabled -Value $on -Type DWord -Force } catch {} }
+
+function Clean-Site($s) { (([string]$s).Trim().ToLower() -replace '^https?://', '' -replace '/.*$', '' -replace '^www\.', '' -replace '^m\.', '') }
+function Remove-HostsBlock {
+  if (-not (Test-Path $HostsFile)) { return }
+  $txt = [IO.File]::ReadAllText($HostsFile)
+  if ($txt -notlike "*$HostsBegin*") { return }
+  $new = [regex]::Replace($txt, '(\r?\n)?' + [regex]::Escape($HostsBegin) + '.*?' + [regex]::Escape($HostsEnd) + '\r?\n?', "`r`n", 'Singleline')
+  [IO.File]::WriteAllText($HostsFile, $new.TrimEnd() + "`r`n", (New-Object Text.UTF8Encoding $false))
+  & ipconfig.exe /flushdns 2>&1 | Out-Null
+}
+function Set-HostsBlock($sites) {
+  Remove-HostsBlock
+  $lines = @('', $HostsBegin)
+  foreach ($s in @($sites)) {
+    $d = Clean-Site $s
+    if ($d -notmatch '^[a-z0-9-]+(\.[a-z0-9-]+)+$') { continue }
+    foreach ($h in $d, "www.$d", "m.$d") { $lines += "0.0.0.0 $h"; $lines += ":: $h" }
+  }
+  $lines += $HostsEnd
+  $txt = ''; if (Test-Path $HostsFile) { $txt = [IO.File]::ReadAllText($HostsFile).TrimEnd() }
+  [IO.File]::WriteAllText($HostsFile, $txt + "`r`n" + ($lines -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding $false))
+  & ipconfig.exe /flushdns 2>&1 | Out-Null
+}
+
+function Start-GameMode($game) {
+  if (Test-Path $ModeFile) { return $null }
+  $m = [ordered]@{ Mode = 'Spil'; Name = [string]$game.Name; Exe = [string]$game.Exe; Started = (Get-Date).ToString('s'); Until = ''
+                   Paused = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @(); Notes = @() }
+  Save-ModeState $m
+  if ($game.Mute) { $m.PrevToast = Get-Toasts; Save-ModeState $m; Set-Toasts 0 }
+  if ([int]$game.GpuWatts -gt 0) {
+    $prev = Get-GpuPlNow
+    if ($prev) { $m.PrevPl = $prev; Save-ModeState $m; if (Set-GpuPlNow $game.GpuWatts) { $m.NewPl = [int]$game.GpuWatts } else { $m.PrevPl = $null } }
+    Save-ModeState $m
+  }
+  $paused = New-Object System.Collections.ArrayList
+  foreach ($n in @($game.Close)) {
+    if (-not $n -or ($ModeNever -contains ([string]$n).ToLower())) { continue }
+    $ps = @(Get-Process -Name $n -ErrorAction SilentlyContinue)
+    if (-not $ps.Count) { continue }
+    $path = ($ps | Where-Object { $_.Path } | Select-Object -First 1).Path
+    [void]$paused.Add([ordered]@{ Name = [string]$n; Path = [string]$path })
+    $m.Paused = @($paused); Save-ModeState $m
+    if (([string]$n).ToLower() -eq 'onedrive' -and $path) { try { Start-Process -FilePath $path -ArgumentList '/shutdown' -WindowStyle Hidden } catch {}; Start-Sleep -Milliseconds 800 }
+    foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) { try { [void]$p.CloseMainWindow() } catch {} }
+  }
+  if ($paused.Count) {
+    Start-Sleep -Milliseconds 2000
+    foreach ($x in $paused) { foreach ($p in @(Get-Process -Name $x.Name -ErrorAction SilentlyContinue)) { try { $p.Kill() } catch {} } }
+  }
+  ModeLog "Spil-tilstand startet: $($game.Name) ($($paused.Count) ting sat på pause)"
+  return $m
+}
+function Start-FocusMode([int]$min, [bool]$mute, $sites) {
+  if (Test-Path $ModeFile) { throw 'En anden tilstand er allerede aktiv. Afslut den først.' }
+  $clean = @(@($sites) | ForEach-Object { Clean-Site $_ } | Where-Object { $_ -match '^[a-z0-9-]+(\.[a-z0-9-]+)+$' } | Select-Object -Unique)
+  $m = [ordered]@{ Mode = 'Fokus'; Name = "$min min"; Exe = ''; Started = (Get-Date).ToString('s'); Until = (Get-Date).AddMinutes($min).ToString('s')
+                   Paused = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @($clean); Notes = @() }
+  if ($mute) { $m.PrevToast = Get-Toasts }
+  Save-ModeState $m
+  if ($mute) { Set-Toasts 0 }
+  if ($clean.Count) { Set-HostsBlock $clean }
+  ModeLog "Fokus startet: $min min$(if ($clean.Count) { " · blokerer $($clean -join ', ')" })"
+  return $m
+}
+# Sætter alt tilbage. Kun én proces kan gøre det ad gangen (filen flyttes atomisk).
+function Stop-Mode($reason) {
+  if (-not (Test-Path $ModeFile)) { return $null }
+  try { Move-Item -LiteralPath $ModeFile -Destination $ModeEnding -Force -ErrorAction Stop } catch { return $null }
+  $m = $null; try { $m = Get-Content $ModeEnding -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+  $done = New-Object System.Collections.ArrayList
+  if ($m) {
+    if ($null -ne $m.PrevToast) { Set-Toasts ([int]$m.PrevToast); [void]$done.Add('Windows-beskeder er som før') }
+    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør PC-Tjek igen.') } }
+    if ($m.PrevPl) { if (Set-GpuPlNow $m.PrevPl) { [void]$done.Add("Grafikkortet er tilbage på $($m.PrevPl) W") } else { [void]$done.Add("Kunne ikke sætte grafikkortet tilbage til $($m.PrevPl) W") } }
+    foreach ($p in @($m.Paused)) {
+      if (-not $p.Path -or -not (Test-Path -LiteralPath $p.Path)) { continue }
+      if (Get-Process -Name $p.Name -ErrorAction SilentlyContinue) { continue }
+      # explorer.exe starter programmet som dig selv, IKKE som administrator
+      try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$($p.Path)`""; [void]$done.Add("$($p.Name) er startet igen") } catch {}
+    }
+  }
+  try { Remove-HostsBlock } catch {}
+  $sum = [ordered]@{ Mode = $(if ($m) { $m.Mode } else { '' }); Name = $(if ($m) { $m.Name } else { '' }); Started = $(if ($m) { $m.Started } else { '' })
+                     Ended = (Get-Date).ToString('s'); Reason = [string]$reason; Done = @($done) }
+  try { [IO.File]::WriteAllText($ModeLast, ($sum | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false)) } catch {}
+  Remove-Item $ModeEnding, $ModeStopFlag -Force -ErrorAction SilentlyContinue
+  ModeLog "$($sum.Mode) sluttede ($reason): $(@($done) -join ' · ')"
+  return $sum
+}
+# Afbrudt GPU-test: gendan strømgrænsen, hvis test-processen ikke længere kører
+function Repair-GpuRestore {
+  if (-not (Test-Path $GpuRestoreFile)) { return $false }
+  try {
+    $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
+    $p = $null; if ($g.Pid) { $p = Get-Process -Id ([int]$g.Pid) -ErrorAction SilentlyContinue }
+    if ($p -and $p.ProcessName -eq 'powershell') { return $false }   # testen kører stadig
+    if ([int]$g.Watts -gt 0) { [void](Set-GpuPlNow $g.Watts) }
+    Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue
+    ModeLog "GPU-testen blev afbrudt. Strømgrænsen er sat tilbage til $($g.Watts) W."
+    return $true
+  } catch { return $false }
+}
+# Ved opstart: ryd op efter alt, der blev afbrudt
+function Repair-Modes {
+  [void](Repair-GpuRestore)
+  if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
+  $m = Get-ModeState
+  if (-not $m) { return $null }
+  if ($m.Mode -eq 'Fokus' -and $m.Until -and (Get-Date) -gt [datetime]$m.Until) { return (Stop-Mode 'tiden var gået') }
+  if ($m.Mode -eq 'Spil' -and -not (Get-Process -Name (Exe-Key $m.Exe) -ErrorAction SilentlyContinue)) { return (Stop-Mode 'spillet var lukket') }
+  return $null
+}
 $ScanScript = {
   param($sync, $arg)
   $ErrorActionPreference = 'SilentlyContinue'
@@ -874,7 +1044,9 @@ canvas{width:100vw;height:100vh;display:block}
 <script>
 const q = new URLSearchParams(location.search);
 let work = parseFloat(q.get('work')) || 0;
-const fixed = work > 0; if (!fixed) work = 1.0;
+const resMode = q.get('res') === '1';   // fast opløsning (1080p/1440p/4K), uafhængig af skærmen
+if (resMode) work = 1.0;
+const fixed = resMode || work > 0; if (!fixed) work = 1.0;
 const post = (p, d) => fetch(p, { method: 'POST', body: JSON.stringify(d || {}) }).catch(() => {});
 const c = document.getElementById('c'), o = document.getElementById('o');
 const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
@@ -921,14 +1093,46 @@ function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRa
 resize(); addEventListener('resize', resize);
 addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
+// Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
+// For at komme forbi skærmens Hz-loft tegnes den K gange pr. skærmbillede; FPS = antal tegninger pr. sekund.
+let fbo = null, rb = null, fw = 0, fh = 0, K = 1, kUntil = 0;
+function setRes(str){
+  const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
+  const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
+  fw = w; fh = h;
+  if (!fbo) { fbo = gl.createFramebuffer(); rb = gl.createRenderbuffer(); }
+  gl.bindRenderbuffer(gl.RENDERBUFFER, rb); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  K = 1; kUntil = performance.now() + 3000; win = []; winStart = performance.now();
+}
+if (resMode) { setRes(q.get('r0') || '1920x1080'); post('/calib', { work: 0 }); }
+function adaptK(fps){ if (fps > 50) K = Math.min(48, Math.max(K + 1, Math.ceil(K * fps / 40))); else if (fps < 22 && K > 1) K = Math.max(1, Math.floor(K * fps / 35)); }
+function drawRes(now){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, fw, fh); gl.uniform2f(uR, fw, fh);
+  for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, c.width, c.height);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  const sc = Math.min(c.width / fw, c.height / fh), dw = Math.round(fw * sc), dh = Math.round(fh * sc), dx = (c.width - dw) >> 1, dy = (c.height - dh) >> 1;
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+  gl.blitFramebuffer(0, 0, fw, fh, dx, dy, dx + dw, dy + dh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
 // Kalibrering: juster belastningen, så FPS ligger under skærmens Hz (ellers begrænser vsync målingen)
 function calibrate(fps){ if (fps > 55) work = Math.min(3.0, work * 1.3); else if (fps < 25) work = Math.max(0.4, work * 0.85); resize(); }
 function frame(now){
   if (done) return;
   const dt = now - last; last = now; frames++; win.push(dt);
-  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-  if (now - winStart >= 1000) {
+  if (resMode) drawRes(now);
+  else { gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  if (resMode && now - winStart >= 1000) {
+    const ms = now - winStart, f = win.length, rfps = 1000 * f / ms;
+    const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
+    const fps = rfps * K;
+    if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${now < kUntil ? 'Finder belastning…' : label} · Esc for at stoppe</small>`;
+    win = []; winStart = now;
+  } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
@@ -940,8 +1144,8 @@ function frame(now){
 }
 requestAnimationFrame(frame);
 setInterval(() => fetch('/state').then(r => r.json()).then(s => {
-  label = s.Label || ''; if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
-}).catch(() => {}), 1000);
+  label = s.Label || ''; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+}).catch(() => {}), resMode ? 400 : 1000);
 </script></body></html>
 '@
 # Indbygget GPU-test: lokal webside med 3D-scene (WebGL2) i fuld skærm + målinger via nvidia-smi.
@@ -963,7 +1167,8 @@ $GpuBenchScript = {
   $listener = New-Object Net.HttpListener
   $port = 8760
   while ($true) { try { $listener.Prefixes.Clear(); $listener.Prefixes.Add("http://localhost:$port/"); $listener.Start(); break } catch { $port++; if ($port -gt 8799) { throw 'Ingen ledig port til testen.' } } }
-  $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false }
+  $resList = @($arg.Res | Where-Object { $_ })
+  $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false; Res = $(if ($resList.Count) { [string]$resList[0] } else { '' }) }
   $script:BFps = New-Object System.Collections.ArrayList
   $script:BAbort = $false; $script:BErr = $null
   $script:BWork = [double]$arg.Work; $script:BCalib = ($script:BWork -gt 0)
@@ -989,7 +1194,7 @@ $GpuBenchScript = {
   }
   function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 80 } }
   $prof = Join-Path $arg.Dir 'browser'
-  $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))"
+  $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))$(if ($resList.Count) { "&res=1&r0=$($resList[0])" })"
   $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate" }
            else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check `"$url`"" }
   $results = New-Object System.Collections.ArrayList
@@ -1007,8 +1212,16 @@ $GpuBenchScript = {
       if ($script:BAbort) { break }
       $pl = $steps[$i]
       $script:BState.Step = $i + 1
-      $script:BState.Label = if ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
-      if ($pl) { & $smi -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true }
+      $rs = if ($resList.Count) { [string]$arg.Res[$i] } else { '' }
+      $script:BState.Res = $rs
+      $resTxt = if ($rs) { " · $($rs -replace 'x', '×')" } else { '' }
+      $script:BState.Label = if ($pl -and $rs) { "Trin $($i + 1)/$total$resTxt · $([math]::Round($pl)) W" } elseif ($rs) { "Trin $($i + 1)/$total$resTxt" } elseif ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
+      if ($pl) {
+        if (-not $changedPl -and $arg.RestoreFile -and $orig) {   # gem den oprindelige værdi FØR første ændring
+          [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Watts = [int][math]::Round($orig); Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress))
+        }
+        & $smi -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true
+      }
       $sync.Status = "$($script:BState.Label): stabiliserer..."
       WaitPump 5
       $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
@@ -1030,10 +1243,11 @@ $GpuBenchScript = {
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
-      [void]$results.Add([pscustomobject]@{ Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
+      [void]$results.Add([pscustomobject]@{ Res = $rs; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {
     if ($changedPl -and $orig) { & $smi -pl ([math]::Round($orig)) 2>&1 | Out-Null }   # gendan altid den oprindelige strømgrænse
+    if ($arg.RestoreFile) { Remove-Item -LiteralPath ([string]$arg.RestoreFile) -Force -ErrorAction SilentlyContinue }
     $script:BState.Done = $true
     try { WaitPump 1.5 } catch {}
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
@@ -1170,6 +1384,7 @@ $GpuBenchScript = {
         <StackPanel Grid.Row="1">
           <RadioButton Name="NavHome"    Style="{StaticResource Nav}" GroupName="nav" IsChecked="True" Content="🏠   Overblik"/>
           <RadioButton Name="NavTweaks"  Style="{StaticResource Nav}" GroupName="nav" Content="⚡   Optimering"/>
+          <RadioButton Name="NavModes"   Style="{StaticResource Nav}" GroupName="nav" Content="🎮   Tilstande"/>
           <RadioButton Name="NavVagt"    Style="{StaticResource Nav}" GroupName="nav" Content="🛡   Vagt"/>
           <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
           <RadioButton Name="NavTime"    Style="{StaticResource Nav}" GroupName="nav" Content="🕒   Hændelsesforløb"/>
@@ -1185,6 +1400,13 @@ $GpuBenchScript = {
               <TextBlock Name="UpdateText" Text="✨ Ny version klar" FontWeight="SemiBold" TextWrapping="Wrap"/>
               <TextBlock Name="UpdateNotes" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,10"/>
               <Button Name="BtnUpdateApp" Content="⬇  Opdatér nu" Style="{StaticResource Primary}" Margin="0"/>
+            </StackPanel>
+          </Border>
+          <Border Name="ModeSide" Visibility="Collapsed" CornerRadius="12" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="12,10" Margin="0,0,0,10" Cursor="Hand" ToolTip="Klik for at se, hvad PC-Tjek har gjort">
+            <StackPanel>
+              <TextBlock Name="ModeSideTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+              <TextBlock Name="ModeSideSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,8"/>
+              <Button Name="BtnModeStopSide" Content="⏹  Afslut og gendan" Padding="10,6" Margin="0" FontSize="12"/>
             </StackPanel>
           </Border>
           <Button Name="BtnScan" Style="{StaticResource Primary}" Content="🔍   Scan pc'en" Padding="14,12" Margin="0,0,0,10" FontSize="14"/>
@@ -1319,6 +1541,116 @@ $GpuBenchScript = {
       </Grid>
 
       <!-- VAGT -->
+
+      <!-- TILSTANDE -->
+      <Grid Name="PageModes" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="0,0,8,0">
+          <TextBlock Style="{StaticResource H1}" Text="Tilstande"/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Midlertidige indstillinger til spil og fokus. Alt bliver sat tilbage, når du er færdig, også hvis pc'en går ned undervejs. Du kan altid se, hvad PC-Tjek har gjort."/>
+          <Border Name="ModeActiveCard" Visibility="Collapsed" CornerRadius="14" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="20,16" Margin="0,0,0,14">
+            <DockPanel>
+              <Button Name="BtnModeStop" DockPanel.Dock="Right" Content="⏹  Afslut og gendan" Style="{StaticResource Primary}" VerticalAlignment="Center" Padding="16,10" Margin="12,0,0,0"/>
+              <StackPanel>
+                <TextBlock Name="ModeActiveTitle" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock Name="ModeActiveSub" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <TextBlock Name="ModeLastText" Style="{StaticResource Sub}" FontSize="12" Margin="2,0,0,14" Visibility="Collapsed"/>
+
+          <Border Style="{StaticResource CardB}" Padding="20,18" Margin="0,0,0,14">
+            <StackPanel>
+              <DockPanel>
+                <Button Name="BtnGameAdd" DockPanel.Dock="Right" Content="➕  Tilføj spil" Style="{StaticResource Primary}" VerticalAlignment="Top" Margin="0"/>
+                <StackPanel>
+                  <TextBlock Text="🎮  Spil" FontSize="17" FontWeight="SemiBold"/>
+                  <TextBlock Style="{StaticResource Sub}" Margin="0,4,12,0" Text="Starter af sig selv, når et af dine spil åbner, og slutter, når du lukker det: lukker de baggrundsapps, du har valgt, dæmper beskeder og bruger evt. din GPU-profil. Bagefter startes alt igen."/>
+                </StackPanel>
+              </DockPanel>
+              <TextBlock Name="GamesEmpty" Style="{StaticResource Sub}" Margin="0,14,0,0" Text="Ingen spil endnu. Start dit spil, og tryk så på Tilføj spil. Så finder PC-Tjek det selv."/>
+              <DataGrid Name="GridGames" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="200" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="SPIL" Binding="{Binding Navn}" Width="2*"/>
+                  <DataGridTextColumn Header="LUKKER" Binding="{Binding Info}" Width="3*"/>
+                  <DataGridTextColumn Header="GPU" Binding="{Binding Note}" Width="110"/>
+                  <DataGridTextColumn Header="BESKEDER" Binding="{Binding Gruppe}" Width="100"/>
+                </DataGrid.Columns>
+              </DataGrid>
+              <StackPanel Name="GameBtns" Orientation="Horizontal" Margin="0,10,0,0" Visibility="Collapsed">
+                <Button Name="BtnGameEdit" Content="✏  Ret valgt" IsEnabled="False"/>
+                <Button Name="BtnGameRemove" Content="🗑  Fjern valgt" IsEnabled="False"/>
+              </StackPanel>
+
+              <Border Name="GamePick" Visibility="Collapsed" CornerRadius="12" Background="#141821" BorderBrush="#2A3142" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+                <StackPanel>
+                  <TextBlock Text="Hvilket spil?" FontWeight="SemiBold" FontSize="15"/>
+                  <TextBlock Style="{StaticResource Sub}" Margin="0,4,0,10" Text="Her er de programmer med et vindue, der kører lige nu. Vælg dit spil, eller find programfilen selv."/>
+                  <DataGrid Name="GridGamePick" IsReadOnly="True" MaxHeight="220">
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="VINDUE" Binding="{Binding Navn}" Width="3*"/>
+                      <DataGridTextColumn Header="PROGRAM" Binding="{Binding Info}" Width="2*"/>
+                    </DataGrid.Columns>
+                  </DataGrid>
+                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Name="BtnGamePickOk" Content="Vælg" Style="{StaticResource Primary}" IsEnabled="False"/>
+                    <Button Name="BtnGameBrowse" Content="📂  Find programfil..."/>
+                    <Button Name="BtnGamePickCancel" Content="Annullér"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <Border Name="GameSetup" Visibility="Collapsed" CornerRadius="12" Background="#141821" BorderBrush="#2A3142" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+                <StackPanel>
+                  <TextBlock Name="GameSetupTitle" FontWeight="SemiBold" FontSize="15"/>
+                  <TextBlock Name="GameSetupSub" Style="{StaticResource Sub}" Margin="0,4,0,10"/>
+                  <DataGrid Name="GridModeApps" MaxHeight="300">
+                    <DataGrid.Columns>
+                      <DataGridTemplateColumn Header="LUK" Width="48">
+                        <DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding Valgt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+                      </DataGridTemplateColumn>
+                      <DataGridTextColumn Header="PROGRAM" Binding="{Binding Navn}" Width="2*" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="CPU" Binding="{Binding Info}" Width="70" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="DISK/NET" Binding="{Binding Gruppe}" Width="90" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="RAM" Binding="{Binding Status}" Width="75" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="BEMÆRKNING" Binding="{Binding Note}" Width="3*" IsReadOnly="True"/>
+                    </DataGrid.Columns>
+                  </DataGrid>
+                  <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="0,8,0,0" Text="Windows, Defender, Windows Update, drivere og anti-cheat vises ikke. Dem rører PC-Tjek aldrig."/>
+                  <CheckBox Name="ChkGameMute" Content="Dæmp Windows-beskeder, mens jeg spiller" IsChecked="True" Margin="0,12,0,0"/>
+                  <CheckBox Name="ChkGameGpu" Content="Brug min GPU-profil" Margin="0,6,0,0" IsEnabled="False"/>
+                  <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                    <Button Name="BtnGameSave" Content="💾  Gem" Style="{StaticResource Primary}"/>
+                    <Button Name="BtnGameRemeasure" Content="↻  Mål igen"/>
+                    <Button Name="BtnGameCancel" Content="Annullér"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource CardB}" Padding="20,18" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="🔕  Fokus" FontSize="17" FontWeight="SemiBold"/>
+              <TextBlock Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Et stykke tid uden forstyrrelser. Slutter af sig selv, og alt sættes tilbage."/>
+              <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                <RadioButton Name="Foc25" GroupName="foc" Content="25 min" IsChecked="True" Foreground="#E7E9EE" Margin="0,0,22,0"/>
+                <RadioButton Name="Foc50" GroupName="foc" Content="50 min" Foreground="#E7E9EE" Margin="0,0,22,0"/>
+                <RadioButton Name="Foc90" GroupName="foc" Content="90 min" Foreground="#E7E9EE"/>
+              </StackPanel>
+              <CheckBox Name="ChkFocMute" Content="Dæmp beskeder (Windows og PC-Tjek)" IsChecked="True" Margin="0,14,0,0"/>
+              <CheckBox Name="ChkFocBlock" Content="Skjul distraktioner: bloker disse sider i alle browsere" Margin="0,8,0,0"/>
+              <TextBox Name="FocSites" Text="facebook.com, reddit.com, youtube.com, tiktok.com, instagram.com" Margin="26,6,0,0" Padding="8,6" Background="#141821" Foreground="#E7E9EE" BorderBrush="#2A3142" IsEnabled="{Binding IsChecked, ElementName=ChkFocBlock}"/>
+              <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                <Button Name="BtnFocStart" Content="▶  Start fokus" Style="{StaticResource Primary}" Padding="16,10"/>
+                <Button Name="BtnFocNotif" Content="🔔  Er det kun ét websteds beskeder, der generer?"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+          <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="2,0,0,8" Text="På vej: Mødetilstand (test mikrofon og kamera) og 'Hvorfor hakkede mit spil?' med en 60-sekunders måling."/>
+        </StackPanel>
+        </ScrollViewer>
+      </Grid>
       <Grid Name="PageVagt" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <StackPanel Margin="0,0,0,16">
@@ -1565,6 +1897,38 @@ $GpuBenchScript = {
                     </Border>
                   </StackPanel>
                 </Border>
+              </StackPanel>
+            </Border>
+            <!-- FPS ved forskellige opløsninger -->
+            <Border Background="#10131A" BorderBrush="#1E3A5F" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <DockPanel>
+                  <Button Name="BtnGpuRes" DockPanel.Dock="Right" Content="📺  Mål FPS" Style="{StaticResource Primary}" Padding="16,9" Margin="0" VerticalAlignment="Top"/>
+                  <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="📺  FPS ved Full HD, 2K og 4K" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="GpuResInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Samme testscene i 1920×1080, 2560×1440 og 3840×2160, uden skærmens Hz-loft og uanset hvilken skærm du har. Du ser FPS, laveste FPS, strøm og FPS pr. watt for hver opløsning. Ca. 1½ minut."/>
+                    <CheckBox Name="ChkGpuResCmp" Content="Sammenlign med min GPU-profil (ca. 3 minutter)" Margin="0,8,0,0" IsEnabled="False"/>
+                  </StackPanel>
+                </DockPanel>
+                <ProgressBar Name="GpuResBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="#60A5FA" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <DataGrid Name="GridGpuRes" IsReadOnly="True" Margin="0,12,0,0" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="OPLØSNING" Binding="{Binding Navn}" Width="1.5*"/>
+                    <DataGridTextColumn Header="STRØM" Binding="{Binding Info}" Width="1.2*"/>
+                    <DataGridTemplateColumn Header="FPS" Width="2.2*">
+                      <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                          <Border Width="{Binding Tal}" Height="10" CornerRadius="5" Background="#60A5FA" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding Note}" Margin="8,0,0,0" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="LAVESTE 1 %" Binding="{Binding Gruppe}" Width="1*"/>
+                    <DataGridTextColumn Header="WATT · TEMP" Binding="{Binding Status}" Width="1.3*"/>
+                    <DataGridTextColumn Header="FPS PR. WATT" Binding="{Binding Id}" Width="1*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Name="GpuResVerdict" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
               </StackPanel>
             </Border>
             <!-- mål før/efter (egne indstillinger) -->
@@ -1988,7 +2352,10 @@ $jobTimer.Add_Tick({
 })
 $jobTimer.Start()
 # Luk evt. kørende job-processer, når appen lukkes
-$win.Add_Closed({ foreach ($j in @($script:Jobs)) { try { if (-not $j.P.HasExited) { $j.P.Kill() } } catch {} } })
+$win.Add_Closed({
+  foreach ($j in @($script:Jobs)) { try { if (-not $j.P.HasExited) { $j.P.Kill(); [void]$j.P.WaitForExit(3000) } } catch {} }
+  try { if (Repair-GpuRestore) { Log 'GPU-test afbrudt ved lukning: strømgrænsen er gendannet' } } catch {}   # en afbrudt GPU-test må aldrig efterlade kortet ændret
+})
 
 # Gendannelsespunkt før ændringer (én gang pr. session)
 $script:RestoreDone = $false
@@ -2008,7 +2375,7 @@ function With-RestorePoint($why, $ctx, [scriptblock]$then) {
 # =====================================================================
 #  Navigation
 # =====================================================================
-$pages = @{ NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
+$pages = @{ NavModes = 'PageModes'; NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
 foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
@@ -2016,6 +2383,7 @@ foreach ($nav in $pages.Keys) {
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
     if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {} }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
+    if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks') { try { Load-Gpu } catch { Log "GPU-fejl: $_" } } else { $gpuTimer.Stop() }
   })
@@ -2210,6 +2578,7 @@ function Show-Result-Rest {
 }
 
 $ui.BtnScan.Add_Click({
+  if (-not (Confirm-ModeFree 'En scanning')) { return }
   $ui.BtnScan.IsEnabled = $false; $ui.BtnScan.Content = '⏳   Scanner...'
   $ui.NavHome.IsChecked = $true
   $script:ScanStart = Get-Date; $script:EtaSmooth = $null; $ui.ScanBar.Value = 0
@@ -3150,8 +3519,14 @@ function Restart-Vagt {
   try { Start-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction Stop } catch { Log "Vagt-start fejl: $_" }
 }
 function Test-VagtAlive {
-  if ((Get-VagtProc).Count) { return $true }
-  try { $st = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw | ConvertFrom-Json; return (((Get-Date) - [datetime]$st.Heartbeat).TotalSeconds -lt 90) } catch { return $false }
+  # Fire uafhængige tegn: Vagtens lås, opgavens status, processen og hjerteslaget. Ét er nok.
+  $why = @()
+  try { $mx = [Threading.Mutex]::OpenExisting('Global\PCTjekVagt'); $mx.Dispose(); return $true } catch [Threading.WaitHandleCannotBeOpenedException] { $why += 'ingen lås' } catch { return $true }   # adgang nægtet = låsen findes
+  try { if ((Get-VagtTask).State -eq 'Running') { return $true } else { $why += "opgave: $((Get-VagtTask).State)" } } catch {}
+  if ((Get-VagtProc).Count) { return $true } else { $why += 'ingen proces' }
+  try { $st = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw -ErrorAction Stop | ConvertFrom-Json; $age = ((Get-Date) - [datetime]$st.Heartbeat).TotalSeconds; if ($age -lt 90) { return $true }; $why += "hjerteslag $([int]$age) s gammelt" } catch { $why += "status: $($_.Exception.Message)" }
+  if ($script:LastVagtWhy -ne ($why -join ', ')) { $script:LastVagtWhy = ($why -join ', '); Log "Vagt ikke fundet: $($script:LastVagtWhy)" }
+  return $false
 }
 function Install-Vagt {
   if ($PSScriptRoot -notlike "$env:ProgramFiles\*") { Msg "Vagten kan kun slås til, når PC-Tjek er installeret med installeren (i Program Files).`n`nKør 'Installer PC-Tjek.cmd' først." 'Vagt' 'OK' 'Warning' | Out-Null; return $false }
@@ -3182,7 +3557,7 @@ function Save-VagtCfg {
   try { [IO.File]::WriteAllText($VagtCfg, ($o | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {}
 }
 function Load-Vagt {
-  if (Test-Path $VagtCfg) { try { $j = Get-Content $VagtCfg -Raw | ConvertFrom-Json; $script:VagtLoading = $true; $ui.ChkDl.IsChecked = [bool]$j.Downloads; $ui.ChkWd.IsChecked = [bool]$j.Watchdog; $script:VagtLoading = $false } catch {} }
+  if (Test-Path $VagtCfg) { try { $j = Get-Content $VagtCfg -Raw -ErrorAction Stop | ConvertFrom-Json; $script:VagtLoading = $true; $ui.ChkDl.IsChecked = ($j.Downloads -ne $false); $ui.ChkWd.IsChecked = ($j.Watchdog -ne $false); $script:VagtLoading = $false } catch { $script:VagtLoading = $false; Log "Vagt-indstillinger kunne ikke læses: $($_.Exception.Message)" } }
   $task = Get-VagtTask; $running = Test-VagtAlive
   $stat = $null; try { $stat = Get-Content (Join-Path $JobBase 'vagt-status.json') -Raw | ConvertFrom-Json } catch {}
   $fmtT = { param($t) if ($t) { $d = [datetime]$t; if ($d.Date -eq (Get-Date).Date) { 'kl. ' + $d.ToString('HH:mm') } else { $d.ToString('dd-MM HH:mm') } } else { 'endnu ikke' } }
@@ -3403,6 +3778,7 @@ function Smi-Q($fields) {
 }
 function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
 function Start-GpuBench($mode) {
+  if (-not (Confirm-ModeFree 'GPU-testen')) { return }
   if (-not (Get-Smi)) { Msg 'Testen kræver et NVIDIA-grafikkort (nvidia-smi). Til AMD: brug Auto Undervolt i AMD Adrenalin.' 'GPU' | Out-Null; return }
   if ($mode -eq 'auto') {
     $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'
@@ -3410,32 +3786,45 @@ function Start-GpuBench($mode) {
     if (-not $def) { Msg 'Dit grafikkort tillader ikke, at strømgrænsen ændres (det er fx tilfældet på mange bærbare). Brug i stedet "Test dine egne indstillinger".' 'GPU' | Out-Null; return }
     $steps = @(100, 90, 80, 70 | ForEach-Object { [math]::Max($min, $def * $_ / 100) } | Select-Object -Unique)
     if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
-    $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
+  } elseif ($mode -eq 'res') {
+    $cur = (Smi-Q 'power.limit')[0]
+    $prof = Get-GpuProfileW
+    $cmp = [bool]$ui.ChkGpuResCmp.IsChecked -and $prof -gt 0 -and $cur -and [math]::Abs($prof - $cur) -gt 5
+    $resList = '1920x1080', '2560x1440', '3840x2160'
+    $st = New-Object System.Collections.ArrayList; $rl = New-Object System.Collections.ArrayList
+    foreach ($r in $resList) { [void]$st.Add($null); [void]$rl.Add($r) }
+    if ($cmp) { foreach ($r in $resList) { [void]$st.Add([double]$prof); [void]$rl.Add($r) } }
+    $mins = if ($cmp) { 3 } else { '1½' }
+    if ((Msg "Testen tager ca. $mins minut$(if ($cmp) { 'ter' }):`n`n•  Testscenen vises i fuld skærm i Full HD, 2K og 4K$(if ($cmp) { ", først som nu og så med din GPU-profil ($prof W)" }).`n•  Billedet skaleres til din skærm, så det kan se lidt sløret eller småt ud. Det er meningen.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nStart testen?" 'FPS ved forskellige opløsninger' 'YesNo' 'Question') -ne 'Yes') { return }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($st); Res = @($rl); Work = 0; StepSec = 20; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
+    $ui.GridGpuRes.Visibility = 'Collapsed'; $ui.GpuResVerdict.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Visible'; $ui.GpuResBar.Value = 0
   } else {
     if ($mode -eq 'after' -and -not $script:GpuWork) { Msg 'Mål FØR først.' 'GPU' | Out-Null; return }
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Work = $(if ($mode -eq 'after') { $script:GpuWork } else { 0 }); StepSec = 45; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Work = $(if ($mode -eq 'after') { $script:GpuWork } else { 0 }); StepSec = 45; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GpuMeasureBar.Visibility = 'Visible'; $ui.GpuMeasureBar.Value = 0
     $ui.GpuResult.Text = "Måler $(if ($mode -eq 'before') { 'FØR' } else { 'EFTER' })... Testscenen åbner i fuld skærm om et øjeblik. Rør ikke musen."
     $ui.GpuVerdict.Text = ''
   }
   $script:GpuMeasuring = $true
-  $ui.BtnGpuAuto.IsEnabled = $false; $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false
+  $ui.BtnGpuAuto.IsEnabled = $false; $ui.BtnGpuBefore.IsEnabled = $false; $ui.BtnGpuAfter.IsEnabled = $false; $ui.BtnGpuRes.IsEnabled = $false
   Invoke-Bg $GpuBenchScript $arg {
     param($res, $err, $c)
     $script:GpuMeasuring = $false
-    $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork
-    $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'
+    $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork; $ui.BtnGpuRes.IsEnabled = $true
+    $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
     $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
     if ($err -or -not $steps.Count) {
       $msg = if ($err) { $err } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } else { 'Testscenen gav ingen målinger.' }
-      if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
+      if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
       return
     }
     try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
     if ($c.GpuMode -eq 'auto') { Show-GpuAuto $res $steps }
+    elseif ($c.GpuMode -eq 'res') { Show-GpuRes $steps }
     elseif ($c.GpuMode -eq 'before') {
       $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $res.Work
       $b = $steps[0]
@@ -3453,11 +3842,52 @@ function Start-GpuBench($mode) {
       if (-not $j) { return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
+      elseif ($j.Ctx.GpuMode -eq 'res') { if ($p -ge 0) { $ui.GpuResBar.Value = $p }; if ($j.S.Status) { $ui.GpuResInfo.Text = $j.S.Status } }
       else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
     })
   }
   $script:GpuProgTimer.Start()
 }
+$ResNames = @{ '1920x1080' = 'Full HD · 1080p'; '2560x1440' = '2K · 1440p'; '3840x2160' = '4K · 2160p' }
+$ResShort = @{ '1920x1080' = 'Full HD'; '2560x1440' = '2K'; '3840x2160' = '4K' }
+function Show-GpuRes($steps) {
+  $max = [double](@($steps) | Measure-Object Fps -Maximum).Maximum; if ($max -le 0) { $max = 1 }
+  $rows = @(foreach ($s in $steps) {
+    $r = New-Object PcTjek.Row
+    $r.Navn = $(if ($ResNames.ContainsKey([string]$s.Res)) { $ResNames[[string]$s.Res] } else { [string]$s.Res })
+    $r.Info = $(if ($s.Pl) { "profil · $([math]::Round($s.Pl)) W" } else { 'som nu' })
+    $r.Note = "$([math]::Round($s.Fps)) fps"
+    $r.Gruppe = $(if ($s.P1) { "$([math]::Round($s.P1)) fps" } else { '–' })
+    $r.Status = "$(if ($s.W) { [math]::Round($s.W) } else { '–' }) W · $(if ($s.T) { [math]::Round($s.T) } else { '–' }) °C"
+    $r.Id = $(if ($s.W) { '{0:N2}' -f ($s.Fps / $s.W) } else { '–' })
+    $r.Tal = [math]::Max(4, 150 * [double]$s.Fps / $max)
+    $r })
+  $ui.GridGpuRes.ItemsSource = $rows; $ui.GridGpuRes.Visibility = 'Visible'
+  $now = @{}; $pro = @{}
+  foreach ($s in $steps) { if ($s.Pl) { $pro[[string]$s.Res] = $s } else { $now[[string]$s.Res] = $s } }
+  $lines = @()
+  $fhd = $now['1920x1080']
+  if ($fhd -and $fhd.Fps) {
+    $bits = @()
+    foreach ($k in '2560x1440', '3840x2160') { if ($now[$k]) { $bits += "$($ResShort[$k]) giver $([math]::Round(100 * $now[$k].Fps / $fhd.Fps)) %" } }
+    if ($bits.Count) { $lines += "📉  I forhold til Full HD: $($bits -join ', ') af FPS'en." }
+  }
+  if ($pro.Count) {
+    $d = @(); $wd = @()
+    foreach ($k in '1920x1080', '2560x1440', '3840x2160') {
+      if ($now[$k] -and $pro[$k] -and $now[$k].Fps -and $now[$k].W) {
+        $d += "$($ResShort[$k]) $('{0:+0;-0;0}' -f (100 * ($pro[$k].Fps - $now[$k].Fps) / $now[$k].Fps)) %"
+        $wd += 100 * ($pro[$k].W - $now[$k].W) / $now[$k].W
+      }
+    }
+    if ($d.Count) { $lines += "🔋  Med din GPU-profil: $([math]::Round(-($wd | Measure-Object -Average).Average)) % mindre strøm. FPS: $($d -join ' · ')." }
+  }
+  $lines += "ℹ  Tallene er fra PC-Tjeks testscene og ikke fra et bestemt spil. Brug dem til at sammenligne opløsninger og indstillinger på din egen pc."
+  $ui.GpuResVerdict.Text = $lines -join "`n"; $ui.GpuResVerdict.Visibility = 'Visible'
+  $ui.GpuResInfo.Text = "Målt $(Get-Date -Format 'HH:mm'). Kør igen efter en ændring i Afterburner for at se forskellen."
+  try { [IO.File]::WriteAllText((Join-Path $OutDir 'gpu-oploesning.json'), (ConvertTo-Json -InputObject @($steps) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}
+}
+$ui.BtnGpuRes.Add_Click({ Start-GpuBench 'res' })
 function Show-GpuAuto($res, $steps) {
   $base = $steps[0]
   $rec = $base
@@ -3472,6 +3902,7 @@ function Show-GpuAuto($res, $steps) {
     $r })
   $ui.GridGpuAuto.Visibility = 'Visible'; $ui.GpuRecBox.Visibility = 'Visible'; $ui.GpuAbBox.Visibility = 'Collapsed'
   $script:GpuRec = $rec
+  if ($rec -ne $base -and $rec.Pl) { try { [IO.File]::WriteAllText((Join-Path $JobBase 'gpu-best.json'), ([ordered]@{ Watts = [int][math]::Round($rec.Pl); Pct = $rec.Pct; Date = (Get-Date).ToString('s') } | ConvertTo-Json), (New-Object Text.UTF8Encoding $false)) } catch {} }
   if ($rec -eq $base) {
     $ui.GpuRecTitle.Text = '👍 Dit grafikkort er allerede effektivt'
     $ui.GpuRecText.Text = "Selv en lavere strømgrænse kostede mere end 3 % FPS i testen. Der er ikke meget at hente her uden at miste ydelse."
@@ -3555,6 +3986,15 @@ function Parse-Gpu([string]$n) {
   $gen = if ($digits.Length -eq 4) { $digits.Substring(0, 1) } elseif ($digits.Length -eq 3) { $digits.Substring(0, 1) } else { '' }
   return [pscustomobject]@{ Fam = $fam; Num = $num; Suf = $suf; Gen = $gen; Key = "$fam $num $suf".Trim() }
 }
+# Tal fra anmeldelser, når datasættet ikke har kortet (navn · indstilling · resultat · kilde)
+$KnownGpu = @(
+  @{ Match = '3070\s*TI'; Tip = "Godt startpunkt i MSI Afterburner (Ctrl+F): lås kurven ved ca. 1.850-1.900 MHz og 0,875-0,900 V, og test i dine spil. Det er et almindeligt udgangspunkt fra brugere, ikke en garanti. Går et spil ned, så giv 25 mV mere."
+     Rows = @(
+       @('RTX 3070 Ti · Igor''s Lab', 'Sænket frekvenskurve (undervolt)', 'ca. −50 til −60 W · samme ydelse', 'https://www.igorslab.de/en/3070-ti-undervolting-can-we-also-deny-the-most-unpopular-of-all-tis-binge-drinking/5/'),
+       @('RTX 3070 Ti · Igor''s Lab', 'Kun lavere strømgrænse', 'mindre strøm, men lidt lavere ydelse', 'https://www.igorslab.de/en/3070-ti-undervolting-can-we-also-deny-the-most-unpopular-of-all-tis-binge-drinking/5/'),
+       @('RTX 3070 Ti FE · TechPowerUp', 'Fabriksindstilling i spil (til sammenligning)', '1.770-1.935 MHz ved 0,93-1,08 V', 'https://www.techpowerup.com/review/nvidia-geforce-rtx-3070-ti-founders-edition/35.html')
+     ) }
+)
 function Load-GpuLib {
   Invoke-Bg $GpuLibScript $null {
     param($res, $err, $c)
@@ -3592,6 +4032,10 @@ function Load-GpuLib {
       foreach ($x in $sim) { $x.Navn = "≈ $($x.Navn)" }
       $ui.GridGpuLib.ItemsSource = $sim; $ui.GridGpuLib.Visibility = 'Visible'
       $ui.GpuLibInfo.Text = "Ingen har delt målinger med præcis dit kort ($($mine.Key)) endnu. Her er lignende kort fra samme generation. De er IKKE dit kort, så tallene giver kun en fornemmelse af, hvad der er muligt."
+    } elseif ($mine -and ($known = @($KnownGpu | Where-Object { $mine.Key -match $_.Match })).Count) {
+      $kr = @(foreach ($k in $known) { foreach ($x in $k.Rows) { $r = New-Object PcTjek.Row; $r.Navn = $x[0]; $r.Info = $x[1]; $r.Note = $x[2]; $r.Gruppe = 'Målt i test'; $r.Sti = $x[3]; $r } })
+      $ui.GridGpuLib.ItemsSource = $kr; $ui.GridGpuLib.Visibility = 'Visible'
+      $ui.GpuLibInfo.Text = "Fællesskabets datasæt har ikke dit kort endnu, men her er tal fra kendte anmeldelser af dit kort ($($mine.Key)). $($known[0].Tip)"
     } else {
       $ui.GridGpuLib.ItemsSource = @(); $ui.GridGpuLib.Visibility = 'Collapsed'
       $ui.GpuLibInfo.Text = if ($mine) { "Ingen har delt målinger med dit kort ($($mine.Key)) eller lignende kort endnu. Din egen før/efter-måling ovenfor er den bedste guide. Datasættet har $($rows.Count) eksempler i alt." } else { "Kunne ikke genkende dit grafikkort ($mineName), så der vises ingen eksempler. Brug din egen før/efter-måling." }
@@ -3624,10 +4068,258 @@ function Load-Gpu {
   if (-not $script:GpuMeasuring -and (Test-Path $GpuPlFile)) {
     try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; $ui.GpuAutoInfo.Text = "✓ Aktiv: strømgrænse $($g.Pct) % ($($g.Watts) W) siden $(([datetime]$g.Date).ToString('dd-MM')). Kør testen igen for at genberegne, eller nulstil efter en test." } catch {}
   }
+  $pw = Get-GpuProfileW
+  $ui.ChkGpuResCmp.IsEnabled = ($pw -gt 0)
+  $ui.ChkGpuResCmp.Content = $(if ($pw -gt 0) { "Sammenlign med min GPU-profil ($pw W) · ca. 3 minutter" } else { "Sammenlign med min GPU-profil (kør 'Find det bedste punkt' først)" })
   Load-GpuMine
   if (-not $script:GpuLibLoaded) { $script:GpuLibLoaded = $true; Load-GpuLib }
   $gpuTimer.Start()
 }
+
+
+# =====================================================================
+#  TILSTANDE: Spil og Fokus (selve ændringerne og gendannelsen ligger i den fælles del)
+# =====================================================================
+function Confirm-ModeFree($what) {
+  $m = Get-ModeState; if (-not $m) { return $true }
+  return ((Msg "$($m.Mode)-tilstand er aktiv lige nu. $what bruger kræfter og kan forstyrre.`n`nVil du gøre det alligevel?" 'Tilstand' 'YesNo' 'Question') -eq 'Yes')
+}
+function Mode-Text($m) {
+  $bits = @()
+  if ($m.Mode -eq 'Spil') {
+    $t = "🎮 Spil er aktiv · $($m.Name)"
+    $n = @($m.Paused).Count
+    if ($n) { $bits += "$n ting sat på pause ($((@($m.Paused) | ForEach-Object { $_.Name }) -join ', '))" } else { $bits += 'intet lukket' }
+    if ($null -ne $m.PrevToast) { $bits += 'beskeder dæmpet' }
+    if ($m.NewPl) { $bits += "grafikkort $($m.NewPl) W (før $($m.PrevPl) W)" }
+    $bits += "startet kl. $(([datetime]$m.Started).ToString('HH:mm'))"
+    $short = if ($n) { "$n ting sat på pause" } else { 'beskeder venter' }
+  } else {
+    $left = [math]::Max(0, [math]::Ceiling(([datetime]$m.Until - (Get-Date)).TotalMinutes))
+    $t = "🔕 Fokus · $left min tilbage"
+    if ($null -ne $m.PrevToast) { $bits += 'beskeder dæmpet' }
+    if (@($m.Sites).Count) { $bits += "blokerer $(@($m.Sites) -join ', ')" }
+    $bits += "slutter kl. $(([datetime]$m.Until).ToString('HH:mm'))"
+    $short = "slutter kl. $(([datetime]$m.Until).ToString('HH:mm'))"
+  }
+  return @($t, ($bits -join ' · '), $short)
+}
+function Show-ModeSummary($s) {
+  if (-not $s) { return }
+  $d = (@($s.Done) | ForEach-Object { "✓  $_" }) -join "`n"
+  Msg "$(if ($s.Mode -eq 'Spil') { "Spil-tilstand ($($s.Name))" } else { 'Fokus' }) er slut.`n`n$(if ($d) { $d } else { 'Alt er som før.' })" 'Tilstand' | Out-Null
+}
+function Update-ModeUi {
+  $m = Get-ModeState
+  if ($m) {
+    $tx = Mode-Text $m
+    $ui.ModeSideTitle.Text = $tx[0]; $ui.ModeSideSub.Text = $tx[2]
+    $ui.ModeActiveTitle.Text = $tx[0]; $ui.ModeActiveSub.Text = $tx[1]
+    $ui.ModeSide.Visibility = 'Visible'; $ui.ModeActiveCard.Visibility = 'Visible'
+    # Fokus må ikke hænge fast, hvis Vagten ikke kører
+    if ($m.Mode -eq 'Fokus' -and $m.Until -and (Get-Date) -gt [datetime]$m.Until -and -not $script:StopPending -and -not (Test-VagtAlive)) { $s = Stop-Mode 'tiden er gået'; Update-ModeUi; Show-ModeSummary $s; return }
+  } else { $ui.ModeSide.Visibility = 'Collapsed'; $ui.ModeActiveCard.Visibility = 'Collapsed' }
+  if (Test-Path $ModeLast) {
+    try { $l = Get-Content $ModeLast -Raw -ErrorAction Stop | ConvertFrom-Json
+      $ui.ModeLastText.Text = "Seneste: $(if ($l.Mode -eq 'Spil') { "🎮 $($l.Name)" } else { "🔕 Fokus $($l.Name)" }) sluttede $(([datetime]$l.Ended).ToString('dd-MM HH:mm')), fordi $($l.Reason). $(@($l.Done) -join ' · ')"
+      $ui.ModeLastText.Visibility = 'Visible' } catch {}
+  }
+}
+$modeTimer = New-Object Windows.Threading.DispatcherTimer
+$modeTimer.Interval = [TimeSpan]::FromSeconds(3)
+$modeTimer.Add_Tick({ try { Update-ModeUi } catch {} })
+$stopTimer = New-Object Windows.Threading.DispatcherTimer
+$stopTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+$stopTimer.Add_Tick({
+  $script:StopWait++
+  if (-not (Test-Path $ModeFile)) { $stopTimer.Stop(); $script:StopPending = $false; Update-ModeUi; return }
+  if ($script:StopWait -ge 6) {   # Vagten nåede det ikke: gør det selv
+    $stopTimer.Stop(); $script:StopPending = $false
+    Remove-Item $ModeStopFlag -Force -ErrorAction SilentlyContinue
+    $s = Stop-Mode 'du afsluttede den'; Update-ModeUi; Show-ModeSummary $s
+  }
+})
+function Request-ModeStop {
+  if (-not (Get-ModeState)) { Update-ModeUi; return }
+  if (Test-VagtAlive) {
+    # Vagten gør det, så den også kan vise de beskeder, der ventede, og ikke starter Spil igen med det samme
+    try { [IO.File]::WriteAllText($ModeStopFlag, 'stop') } catch {}
+    $script:StopPending = $true; $script:StopWait = 0
+    $ui.ModeSideSub.Text = 'Sætter alt tilbage...'; $ui.ModeActiveSub.Text = 'Sætter alt tilbage...'
+    $stopTimer.Start()
+  } else { $s = Stop-Mode 'du afsluttede den'; Update-ModeUi; Show-ModeSummary $s }
+}
+$ui.BtnModeStop.Add_Click({ Request-ModeStop })
+$ui.BtnModeStopSide.Add_Click({ Request-ModeStop })
+$ui.ModeSide.Add_MouseLeftButtonUp({ param($s, $e) if ($e.OriginalSource -isnot [Windows.Controls.Button]) { $ui.NavModes.IsChecked = $true } })
+
+# ---------- Spil ----------
+$ModeScanScript = {
+  param($sync, $arg)
+  $sync.Status = "Måler, hvad der bruger pc'en lige nu (3 sek.)..."
+  function Snap { $h = @{}; foreach ($p in Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) { $h[[int]$p.ProcessId] = $p }; $h }
+  $a = Snap; $t0 = Get-Date
+  Start-Sleep -Seconds 3
+  $b = Snap; $sec = [math]::Max(0.5, ((Get-Date) - $t0).TotalSeconds)
+  $cores = [Environment]::ProcessorCount
+  $agg = @{}
+  foreach ($id in $b.Keys) {
+    $p = $b[$id]; $path = [string]$p.ExecutablePath
+    if (-not $path -or -not $a.ContainsKey($id)) { continue }
+    $q = $a[$id]
+    $name = [IO.Path]::GetFileNameWithoutExtension([string]$p.Name)
+    $cpu = (([double]$p.KernelModeTime + [double]$p.UserModeTime) - ([double]$q.KernelModeTime + [double]$q.UserModeTime)) / 1e7 / $sec / $cores * 100
+    $io = (([double]$p.ReadTransferCount + [double]$p.WriteTransferCount + [double]$p.OtherTransferCount) - ([double]$q.ReadTransferCount + [double]$q.WriteTransferCount + [double]$q.OtherTransferCount)) / $sec / 1MB
+    $k = $name.ToLower()
+    if (-not $agg.ContainsKey($k)) { $agg[$k] = [pscustomobject]@{ Name = $name; Path = $path; Cpu = 0.0; Io = 0.0; Mem = 0.0 } }
+    $o = $agg[$k]; $o.Cpu += [math]::Max(0, $cpu); $o.Io += [math]::Max(0, $io); $o.Mem += [double]$p.WorkingSetSize / 1MB
+  }
+  $sync.Progress = 100
+  return @($agg.Values)
+}
+function Get-GpuProfileW {
+  foreach ($f in 'gpu-best.json', 'gpu-pl.json') { $p = Join-Path $JobBase $f; if (Test-Path $p) { try { $w = [int](Get-Content $p -Raw | ConvertFrom-Json).Watts; if ($w -gt 0) { return $w } } catch {} } }
+  return 0
+}
+function Load-Games {
+  $gs = @(Get-Games)
+  $rows = @(foreach ($g in $gs) {
+    $r = New-Object PcTjek.Row
+    $r.Navn = [string]$g.Name
+    $r.Info = $(if (@($g.Close).Count) { @($g.Close) -join ', ' } else { '(ingenting)' })
+    $r.Note = $(if ([int]$g.GpuWatts -gt 0) { "$($g.GpuWatts) W" } else { 'uændret' })
+    $r.Gruppe = $(if ($g.Mute) { 'dæmpes' } else { 'som altid' })
+    $r.Sti = [string]$g.Exe
+    $r })
+  $ui.GridGames.ItemsSource = $rows
+  $has = $rows.Count -gt 0
+  $ui.GridGames.Visibility = $(if ($has) { 'Visible' } else { 'Collapsed' }); $ui.GameBtns.Visibility = $ui.GridGames.Visibility
+  $ui.GamesEmpty.Visibility = $(if ($has) { 'Collapsed' } else { 'Visible' })
+}
+$ui.GridGames.Add_SelectionChanged({ $on = [bool]$ui.GridGames.SelectedItem; $ui.BtnGameEdit.IsEnabled = $on; $ui.BtnGameRemove.IsEnabled = $on })
+$ui.BtnGameRemove.Add_Click({
+  $it = $ui.GridGames.SelectedItem; if (-not $it) { return }
+  Save-Games @(Get-Games | Where-Object { (Exe-Key $_.Exe) -ne (Exe-Key $it.Sti) })
+  Log "Spil fjernet: $($it.Navn)"; Load-Games
+})
+$ui.BtnGameAdd.Add_Click({
+  $skip = 'explorer', 'applicationframehost', 'textinputhost', 'systemsettings', 'powershell', 'pwsh', 'conhost', 'windowsterminal', 'taskmgr', 'searchhost', 'startmenuexperiencehost', 'shellexperiencehost', 'lockapp'
+  $rows = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -and $_.Path -and ($skip -notcontains $_.ProcessName.ToLower()) -and $_.Path -notlike "$env:SystemRoot\*" -and $_.Id -ne $PID } |
+    Sort-Object WorkingSet64 -Descending | ForEach-Object { $r = New-Object PcTjek.Row; $r.Navn = $_.MainWindowTitle; $r.Info = "$($_.ProcessName).exe"; $r.Sti = $_.Path; $r })
+  $ui.GridGamePick.ItemsSource = $rows
+  $ui.GameSetup.Visibility = 'Collapsed'; $ui.GamePick.Visibility = 'Visible'
+})
+$ui.GridGamePick.Add_SelectionChanged({ $ui.BtnGamePickOk.IsEnabled = [bool]$ui.GridGamePick.SelectedItem })
+$ui.BtnGamePickCancel.Add_Click({ $ui.GamePick.Visibility = 'Collapsed' })
+function Game-NiceName($exe, $fallback) {
+  try { $vi = (Get-Item -LiteralPath $exe).VersionInfo; foreach ($n in $vi.ProductName, $vi.FileDescription) { if ($n -and $n.Trim().Length -gt 1) { return $n.Trim() } } } catch {}
+  if ($fallback) { return $fallback }; return [IO.Path]::GetFileNameWithoutExtension($exe)
+}
+$ui.BtnGamePickOk.Add_Click({ $it = $ui.GridGamePick.SelectedItem; if ($it) { Begin-GameSetup (Game-NiceName $it.Sti $it.Navn) $it.Sti } })
+$ui.BtnGameBrowse.Add_Click({
+  $d = New-Object Microsoft.Win32.OpenFileDialog
+  $d.Title = 'Vælg spillets programfil (.exe)'; $d.Filter = 'Programmer (*.exe)|*.exe'
+  foreach ($dir in "${env:ProgramFiles(x86)}\Steam\steamapps\common", "$env:ProgramFiles\Epic Games", "${env:ProgramFiles(x86)}") { if (Test-Path $dir) { $d.InitialDirectory = $dir; break } }
+  if ($d.ShowDialog()) { Begin-GameSetup (Game-NiceName $d.FileName $null) $d.FileName }
+})
+$ui.BtnGameEdit.Add_Click({ $it = $ui.GridGames.SelectedItem; if ($it) { Begin-GameSetup $it.Navn $it.Sti } })
+function Begin-GameSetup($name, $exe) {
+  $prev = Get-Games | Where-Object { (Exe-Key $_.Exe) -eq (Exe-Key $exe) } | Select-Object -First 1
+  $script:GameEdit = @{ Name = $name; Exe = $exe; Prev = $prev }
+  $ui.GamePick.Visibility = 'Collapsed'; $ui.GameSetup.Visibility = 'Visible'
+  $ui.GameSetupTitle.Text = "Hvad må lukkes, når $name starter?"
+  $ui.GameSetupSub.Text = "Måler i 3 sekunder, hvad der bruger CPU, disk og netværk lige nu..."
+  $ui.GridModeApps.ItemsSource = @(); $ui.BtnGameSave.IsEnabled = $false
+  $ui.ChkGameMute.IsChecked = $(if ($prev) { [bool]$prev.Mute } else { $true })
+  $w = Get-GpuProfileW
+  if ($w -gt 0) { $ui.ChkGameGpu.IsEnabled = $true; $ui.ChkGameGpu.Content = "Brug min GPU-profil ($w W fra GPU-testen), og sæt den tilbage bagefter"; $ui.ChkGameGpu.IsChecked = $(if ($prev) { [int]$prev.GpuWatts -gt 0 } else { $false }) }
+  else { $ui.ChkGameGpu.IsEnabled = $false; $ui.ChkGameGpu.IsChecked = $false; $ui.ChkGameGpu.Content = "Brug min GPU-profil (kør først 'Find det bedste punkt' under Optimering)" }
+  Measure-ModeApps
+}
+function Measure-ModeApps {
+  $g = $script:GameEdit; if (-not $g) { return }
+  $ui.BtnGameRemeasure.IsEnabled = $false
+  Invoke-Bg $ModeScanScript $null {
+    param($res, $err, $c)
+    $ui.BtnGameRemeasure.IsEnabled = $true
+    $g = $script:GameEdit; if (-not $g) { return }
+    if ($err) { $ui.GameSetupSub.Text = "Kunne ikke måle: $err"; return }
+    $exeKey = Exe-Key $g.Exe
+    $prevClose = @(); if ($g.Prev) { $prevClose = @(@($g.Prev.Close) | ForEach-Object { ([string]$_).ToLower() }) }
+    $seen = @{}
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($p in (@($res) | Sort-Object { - ([double]$_.Cpu * 2 + [double]$_.Io * 3) })) {
+      $k = ([string]$p.Name).ToLower()
+      if ($ModeNever -contains $k -or $k -eq $exeKey -or $k -like 'pc-tjek*' -or $k -like 'claude*') { continue }
+      if ([string]$p.Path -like "$env:SystemRoot\*") { continue }
+      $seen[$k] = $true
+      $r = New-Object PcTjek.Row
+      $desc = ''; try { $desc = (Get-Item -LiteralPath $p.Path -ErrorAction Stop).VersionInfo.FileDescription } catch {}
+      $r.Navn = $(if ($desc -and $desc.Trim() -and $desc.Trim() -ne $p.Name) { "$($desc.Trim())  ($($p.Name))" } else { [string]$p.Name })
+      $r.Id = [string]$p.Name; $r.Sti = [string]$p.Path
+      $r.Info = '{0:N1} %' -f [double]$p.Cpu
+      $r.Gruppe = $(if ([double]$p.Io -ge 0.05) { '{0:N1} MB/s' -f [double]$p.Io } else { '–' })
+      $r.Status = '{0:N0} MB' -f [double]$p.Mem
+      $busy = ([double]$p.Cpu -ge 3 -or [double]$p.Io -ge 1)
+      $note = @()
+      if ($ModeLaunchers -contains $k -and [double]$p.Io -ge 1) { $note += '⬇ Henter sikkert en opdatering. Sæt overførslen på pause i launcheren, mens du spiller.' }
+      elseif ($k -eq 'onedrive' -and [double]$p.Io -ge 0.3) { $note += '☁ Synkroniserer. Lukkes OneDrive, holder den pause og fortsætter bagefter.' }
+      if ($ModeUsual -contains $k) { $note += 'Bruges tit under spil (launcher, chat, stream).' }
+      elseif ($busy) { $note += 'Bruger meget lige nu.' }
+      $r.Note = $note -join ' '
+      $r.Valgt = $(if ($g.Prev) { $prevClose -contains $k } else { $busy -and ($ModeUsual -notcontains $k) })
+      $r.Tal = [double]$p.Cpu * 2 + [double]$p.Io * 3
+      [void]$rows.Add($r)
+    }
+    foreach ($k in $prevClose) { if (-not $seen.ContainsKey($k)) { $r = New-Object PcTjek.Row; $r.Navn = "$k  (kører ikke lige nu)"; $r.Id = $k; $r.Valgt = $true; $r.Info = '–'; $r.Gruppe = '–'; $r.Status = '–'; [void]$rows.Add($r) } }
+    $ui.GridModeApps.ItemsSource = $rows
+    $busyN = @($rows | Where-Object { $_.Tal -ge 6 }).Count
+    $ui.GameSetupSub.Text = "Sæt hak ved det, der må lukkes, når spillet starter. Det startes igen, når du lukker spillet. Øverst står det, der bruger mest lige nu$(if ($busyN) { " ($busyN program$(if ($busyN -ne 1) { 'mer' }) er travle)" })."
+    $ui.BtnGameSave.IsEnabled = $true
+  } $null
+}
+$ui.BtnGameRemeasure.Add_Click({ Measure-ModeApps })
+$ui.BtnGameCancel.Add_Click({ $script:GameEdit = $null; $ui.GameSetup.Visibility = 'Collapsed' })
+$ui.BtnGameSave.Add_Click({
+  $g = $script:GameEdit; if (-not $g) { return }
+  $sel = @($ui.GridModeApps.ItemsSource | Where-Object { $_.Valgt } | ForEach-Object { $_.Id })
+  $new = [ordered]@{ Name = $g.Name; Exe = $g.Exe; Close = @($sel); Mute = [bool]$ui.ChkGameMute.IsChecked; GpuWatts = $(if ($ui.ChkGameGpu.IsChecked) { Get-GpuProfileW } else { 0 }) }
+  $list = @(@(Get-Games | Where-Object { (Exe-Key $_.Exe) -ne (Exe-Key $g.Exe) }) + @(,$new))
+  Save-Games $list
+  Log "Spil gemt: $($g.Name) · lukker $($sel -join ', ')"
+  $script:GameEdit = $null; $ui.GameSetup.Visibility = 'Collapsed'
+  Load-Games
+  $txt = "✓ Gemt.`n`nNår $($g.Name) starter, sætter PC-Tjek selv Spil-tilstand i gang$(if ($sel.Count) { " og lukker $($sel -join ', ')" }). Når du lukker spillet, bliver alt sat tilbage."
+  if (-not (Get-VagtTask)) {
+    if ((Msg "$txt`n`nDet kræver, at Vagten er slået til (den holder øje med, hvornår spillet starter). Slå Vagten til nu?" 'Spil' 'YesNo' 'Question') -eq 'Yes') { [void](Install-Vagt) }
+  } else {
+    if (Get-Process -Name (Exe-Key $g.Exe) -ErrorAction SilentlyContinue) { $txt += "`n`nSpillet kører allerede, så det går i gang om et øjeblik." }
+    Msg $txt 'Spil' | Out-Null
+  }
+})
+
+# ---------- Fokus ----------
+$ui.BtnFocStart.Add_Click({
+  if (Get-ModeState) { Msg 'En tilstand er allerede aktiv. Afslut den først.' 'Fokus' | Out-Null; return }
+  $min = if ($ui.Foc90.IsChecked) { 90 } elseif ($ui.Foc50.IsChecked) { 50 } else { 25 }
+  $sites = @(); if ($ui.ChkFocBlock.IsChecked) { $sites = @($ui.FocSites.Text -split '[,;\s]+' | Where-Object { $_ }) }
+  if (-not $ui.ChkFocMute.IsChecked -and -not $sites.Count) { Msg 'Vælg mindst én ting: dæmp beskeder eller bloker sider.' 'Fokus' | Out-Null; return }
+  try { $m = Start-FocusMode $min ([bool]$ui.ChkFocMute.IsChecked) $sites } catch { Msg "Kunne ikke starte fokus:`n$($_.Exception.Message)" 'Fokus' 'OK' 'Error' | Out-Null; try { [void](Stop-Mode 'fejl ved start') } catch {}; return }
+  Update-ModeUi
+  $notes = @()
+  if ($sites.Count -and (Get-Process msedge, chrome, firefox, brave, opera -ErrorAction SilentlyContinue)) { $notes += 'Sider, der allerede er åbne, kan virke et lille stykke tid endnu. Luk fanen, og åbn den igen.' }
+  if (-not (Test-VagtAlive)) { $notes += 'Vagten kører ikke, så fokus slutter først, når PC-Tjek er åben (eller næste gang du åbner den).' }
+  $ui.StatusText.Text = "🔕 Fokus i $min min. Slutter kl. $(([datetime]$m.Until).ToString('HH:mm'))."
+  if ($notes.Count) { Msg ("Fokus er startet.`n`n" + ($notes -join "`n`n")) 'Fokus' | Out-Null }
+})
+$ui.BtnFocNotif.Add_Click({
+  $prog = ''; try { $prog = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice' -ErrorAction Stop).ProgId } catch {}
+  $isChrome = $prog -like 'ChromeHTML*'
+  $name = if ($isChrome) { 'Chrome' } else { 'Edge' }
+  $a = Msg "Generer fx kun Facebooks beskeder, kan du slå netop det websteds beskeder fra i browseren og beholde resten.`n`nI $($name): find webstedet under 'Tilladt' eller 'Allowed', og vælg Bloker.`n`nÅbn indstillingen i $name nu?" 'Websteders beskeder' 'YesNo' 'Question'
+  if ($a -ne 'Yes') { return }
+  try { if ($isChrome) { Start-Process 'chrome.exe' 'chrome://settings/content/notifications' } else { Start-Process 'msedge.exe' 'edge://settings/content/notifications' } } catch {}
+})
 
 # =====================================================================
 #  Eksport
@@ -3728,7 +4420,11 @@ function Refresh-VagtVersion {
     }
   } catch {}
 }
-$win.Add_ContentRendered({ Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false })
+$win.Add_ContentRendered({
+  Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false
+  try { $r = Repair-Modes; if ($r) { Log "Tilstand ryddet op ved start: $($r.Mode) ($($r.Reason))" } } catch { Log "Tilstand-oprydning fejlede: $_" }
+  try { Update-ModeUi } catch {}; $modeTimer.Start()
+})
 Log 'UI klar'
 [void]$win.ShowDialog()
 $jobTimer.Stop()
