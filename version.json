@@ -1,14 +1,14 @@
 {
-  "version": "2.49",
+  "version": "2.50",
   "date": "2026-11-24",
   "notes": [
-    "Rettet: grafiktesten hang i din skærms opløsning (fx 2K). Testsiden venter nu rigtigt på grafikkortet og tegner højst lidt ad gangen",
-    "Opdateringsboksen viser kun nyhederne i den nyeste version"
+    "Benchmark tester nu også grafikken i 4K (3840×2160), ud over 1080p og din skærms opløsning",
+    "Grafiktesten virker nu i alle opløsninger uden at hænge"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "6E9A85AB2F1774D135F7E71641C578FEC18F3DAE8FBE166E4F2E992A2824FD23"
+      "sha256": "668FAA97429F4B948F449CE61AA65191C73D4A8738814920000629D2C0F1D52F"
     },
     {
       "name": "PC-Tjek-Start.ps1",

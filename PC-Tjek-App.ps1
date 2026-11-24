@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.49'
+$AppVersion = '2.50'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -2504,7 +2504,7 @@ $BenchScript = {
         <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="0,0,8,0">
           <TextBlock Style="{StaticResource H1}" Text="Benchmark"/>
-          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik. Ca. 3 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik (1080p, din skærm og 4K). Ca. 4 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
           <Border Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -2516,7 +2516,7 @@ $BenchScript = {
               <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="16,0,0,0">
                 <TextBlock Name="BenchHw" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,0,0,10"/>
                 <StackPanel Orientation="Horizontal">
-                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 3 min)" Style="{StaticResource Primary}" Padding="18,11"/>
+                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 4 min)" Style="{StaticResource Primary}" Padding="18,11"/>
                 </StackPanel>
                 <ProgressBar Name="BenchBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
                 <TextBlock Name="BenchStatus" Style="{StaticResource Sub}" FontSize="12" Margin="0,6,0,0"/>
@@ -5254,7 +5254,8 @@ function Start-GpuBench($mode) {
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'bench') {
     $nat = Get-NativeRes; $script:BenchNativeRes = $(if ($nat -and $nat -ne '1920x1080') { $nat } else { $null })
-    $resL = @('1920x1080'); if ($script:BenchNativeRes) { $resL += $script:BenchNativeRes }
+    # 1080p (til sammenligning) + din skærm + 4K (mange spiller på 4K-tv eller -skærm)
+    $resL = @('1920x1080'); if ($script:BenchNativeRes -and $script:BenchNativeRes -ne '3840x2160') { $resL += $script:BenchNativeRes }; $resL += '3840x2160'
     $arg = @{ Html = $GpuBenchHtml; Steps = @($resL | ForEach-Object { $null }); Res = $resL; Work = 0; StepSec = 25; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
   } elseif ($mode -in 'ocbase', 'occheck') {
     if ($mode -eq 'occheck' -and -not $script:OcBase) { Msg 'Mål udgangspunktet først (trin 1), før du overclocker.' 'OC-tjek' | Out-Null; return }
@@ -5301,7 +5302,9 @@ function Start-GpuBench($mode) {
     if ($c.GpuMode -eq 'bench') {
       $script:LastGpuRenderer = if ($res -and -not ($res -is [array])) { [string]$res.Renderer } else { '' }
       $why = if ($err) { $err } elseif ($steps.Count) { $null } elseif ($res -and $res.Lost) { 'grafikdriveren nulstillede testscenen' } elseif ($res -and $res.Aborted) { 'testen blev stoppet' } elseif ($res -and -not $res.FpsPosts) { 'testscenen tegnede ingen billeder (lå den bag et andet vindue?)' } else { 'ingen målinger' }
-      $s1080 = @($steps | Where-Object { $_.Res -eq '1920x1080' })[0]; $sNat = @($steps | Where-Object { $_.Res -and $_.Res -ne '1920x1080' })[0]
+      $s1080 = @($steps | Where-Object { $_.Res -eq '1920x1080' })[0]; $s4k = @($steps | Where-Object { $_.Res -eq '3840x2160' })[0]
+      $sNat = if ($script:BenchNativeRes) { @($steps | Where-Object { $_.Res -eq $script:BenchNativeRes })[0] } else { $null }
+      $script:Bench4k = $s4k
       if (-not $s1080 -and $steps.Count) { $why = 'grafikdelen (1080p) fejlede' }
       Finish-Bench $s1080 $why $sNat; return
     }
@@ -5338,7 +5341,7 @@ function Start-GpuBench($mode) {
       if (-not $j) { return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
-      elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(if ($script:BenchNativeRes) { " og $(($script:BenchNativeRes) -replace 'x', '×')" })$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
+      elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(if ($script:BenchNativeRes -and $script:BenchNativeRes -ne '3840x2160') { ", $(($script:BenchNativeRes) -replace 'x', '×')" }) og 4K$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
       elseif ($j.Ctx.GpuMode -like 'oc*') { if ($p -ge 0) { $ui.GpuOcBar.Value = $p }; if ($j.S.Status) { $ui.GpuOcInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'res') { if ($p -ge 0) { $ui.GpuResBar.Value = $p }; if ($j.S.Status) { $ui.GpuResInfo.Text = $j.S.Status } }
       else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
@@ -6281,11 +6284,11 @@ function Show-Bench($r) {
   if ($r.GpuNative) {
     $ui.BGpuTitle.Text = "GRAFIK · FPS PÅ DIN SKÆRM ($(([string]$r.GpuNativeRes) -replace 'x', '×'))"
     $ui.BGpu.Text = "$($r.GpuNative) fps"
-    $ui.BGpuSub.Text = "1080p til sammenligning: $($r.Gpu) fps · uden V-Sync, i Opticons testscene"
+    $ui.BGpuSub.Text = "1080p til sammenligning: $($r.Gpu) fps$(if ($r.Gpu4K -and $r.GpuNativeRes -ne '3840x2160') { " · 4K: $($r.Gpu4K) fps" }) · uden V-Sync, i Opticons testscene"
   } else {
     $ui.BGpuTitle.Text = 'GRAFIK · FPS (1080p)'
     $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' })
-    $ui.BGpuSub.Text = $(if ($r.Gpu -and $sameGpuV) { "laveste sekund: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · uden V-Sync, i Opticons testscene" } elseif ($r.Gpu) { 'målt med den gamle metode (låst til skærmens Hz)' } else { 'grafikdelen blev ikke målt' })
+    $ui.BGpuSub.Text = $(if ($r.Gpu -and $sameGpuV) { "laveste sekund: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' })$(if ($r.Gpu4K) { " · 4K: $($r.Gpu4K) fps" }) · uden V-Sync, i Opticons testscene" } elseif ($r.Gpu) { 'målt med den gamle metode (låst til skærmens Hz)' } else { 'grafikdelen blev ikke målt' })
   }
   $ui.BtnBenchShare.IsEnabled = [bool]$r.Score
   try { Show-BenchAdvice $r } catch { Log "Råd-fejl: $_" }
@@ -6307,7 +6310,7 @@ function Start-Bench {
   if (-not (Confirm-ModeFree 'Den store test')) { return }
   $batt = $null; try { $batt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1 } catch {}
   $bTxt = if ($batt -and -not $batt.PowerOnline) { "`n`n🔌 Sæt laderen i først. På batteri kører de fleste bærbare langsommere, og så kan tallene ikke sammenlignes med andre." } else { '' }
-  if ((Msg "Den store test tager ca. 3 minutter:`n`n•  Processor: én kerne, alle kerner og om den holder farten, når den bliver varm (1 min. fuld belastning)`n•  Hukommelse og disk (en testfil på 512 MB, som slettes bagefter)`n•  Grafik: testscenen i fuld skærm til sidst`n`nLuk spil og tunge programmer, og rør ikke pc'en imens. Blæserne kan godt larme lidt.$bTxt`n`nStart?" 'Den store test' 'YesNo' 'Question') -ne 'Yes') { return }
+  if ((Msg "Den store test tager ca. 4 minutter:`n`n•  Processor: én kerne, alle kerner og om den holder farten, når den bliver varm (1 min. fuld belastning)`n•  Hukommelse og disk (en testfil på 512 MB, som slettes bagefter)`n•  Grafik: testscenen i fuld skærm til sidst, i 1080p, din skærms opløsning og 4K`n`nLuk spil og tunge programmer, og rør ikke pc'en imens. Blæserne kan godt larme lidt.$bTxt`n`nStart?" 'Den store test' 'YesNo' 'Question') -ne 'Yes') { return }
   $script:BenchStart = Get-Date
   $ui.BtnBench.IsEnabled = $false; $ui.BenchBar.Visibility = 'Visible'; $ui.BenchBar.Value = 0; $ui.BenchStatus.Text = 'Starter...'
   Log 'Benchmark startet'
@@ -6348,7 +6351,8 @@ function Finish-Bench($gpuStep, $gpuErr, $nativeStep) {
                    Cpu1 = $b.Cpu1; CpuN = $b.CpuN; Sustain = $b.Sustain; Ram = $b.Ram; DiskR = $b.DiskR; DiskW = $b.DiskW; Iops = $b.Iops
                    GpuRenderer = $script:LastGpuRenderer
                    Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.FpsMin) { [math]::Round([double]$gpuStep.FpsMin) } else { $null }); GpuV = $BenchGpuV
-                   GpuNative = $(if ($nativeStep -and $nativeStep.Fps) { [math]::Round([double]$nativeStep.Fps) } else { $null }); GpuNativeRes = $(if ($nativeStep -and $nativeStep.Fps) { [string]$nativeStep.Res } else { $null }); Score = 0 }
+                   GpuNative = $(if ($nativeStep -and $nativeStep.Fps) { [math]::Round([double]$nativeStep.Fps) } else { $null }); GpuNativeRes = $(if ($nativeStep -and $nativeStep.Fps) { [string]$nativeStep.Res } else { $null })
+                   Gpu4K = $(if ($script:Bench4k -and $script:Bench4k.Fps) { [math]::Round([double]$script:Bench4k.Fps) } else { $null }); Score = 0 }
   $r.Score = Bench-Total $r
   $h = @(Get-BenchHist) + @([pscustomobject]$r)
   try { [IO.File]::WriteAllText($BenchHistFile, (ConvertTo-Json -InputObject @($h | Select-Object -Last 50) -Depth 5), (New-Object Text.UTF8Encoding $false)) } catch {}

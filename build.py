@@ -1,7 +1,7 @@
 import hashlib, json, re, datetime
 R='/home/claude/pc-tjek/'
 rd=lambda f: open(R+f,encoding='utf-8-sig').read().replace('\r\n','\n')
-ver='2.49'
+ver='2.50'
 BRAND='Opticon'   # skift navnet her
 head=re.sub(r"\$AppVersion = '[\d.]+'", f"$AppVersion = '{ver}'", rd('head.ps1.part'))
 app=head+rd('modes.ps1.part')+rd('engine.ps1.part')+rd('gui.ps1.part')+rd('logic.ps1.part')
@@ -26,7 +26,7 @@ files=[]
 for f in ['PC-Tjek-App.ps1','PC-Tjek-Start.ps1','PC-Tjek-Vagt.ps1','Uninstall-PCTjek.ps1','PC-Tjek.ico']:
     files.append({'name':f,'sha256':hashlib.sha256(open(R+f,'rb').read()).hexdigest().upper()})
 # Kun nyhederne i DENNE version vises i appen. Ældre punkter står i historikken på GitHub.
-notes=["Rettet: grafiktesten hang i din skærms opløsning (fx 2K). Testsiden venter nu rigtigt på grafikkortet og tegner højst lidt ad gangen",
- "Opdateringsboksen viser kun nyhederne i den nyeste version"]
+notes=["Benchmark tester nu også grafikken i 4K (3840×2160), ud over 1080p og din skærms opløsning",
+ "Grafiktesten virker nu i alle opløsninger uden at hænge"]
 open(R+'version.json','w',encoding='utf-8').write(json.dumps({'version':ver,'date':'2026-11-24','notes':notes,'files':files},ensure_ascii=False,indent=2))
 print(files)

@@ -1601,7 +1601,7 @@ $BenchScript = {
         <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="0,0,8,0">
           <TextBlock Style="{StaticResource H1}" Text="Benchmark"/>
-          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik. Ca. 3 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik (1080p, din skærm og 4K). Ca. 4 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
           <Border Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -1613,7 +1613,7 @@ $BenchScript = {
               <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="16,0,0,0">
                 <TextBlock Name="BenchHw" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,0,0,10"/>
                 <StackPanel Orientation="Horizontal">
-                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 3 min)" Style="{StaticResource Primary}" Padding="18,11"/>
+                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 4 min)" Style="{StaticResource Primary}" Padding="18,11"/>
                 </StackPanel>
                 <ProgressBar Name="BenchBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
                 <TextBlock Name="BenchStatus" Style="{StaticResource Sub}" FontSize="12" Margin="0,6,0,0"/>
