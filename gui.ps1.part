@@ -801,13 +801,7 @@ function frame(now){
   } else {
     gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); win.push(dt);
   }
-  if (resMode && now - winStart >= 1000) {
-    const f = draws, ms = gpuMs, fps = ms > 0 ? 1000 * f / ms : 0;
-    const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    if (now >= warmUntil && f > 0) post('/fps', { f, ms, p99 });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
-    win = []; rafs = 0; draws = 0; gpuMs = 0; winStart = now;
-  } else if (!resMode && now - winStart >= 1000) {
+  if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
@@ -818,6 +812,16 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+// Opløsningstest: målingerne sendes hvert sekund af et ur, der ikke afhænger af skærmopdateringerne
+if (resMode) setInterval(() => {
+  if (done) return;
+  const now = performance.now(), f = draws, ms = gpuMs, fps = ms > 0 ? 1000 * f / ms : 0;
+  const s = win.slice().sort((a, b) => a - b), p99 = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * .99))] : 0;
+  post('/dbg', { K, rafs, f, ms: Math.round(ms), w: fw, h: fh, warm: now < warmUntil });
+  if (now >= warmUntil && f > 0) post('/fps', { f, ms, p99 });
+  o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+  win = []; rafs = 0; draws = 0; gpuMs = 0; winStart = now;
+}, 1000);
 setInterval(() => fetch('/state').then(r => r.json()).then(s => {
   label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
 }).catch(() => {}), resMode ? 400 : 1000);
@@ -878,6 +882,7 @@ $GpuBenchScript = {
         '/state' { $script:BState.Remain = Remain; $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
         '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = [datetime]::Now; Step = [int]$script:BCur; Meas = [bool]$script:BMeas; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch { $script:BJsErr = 'fps-svar: ' + $_.Exception.Message } }
         '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
+        '/dbg'   { $script:BDbg = [string]$body; if ($script:BMeas) { $script:BDbgN++; try { $dj = $body | ConvertFrom-Json; if ($null -eq $script:BRafMin -or [int]$dj.rafs -lt $script:BRafMin) { $script:BRafMin = [int]$dj.rafs } } catch {} } }
         '/abort' { $script:BAbort = $true }
         '/lost'  { $script:BLost = $true; $script:BAbort = $true }
         '/renderer' { try { $script:BRenderer = [string]($body | ConvertFrom-Json).r } catch {} }
@@ -931,7 +936,7 @@ $GpuBenchScript = {
       $sync.Status = "$($script:BState.Label): stabiliserer... · ⏱ $(Fmt-Rem (Remain)) tilbage"
       WaitPump 5
       Pump   # alt, der kom under stabiliseringen, tæller ikke med
-      $script:BCur = $i; $script:BMeas = $true
+      $script:BCur = $i; $script:BMeas = $true; $script:BDbgN = 0; $script:BRafMin = $null
       $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
       while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
         Pump
@@ -956,7 +961,7 @@ $GpuBenchScript = {
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
       $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
       $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
-      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek, fps=$fps")
+      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek, fps=$fps, sidesignaler=$($script:BDbgN), færrest billeder/s=$($script:BRafMin), sidst: $($script:BDbg)")
       [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Applied = $applied; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {

@@ -1,7 +1,7 @@
 import hashlib, json, re, datetime
 R='/home/claude/pc-tjek/'
 rd=lambda f: open(R+f,encoding='utf-8-sig').read().replace('\r\n','\n')
-ver='2.46'
+ver='2.47'
 BRAND='Opticon'   # skift navnet her
 head=re.sub(r"\$AppVersion = '[\d.]+'", f"$AppVersion = '{ver}'", rd('head.ps1.part'))
 app=head+rd('modes.ps1.part')+rd('engine.ps1.part')+rd('gui.ps1.part')+rd('logic.ps1.part')
@@ -25,7 +25,8 @@ w('PC-Tjek-App.ps1',app); w('PC-Tjek-Vagt.ps1',vagt)
 files=[]
 for f in ['PC-Tjek-App.ps1','PC-Tjek-Start.ps1','PC-Tjek-Vagt.ps1','Uninstall-PCTjek.ps1','PC-Tjek.ico']:
     files.append({'name':f,'sha256':hashlib.sha256(open(R+f,'rb').read()).hexdigest().upper()})
-notes=["Knappen Scan pc'en er flyttet ind på Overblik, hvor resultatet vises",
+notes=["Grafiktesten sender målinger med et fast ur, så målingen i din skærms opløsning ikke går tabt, og logger hvad testsiden laver",
+ "Knappen Scan pc'en er flyttet ind på Overblik, hvor resultatet vises",
  "Grafiktesten måler nu direkte, hvor lang tid grafikkortet bruger pr. billede (FPS uden V-Sync). Mere stabilt, og virker også i din skærms opløsning",
  "Grafik-feltet viser FPS i din skærms opløsning (fx 2560×1440) som det store tal, og 1080p til sammenligning",
  "Grafiktal fra før 2.45 sammenlignes ikke med de nye (de var låst til skærmens Hz), og scoren er justeret til den nye måling",
