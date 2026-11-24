@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.34'
+$AppVersion = '2.35'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1203,44 +1203,31 @@ addEventListener('error', e => post('/jserr', { e: String(e.message || e) }));
 c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'Opticon GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
 addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'Opticon GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
-// Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
-// For at komme forbi skærmens Hz-loft tegnes den K gange pr. skærmbillede; FPS = antal tegninger pr. sekund.
-let fbo = null, rb = null, fw = 0, fh = 0, K = 1, kUntil = 0;
+// Opløsningstest: scenen tegnes i præcis den valgte opløsning (lærredet får den størrelse og skaleres til skærmen).
+// Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
+let fw = 0, fh = 0, warmUntil = 0;
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
-  fw = w; fh = h;
-  if (!fbo) { fbo = gl.createFramebuffer(); rb = gl.createRenderbuffer(); }
-  gl.bindRenderbuffer(gl.RENDERBUFFER, rb); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  K = 1; kUntil = performance.now() + 3000; win = []; winStart = performance.now();
+  fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
+  warmUntil = performance.now() + 1500; win = []; winStart = performance.now();
 }
-if (resMode) { setRes(q.get('r0') || '1920x1080'); post('/calib', { work: 0 }); }
-function adaptK(fps){ if (fps > 50) K = Math.min(48, Math.max(K + 1, Math.ceil(K * fps / 40))); else if (fps < 22 && K > 1) K = Math.max(1, Math.floor(K * fps / 35)); }
-function drawRes(now){
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, fw, fh); gl.uniform2f(uR, fw, fh);
-  for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, c.width, c.height);
-  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
-  const sc = Math.min(c.width / fw, c.height / fh), dw = Math.round(fw * sc), dh = Math.round(fh * sc), dx = (c.width - dw) >> 1, dy = (c.height - dh) >> 1;
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-  gl.blitFramebuffer(0, 0, fw, fh, dx, dy, dx + dw, dy + dh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+if (resMode) {
+  c.style.objectFit = 'contain';
+  removeEventListener('resize', resize);
+  setRes(q.get('r0') || '1920x1080');
+  post('/calib', { work: 0 });
 }
-// Kalibrering: juster belastningen, så FPS ligger under skærmens Hz (ellers begrænser vsync målingen)
-function calibrate(fps){ if (fps > 55) work = Math.min(3.0, work * 1.3); else if (fps < 25) work = Math.max(0.4, work * 0.85); resize(); }
+try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); post('/renderer', { r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
 function frame(now){
   if (done) return;
   const dt = now - last; last = now; frames++; win.push(dt);
-  if (resMode) drawRes(now);
-  else { gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3);
   if (resMode && now - winStart >= 1000) {
-    const ms = now - winStart, f = win.length, rfps = 1000 * f / ms;
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    const fps = rfps * K;
-    if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
-    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} tegninger/s<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    if (now >= warmUntil) post('/fps', { f, ms, p99 });
+    o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
@@ -1291,7 +1278,7 @@ $GpuBenchScript = {
   $resList = @($arg.Res | Where-Object { $_ })
   $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false; Res = $(if ($resList.Count) { [string]$resList[0] } else { '' }) }
   $script:BFps = New-Object System.Collections.ArrayList
-  $script:BAbort = $false; $script:BErr = $null; $script:BLost = $false; $script:BJsErr = ''
+  $script:BAbort = $false; $script:BErr = $null; $script:BLost = $false; $script:BJsErr = ''; $script:BRenderer = ''
   $script:BStepStart = $null; $script:BLeftAfter = 0; $script:BPerStep = 5 + [double]$arg.StepSec
   function Remain { if (-not $script:BStepStart) { return [int]((@($arg.Steps).Count) * $script:BPerStep) }; [int][math]::Max(0, $script:BLeftAfter + $script:BPerStep - ((Get-Date) - $script:BStepStart).TotalSeconds) }
   function Fmt-Rem([int]$x) { '{0}:{1:00}' -f [math]::Floor($x / 60), ($x % 60) }
@@ -1312,6 +1299,7 @@ $GpuBenchScript = {
         '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
         '/abort' { $script:BAbort = $true }
         '/lost'  { $script:BLost = $true; $script:BAbort = $true }
+        '/renderer' { try { $script:BRenderer = [string]($body | ConvertFrom-Json).r } catch {} }
         '/jserr' { try { $script:BJsErr = [string]($body | ConvertFrom-Json).e } catch {} }
         '/error' { try { $script:BErr = [string]($body | ConvertFrom-Json).e } catch { $script:BErr = 'Fejl i testsiden' }; $script:BAbort = $true }
       }
@@ -1323,8 +1311,8 @@ $GpuBenchScript = {
   $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser'
   New-Item -ItemType Directory -Force $prof | Out-Null
   $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))$(if ($resList.Count) { "&res=1&r0=$($resList[0])" })"
-  $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling" }
-           else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling `"$url`"" }
+  $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-gpu-vsync --disable-frame-rate-limit" }
+           else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-gpu-vsync --disable-frame-rate-limit `"$url`"" }
   $results = New-Object System.Collections.ArrayList
   $changedPl = $false
   try {
@@ -1371,7 +1359,7 @@ $GpuBenchScript = {
           $el = ((Get-Date) - $t0).TotalSeconds
           $sync.Progress = [double](100 * ($i + [math]::Min(1, $el / [double]$arg.StepSec)) / $total)
           $lastF = $script:BFps | Select-Object -Last 1
-          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) $(if ($resList.Count) { 'tegninger/s' } else { 'fps' })$(if ($null -ne $sm.W) { " · $([int]$sm.W) W" })$(if ($null -ne $sm.T) { " · $([int]$sm.T) °C" })$(if ($null -ne $sm.U -and -not $hasSmi) { " · belastning $($sm.U) %" }) · ⏱ $(Fmt-Rem (Remain)) tilbage"
+          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps$(if ($null -ne $sm.W) { " · $([int]$sm.W) W" })$(if ($null -ne $sm.T) { " · $([int]$sm.T) °C" })$(if ($null -ne $sm.U -and -not $hasSmi) { " · belastning $($sm.U) %" }) · ⏱ $(Fmt-Rem (Remain)) tilbage"
         }
         Start-Sleep -Milliseconds 80
       }
@@ -1379,9 +1367,7 @@ $GpuBenchScript = {
       $fw = @($script:BFps | Where-Object { $_.Time -ge $t0 -and $_.Time -le $t1 })
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
-      # I opløsningstesten tegnes scenen flere gange pr. skærmbillede: tallet er TEGNINGER pr. sekund, ikke viste billeder.
-      # Derfor ingen 'laveste 1 %' der (den ville ikke betyde det samme).
-      $p1 = if ($rs) { $null } elseif ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
+      $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
       $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
       $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
       [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Applied = $applied; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
@@ -1400,7 +1386,7 @@ $GpuBenchScript = {
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
     try { $listener.Stop(); $listener.Close() } catch {}
   }
-  return @{ Steps = @($results); FpsPosts = $script:BFps.Count; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
+  return @{ Steps = @($results); FpsPosts = $script:BFps.Count; Renderer = $script:BRenderer; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
 # =====================================================================
@@ -2069,11 +2055,17 @@ namespace OptiBench
                 <TextBlock Name="BDiskSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
               </StackPanel></Border>
               <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
-                <TextBlock Text="GRAFIK (1080p-SCENE, TEGNINGER/S)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Text="GRAFIK · FPS (1080p-SCENE)" FontSize="11" Foreground="{StaticResource Muted}"/>
                 <TextBlock Name="BGpu" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
                 <TextBlock Name="BGpuSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
               </StackPanel></Border>
           </UniformGrid>
+          <Border Name="BenchAdviceBox" Visibility="Collapsed" CornerRadius="16" Background="#141B2A" BorderBrush="#2C4A7A" BorderThickness="1" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="🩺  Hvad betyder dine tal?" FontSize="16" FontWeight="SemiBold"/>
+              <TextBlock Name="BenchAdvice" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="21" Foreground="#C3CAD6"/>
+            </StackPanel>
+          </Border>
           <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
             <StackPanel>
               <DockPanel>
@@ -2400,11 +2392,11 @@ namespace OptiBench
               </Border>
               <StackPanel Grid.Column="1" Margin="0,0,16,0">
                 <StackPanel Orientation="Horizontal">
-                  <TextBlock Text="Grafikkort: mindre strøm og støj" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <TextBlock Text="Grafikkort" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
                   <Border CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#3B2C6E" VerticalAlignment="Center"><TextBlock Text="Avanceret" FontSize="12" FontWeight="SemiBold" Foreground="#C4B5FD"/></Border>
                 </StackPanel>
                 <TextBlock Name="GpuName" Foreground="#AEB6C6" Margin="0,4,0,0"/>
-                <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Kan dit grafikkort bruge mindre strøm og larme mindre, uden at du mister mærkbar ydelse? Mål det før og efter én ændring, så du kan se, om det var det værd."/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Vælg herunder, hvad du vil opnå. Opticon måler før og efter i sin egen testscene, så du kan se, om det hjalp."/>
               </StackPanel>
               <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
                 <Button Name="BtnGpuTool" Content="🛠  Åbn tuningværktøj" Style="{StaticResource Primary}" Margin="0,0,0,8"/>
@@ -2416,13 +2408,18 @@ namespace OptiBench
               <TextBlock Name="GpuStepsText" TextWrapping="Wrap" LineHeight="23"/>
             </Border>
             <!-- live -->
-            <UniformGrid Columns="5" Margin="0,16,0,0">
-              <StackPanel><TextBlock Text="EFFEKT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveW" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
-              <StackPanel><TextBlock Text="TEMPERATUR" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveT" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
-              <StackPanel><TextBlock Text="BLÆSER" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveF" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
-              <StackPanel><TextBlock Text="CLOCK" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveC" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
-              <StackPanel><TextBlock Text="BELASTNING" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveU" Text="–" FontSize="22" FontWeight="Bold"/></StackPanel>
-            </UniformGrid>
+            <Border Background="#10131A" BorderBrush="#20263A" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,14,0,0">
+              <StackPanel>
+                <TextBlock Text="GRAFIKKORTET LIGE NU · opdateres hvert 3. sekund · bare til orientering, du skal ikke gøre noget her" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <UniformGrid Columns="5" Margin="0,8,0,0">
+                  <StackPanel><TextBlock Text="Strøm nu / maks" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveW" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Temperatur" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveT" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Blæser" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveF" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Hastighed (clock)" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveC" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Belastning" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveU" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                </UniformGrid>
+              </StackPanel>
+            </Border>
             <!-- vælger: hvad vil du? -->
             <Border Background="#121726" BorderBrush="#2A3142" BorderThickness="1" CornerRadius="12" Padding="14,12" Margin="0,16,0,0">
               <StackPanel>
@@ -2491,8 +2488,8 @@ namespace OptiBench
                 <DockPanel>
                   <Button Name="BtnGpuRes" DockPanel.Dock="Right" Content="📺  Mål FPS" Style="{StaticResource Primary}" Padding="16,9" Margin="0" VerticalAlignment="Top"/>
                   <StackPanel Margin="0,0,12,0">
-                    <TextBlock Text="📺  Ydelse ved Full HD, 2K og 4K" FontSize="15" FontWeight="SemiBold"/>
-                    <TextBlock Name="GpuResInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Samme testscene i 1920×1080, 2560×1440 og 3840×2160, uden skærmens Hz-loft og uanset hvilken skærm du har. Scenen tegnes flere gange pr. skærmbillede, så du ser, hvad grafikkortet kan, ikke din skærms Hz. Du ser tegninger pr. sekund, strøm og ydelse pr. watt for hver opløsning. Ca. 1½ minut."/>
+                    <TextBlock Text="📺  FPS ved Full HD, 2K og 4K" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="GpuResInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Samme testscene i 1920×1080, 2560×1440 og 3840×2160, uden skærmens Hz-loft og uanset hvilken skærm du har. Rigtige FPS uden din skærms Hz-loft, så du ser, hvad grafikkortet kan. Du ser FPS, laveste 1 %, strøm og FPS pr. watt for hver opløsning. Ca. 1½ minut."/>
                     <CheckBox Name="ChkGpuResCmp" Content="Sammenlign med min GPU-profil (ca. 3 minutter)" Margin="0,8,0,0" IsEnabled="False"/>
                   </StackPanel>
                 </DockPanel>
@@ -2501,7 +2498,7 @@ namespace OptiBench
                   <DataGrid.Columns>
                     <DataGridTextColumn Header="OPLØSNING" Binding="{Binding Navn}" Width="1.5*"/>
                     <DataGridTextColumn Header="STRØM" Binding="{Binding Info}" Width="1.2*"/>
-                    <DataGridTemplateColumn Header="TEGNINGER/S" Width="2.2*">
+                    <DataGridTemplateColumn Header="FPS" Width="2.2*">
                       <DataGridTemplateColumn.CellTemplate><DataTemplate>
                         <StackPanel Orientation="Horizontal">
                           <Border Width="{Binding Tal}" Height="10" CornerRadius="5" Background="#60A5FA" VerticalAlignment="Center"/>
@@ -2509,8 +2506,9 @@ namespace OptiBench
                         </StackPanel>
                       </DataTemplate></DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="LAVESTE 1 %" Binding="{Binding Gruppe}" Width="1*"/>
                     <DataGridTextColumn Header="WATT · TEMP" Binding="{Binding Status}" Width="1.3*"/>
-                    <DataGridTextColumn Header="PR. WATT" Binding="{Binding Id}" Width="1*"/>
+                    <DataGridTextColumn Header="FPS PR. WATT" Binding="{Binding Id}" Width="1*"/>
                   </DataGrid.Columns>
                 </DataGrid>
                 <TextBlock Name="GpuResVerdict" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
@@ -2566,6 +2564,7 @@ namespace OptiBench
                 </DockPanel>
               </StackPanel>
             </Border>
+            <StackPanel Name="SecExtra" Visibility="Collapsed">
             <!-- testet på min pc -->
             <TextBlock Text="🏠  Testet på min pc" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,6"/>
             <DataGrid Name="GridGpuMine" IsReadOnly="True" MaxHeight="200">
@@ -2591,6 +2590,7 @@ namespace OptiBench
               </DataGrid.Columns>
             </DataGrid>
             <TextBlock FontSize="11" Foreground="#6B7488" Margin="0,6,0,0" TextWrapping="Wrap" Text="Eksempler: TechFuelHQ Community GPU Undervolt Results (CC BY 4.0), github.com/iBlessi/gpu-undervolt-db. To kort med samme GPU kan opføre sig forskelligt, så din egen måling tæller mest."/>
+            </StackPanel>
           </StackPanel>
         </Border>
           </StackPanel>
@@ -4497,7 +4497,7 @@ function Start-GpuBench($mode) {
     param($res, $err, $c)
     $script:GpuMeasuring = $false
     try { $win.WindowState = 'Normal' } catch {}
-    if ($res -and -not ($res -is [array])) { Log "GPU-test ($($c.GpuMode)): fps-målinger=$($res.FpsPosts) · kalibreret=$($res.Calib) · stoppet=$($res.Aborted) · driver nulstillet=$($res.Lost) · browser=$($res.Browser)$(if ($res.JsErr) { " · sidefejl: $($res.JsErr)" })" }
+    if ($res -and -not ($res -is [array])) { Log "GPU-test ($($c.GpuMode)): fps-målinger=$($res.FpsPosts) · kalibreret=$($res.Calib) · stoppet=$($res.Aborted) · driver nulstillet=$($res.Lost) · browser=$($res.Browser) · grafik=$($res.Renderer)$(if ($res.JsErr) { " · sidefejl: $($res.JsErr)" })" }
     $ui.BtnGpuAuto.IsEnabled = $true; $ui.BtnGpuBefore.IsEnabled = $true; $ui.BtnGpuAfter.IsEnabled = [bool]$script:GpuWork; $ui.BtnGpuRes.IsEnabled = $true; $ui.BtnOcBase.IsEnabled = $true; $ui.BtnOcCheck.IsEnabled = [bool]$script:OcBase
     $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'; $ui.GpuOcBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}
@@ -4505,6 +4505,7 @@ function Start-GpuBench($mode) {
     $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
     if ($c.GpuMode -eq 'occheck' -and $res -and $res.Lost) { Show-OcCheck $res $steps; return }   # et nedbrud ER resultatet
     if ($c.GpuMode -eq 'bench') {
+      $script:LastGpuRenderer = if ($res -and -not ($res -is [array])) { [string]$res.Renderer } else { '' }
       $why = if ($err) { $err } elseif ($steps.Count) { $null } elseif ($res -and $res.Lost) { 'grafikdriveren nulstillede testscenen' } elseif ($res -and $res.Aborted) { 'testen blev stoppet' } elseif ($res -and -not $res.FpsPosts) { 'testscenen tegnede ingen billeder (lå den bag et andet vindue?)' } else { 'ingen målinger' }
       Finish-Bench $(if ($steps.Count) { $steps[0] } else { $null }) $why; return
     }
@@ -4557,8 +4558,8 @@ function Show-GpuRes($steps) {
     $r = New-Object PcTjek.Row
     $r.Navn = $(if ($ResNames.ContainsKey([string]$s.Res)) { $ResNames[[string]$s.Res] } else { [string]$s.Res })
     $r.Info = $(if ($s.Pl) { "profil · $([math]::Round($s.Pl)) W" } else { 'som nu' })
-    $r.Note = "$([math]::Round($s.Fps)) tegninger/s"
-    $r.Gruppe = ''
+    $r.Note = "$([math]::Round($s.Fps)) fps$(if (Test-HzCap $s) { ' (skærm-loft?)' })"
+    $r.Gruppe = $(if ($s.P1) { "$([math]::Round($s.P1)) fps" } else { '–' })
     $r.Status = "$(if ($s.W) { [math]::Round($s.W) } else { '–' }) W · $(if ($s.T) { [math]::Round($s.T) } else { '–' }) °C"
     $r.Id = $(if ($s.W) { '{0:N2}' -f ($s.Fps / $s.W) } else { '–' })
     $r.Tal = [math]::Max(4, 150 * [double]$s.Fps / $max)
@@ -4571,7 +4572,7 @@ function Show-GpuRes($steps) {
   if ($fhd -and $fhd.Fps) {
     $bits = @()
     foreach ($k in '2560x1440', '3840x2160') { if ($now[$k]) { $bits += "$($ResShort[$k]) giver $([math]::Round(100 * $now[$k].Fps / $fhd.Fps)) %" } }
-    if ($bits.Count) { $lines += "📉  I forhold til Full HD: $($bits -join ', ') af ydelsen." }
+    if ($bits.Count) { $lines += "📉  I forhold til Full HD: $($bits -join ', ') af FPS'en." }
   }
   if ($pro.Count) {
     $d = @(); $wd = @()
@@ -4581,9 +4582,8 @@ function Show-GpuRes($steps) {
         $wd += 100 * ($pro[$k].W - $now[$k].W) / $now[$k].W
       }
     }
-    if ($d.Count) { $lines += "🔋  Med din GPU-profil: $([math]::Round(-($wd | Measure-Object -Average).Average)) % mindre strøm. Ydelse: $($d -join ' · ')." }
+    if ($d.Count) { $lines += "🔋  Med din GPU-profil: $([math]::Round(-($wd | Measure-Object -Average).Average)) % mindre strøm. FPS: $($d -join ' · ')." }
   }
-  $lines += "ℹ  Tallene er tegninger af Opticons testscene pr. sekund. Scenen tegnes flere gange pr. skærmbillede, så tallet viser grafikkortets kraft, ikke FPS i et spil."
   $lines += "ℹ  Tallene er fra Opticons testscene og ikke fra et bestemt spil. Brug dem til at sammenligne opløsninger og indstillinger på din egen pc."
   $ui.GpuResVerdict.Text = $lines -join "`n"; $ui.GpuResVerdict.Visibility = 'Visible'
   $ui.GpuResInfo.Text = "Målt $(Get-Date -Format 'HH:mm'). Kør igen efter en ændring i Afterburner for at se forskellen."
@@ -4593,7 +4593,7 @@ $ui.BtnGpuRes.Add_Click({ Start-GpuBench 'res' })
 # ---------- OC-tjek ----------
 function Show-OcBase {
   $b = $script:OcBase; if (-not $b) { return }
-  $ui.GpuOcBase.Text = "Udgangspunkt (2K): $([math]::Round($b.Fps)) tegninger/s$(if ($null -ne $b.W) { " · $([math]::Round($b.W)) W" })$(if ($b.C) { " · $([math]::Round($b.C)) MHz" })$(if ($null -ne $b.T) { " · $([math]::Round($b.T)) °C" })$(if ($null -ne $b.U -and $null -eq $b.T) { " · belastning $([math]::Round($b.U)) %" })"
+  $ui.GpuOcBase.Text = "Udgangspunkt (2K): $([math]::Round($b.Fps)) fps$(if ($b.P1) { " · laveste 1 % $([math]::Round($b.P1))" })$(if ($null -ne $b.W) { " · $([math]::Round($b.W)) W" })$(if ($b.C) { " · $([math]::Round($b.C)) MHz" })$(if ($null -ne $b.T) { " · $([math]::Round($b.T)) °C" })$(if ($null -ne $b.U -and $null -eq $b.T) { " · belastning $([math]::Round($b.U)) %" })"
   $ui.GpuOcBase.Visibility = 'Visible'
 }
 function Set-OcBox($kind, $title, $text) {
@@ -4619,7 +4619,7 @@ function Show-OcEstimate {
       $ui.GpuOcEstTitle.Text = "Skøn, ikke målt · 👎 Giver sjældent mening på integreret grafik ($gn)"
       $ui.GpuOcEstText.Text = "Integreret grafik deler strøm og køling med processoren og bruger din RAM som grafikhukommelse. Overclock giver derfor sjældent meget. Mere effektivt: kør 'Find den bedste strømtilstand' ovenfor, og brug 'Bedste ydeevne' på strøm, når du spiller. Hurtigere RAM hjælper også integreret grafik."
     } else {
-      $ui.OcEstFps.Text = 'ca. +3-7 %'; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($b.Fps * 1.05)) tegninger/s"
+      $ui.OcEstFps.Text = 'ca. +3-7 %'; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($b.Fps * 1.05)) fps"
       $ui.GpuOcEstTitle.Text = 'Skøn, ikke målt · 🤷 Måske'
       $ui.GpuOcEstText.Text = "Nyere grafikkort giver typisk 3-7 % ved overclock, fordi de allerede udnytter det meste fra fabrikken. Opticon kan ikke læse strøm og temperatur på dette kort, så skønnet er groft. Kun trin 3 måler det rigtige tal."
     }
@@ -4646,7 +4646,7 @@ function Show-OcEstimate {
   $fpsNew = [double]$b.Fps * (1 + $g / 100)
   $wAdd = $W * $pw / 100
   $tAdd = [math]::Max(1, ($T - 25) * $pw / 100)
-  $ui.OcEstFps.Text = "+$([math]::Round($g, 1)) %"; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($fpsNew)) tegninger/s i testen"
+  $ui.OcEstFps.Text = "+$([math]::Round($g, 1)) %"; $ui.OcEstFpsSub.Text = "ca. $([math]::Round($b.Fps)) → $([math]::Round($fpsNew)) fps i testen"
   $ui.OcEstW.Text = "+$([math]::Round($wAdd)) W"; $ui.OcEstWSub.Text = "ca. $([math]::Round($W)) → $([math]::Round($W + $wAdd)) W (+$([math]::Round($pw)) %)"
   $ui.OcEstT.Text = "+$([math]::Round($tAdd)) °C"; $ui.OcEstTSub.Text = "ca. $([math]::Round($T)) → $([math]::Round($T + $tAdd)) °C"
   if ($null -eq $F -or $F -eq 0) { $ui.OcEstN.Text = 'lidt mere'; $ui.OcEstNSub.Text = 'blæseren stod stille eller kunne ikke læses' }
@@ -4668,12 +4668,12 @@ function Show-OcCheck($res, $steps) {
   $probs = @()
   if ($res.Lost) { $probs += 'Grafikdriveren gik ned under testen.' }
   if ($ev.Count) { $probs += "Windows loggede $($ev.Count) fejl fra grafikdriveren." }
-  if ($s -and $s.FpsMin -and $s.Fps -and [double]$s.FpsMin -lt 0.5 * [double]$s.Fps) { $probs += "Ydelsen faldt pludselig til $([math]::Round($s.FpsMin)) tegninger/s (normalt $([math]::Round($s.Fps)))." }
+  if ($s -and $s.FpsMin -and $s.Fps -and [double]$s.FpsMin -lt 0.5 * [double]$s.Fps) { $probs += "FPS faldt pludselig til $([math]::Round($s.FpsMin)) (normalt $([math]::Round($s.Fps)))." }
   $nums = ''; $dF = $null
   if ($s -and $s.Fps -and $b -and $b.Fps) {
     $dF = 100 * ([double]$s.Fps - [double]$b.Fps) / [double]$b.Fps
     $dW = if ($b.W) { 100 * ([double]$s.W - [double]$b.W) / [double]$b.W } else { 0 }
-    $bits = @("ydelse $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) tegninger/s ($('{0:+0.0;-0.0;0}' -f $dF) %)")
+    $bits = @("FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %)")
     if ($null -ne $b.W -and $null -ne $s.W -and $b.W) { $bits += "strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %)" }
     if ($b.C -and $s.C) { $bits += "clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz$(if ($s.Cmin) { " (laveste $([math]::Round($s.Cmin)))" })" }
     if ($null -ne $s.Tmax) { $bits += "højeste temp $([math]::Round($s.Tmax)) °C" }
@@ -4689,10 +4689,10 @@ function Show-OcCheck($res, $steps) {
   } elseif ($null -eq $dF) {
     Set-OcBox 'warn' 'Ingen sammenligning' 'Testen gav ingen brugbare tal at sammenligne med. Mål udgangspunktet igen (trin 1).'
   } elseif ($dF -ge 2) {
-    Set-OcBox 'ok' "✅ Ingen fejl registreret i den 5-minutters test · $('{0:+0.0}' -f $dF) % ydelse" ("$nums$(if ($script:OcEstGain) { "`nSkønnet var ca. +$([math]::Round($script:OcEstGain, 1)) %." })$hot`n`nNæste skridt: gem profilen (NVIDIA App gemmer selv; i Afterburner trykker du Save og et nummer). Spil et par timer. Går et spil ned, så skru 15 MHz ned.$note")
+    Set-OcBox 'ok' "✅ Ingen fejl registreret i den 5-minutters test · $('{0:+0.0}' -f $dF) % FPS" ("$nums$(if ($script:OcEstGain) { "`nSkønnet var ca. +$([math]::Round($script:OcEstGain, 1)) %." })$hot`n`nNæste skridt: gem profilen (NVIDIA App gemmer selv; i Afterburner trykker du Save og et nummer). Spil et par timer. Går et spil ned, så skru 15 MHz ned.$note")
     Log "OC-tjek: stabilt, $('{0:+0.0}' -f $dF) % FPS"
   } else {
-    Set-OcBox 'warn' "Ingen fejl registreret, men kun $('{0:+0.0;-0.0;0}' -f $dF) % ydelse" ("$nums$hot`n`nOverclocket giver næsten ingenting her. Det er ofte smartere at gå tilbage til standard og bruge 'Find det bedste punkt' til mindre strøm og støj i stedet.$note")
+    Set-OcBox 'warn' "Ingen fejl registreret, men kun $('{0:+0.0;-0.0;0}' -f $dF) % FPS" ("$nums$hot`n`nOverclocket giver næsten ingenting her. Det er ofte smartere at gå tilbage til standard og bruge 'Find det bedste punkt' til mindre strøm og støj i stedet.$note")
   }
   $ui.GpuOcInfo.Text = "Tjekket kl. $(Get-Date -Format 'HH:mm'). Ændr noget, og tjek igen for at sammenligne med udgangspunktet."
   $ui.GpuOcEstBox.Visibility = 'Collapsed'   # det målte resultat erstatter skønnet
@@ -4956,16 +4956,16 @@ $ui.BtnGpuAb.Add_Click({
 # ---------- Optimering: vis kun det, du vil opnå ----------
 function Set-GpuChoice($k) {
   $script:GpuChoice = $k
-  $vis = @{ power = @('SecAuto'); fps = @('SecOc', 'SecRes'); own = @('SecOwn'); all = @('SecAuto', 'SecRes', 'SecOc', 'SecOwn') }[$k]
-  foreach ($n in 'SecAuto', 'SecRes', 'SecOc', 'SecOwn') { $ui[$n].Visibility = $(if ($vis -contains $n) { 'Visible' } else { 'Collapsed' }) }
+  $vis = @{ power = @('SecAuto'); fps = @('SecOc', 'SecRes'); own = @('SecOwn'); all = @('SecAuto', 'SecRes', 'SecOc', 'SecOwn', 'SecExtra') }[$k]
+  foreach ($n in 'SecAuto', 'SecRes', 'SecOc', 'SecOwn', 'SecExtra') { $ui[$n].Visibility = $(if ($vis -contains $n) { 'Visible' } else { 'Collapsed' }) }
   $norm = $win.FindResource([Windows.Controls.Button]); $prim = $win.FindResource('Primary')
   foreach ($b in @{ power = 'ChoosePower'; fps = 'ChooseFps'; own = 'ChooseOwn' }.GetEnumerator()) { $ui[$b.Value].Style = $(if ($b.Key -eq $k) { $prim } else { $norm }) }
   $nv = [bool](Get-Smi)
   $ui.ChooseHelp.Text = switch ($k) {
     'power' { if ($nv) { "Opticon prøver selv 4 strømgrænser i testscenen og finder den laveste, hvor du beholder næsten al ydelse. Ét klik, ca. 4 minutter." } else { "Opticon prøver Windows' 3 strømtilstande i testscenen og anbefaler den mest sparsomme, der stadig yder godt. Ét klik, ca. 3 minutter." } }
-    'fps'   { "1) Mål udgangspunkt. 2) Lad $(if ($nv) { 'NVIDIA App eller Afterburner' } else { 'AMD Software' }) finde et overclock automatisk. 3) Tjek, at det giver mere ydelse og holder i 5 minutter. 'Ydelse ved Full HD, 2K og 4K' viser forskellen mellem opløsninger." }
+    'fps'   { "1) Mål udgangspunkt. 2) Lad $(if ($nv) { 'NVIDIA App eller Afterburner' } else { 'AMD Software' }) finde et overclock automatisk. 3) Tjek, at det giver flere FPS og holder i 5 minutter. 'FPS ved Full HD, 2K og 4K' viser forskellen mellem opløsninger." }
     'own'   { "Til ændringer, du selv laver i $(if ($nv) { 'MSI Afterburner eller NVIDIA App' } else { 'AMD Software' }): 1) Tryk Mål FØR. 2) Lav ÉN ændring, og tryk Anvend/Apply. 3) Tryk Mål EFTER. Opticon viser forskellen i FPS, strøm og temperatur." }
-    default { 'Alle værktøjer vises.' }
+    default { "Alle værktøjer vises, også dine gemte målinger og andres resultater med samme kort." }
   }
 }
 $ui.ChoosePower.Add_Click({ Set-GpuChoice 'power' })
@@ -5310,7 +5310,7 @@ $ui.BtnVendorOpen.Add_Click({ Open-VendorTool })
 # =====================================================================
 #  BENCHMARK: den store test, historik, sammenligning og deling
 # =====================================================================
-$BenchTestVersion = 2   # 2: grafik måles som tegninger pr. sekund; delvise tests får ingen samlet score
+$BenchTestVersion = 3   # 3: grafik måles som rigtige FPS uden skærmens Hz-loft; delvise tests får ingen samlet score
 $BenchHistFile = Join-Path $OutDir 'benchmark-historik.json'
 $BenchRef = @{ Cpu1 = 1000; CpuN = 8000; Ram = 15; DiskR = 2000; Gpu = 60 }   # faste pejlemærker: 1000 point i alt
 function Bench-Total($r) {
@@ -5336,9 +5336,52 @@ function Load-Bench {
 function Show-BenchHist {
   $h = @(Get-BenchHist)
   [array]::Reverse($h)
-  $rows = @(foreach ($x in $h) { $r = New-Object PcTjek.Row; $r.Navn = ([datetime]$x.Date).ToString('dd-MM-yyyy HH:mm'); $r.Info = $(if ($x.Score) { [string]$x.Score } else { 'delvis' }); $r.Note = "$($x.Cpu1) / $($x.CpuN)"; $r.Status = $(if ($x.Gpu) { "$($x.Gpu)" } else { '–' }); $r.Gruppe = "$($x.DiskR) MB/s"; $r.Sti = "$($x.Hw.Cpu)$(if ($x.Hw.Laptop) { ' · bærbar' })$(if ($x.Hw.OnBattery) { ' · på batteri' })"; $r })
+  $rows = @(foreach ($x in $h) { $r = New-Object PcTjek.Row; $r.Navn = ([datetime]$x.Date).ToString('dd-MM-yyyy HH:mm'); $r.Info = $(if ($x.Score) { [string]$x.Score } else { 'delvis' }); $r.Note = "$($x.Cpu1) / $($x.CpuN)"; $r.Status = $(if ($x.Gpu) { "$($x.Gpu) fps" } else { '–' }); $r.Gruppe = "$($x.DiskR) MB/s"; $r.Sti = "$($x.Hw.Cpu)$(if ($x.Hw.Laptop) { ' · bærbar' })$(if ($x.Hw.OnBattery) { ' · på batteri' })"; $r })
   $ui.GridBenchHist.ItemsSource = $rows
   $ui.GridBenchHist.Visibility = $(if ($rows.Count) { 'Visible' } else { 'Collapsed' }); $ui.BenchHistEmpty.Visibility = $(if ($rows.Count) { 'Collapsed' } else { 'Visible' })
+}
+
+# ---------- "Hvad betyder dine tal?" ----------
+function Test-HzCap($s) {
+  if (-not $s -or -not $s.Fps) { return $false }
+  foreach ($hz in 60, 75, 90, 100, 120, 144, 160, 165, 170, 180, 200, 240, 280, 360) { if ([math]::Abs([double]$s.Fps - $hz) -le $hz * 0.02 -and (-not $s.P1 -or [double]$s.P1 -ge 0.85 * $hz)) { return $true } }
+  return $false
+}
+function Get-BenchAdvice($r) {
+  $out = New-Object System.Collections.ArrayList
+  $add = { param($t, $why, $fix) [void]$out.Add("⚠  $t`n     Mulig årsag: $why`n     Det kan du gøre: $fix") }
+  $hw = $r.Hw
+  if ($hw.OnBattery) { & $add 'Testen kørte på batteri.' 'De fleste bærbare skruer ned for at spare batteri.' 'Sæt laderen i, og kør testen igen.' }
+  try { $plan = (powercfg /getactivescheme 2>$null) -join ' '; if ($plan -match '(?i)strømbesparelse|power saver|energisparer') { & $add "Windows' strømplan står på strømbesparelse." 'Strømbesparelse holder processoren nede.' "Kontrolpanel → Strømstyring → vælg 'Balanceret' (eller 'Høj ydelse')." } } catch {}
+  try { $pm = Get-PowerMode; if ($pm -eq '961cc777-2547-4f9d-8174-7d86181b8a7a') { & $add "Windows' strømtilstand står på 'Bedste energieffektivitet'." 'Den sparer strøm på bekostning af ydelse.' "Indstillinger → System → Strøm og batteri → Strømtilstand → 'Balanceret' eller 'Bedste ydeevne'." } } catch {}
+  if ($r.Sustain -and $r.Sustain -lt 88) { & $add "Processoren taber $([math]::Round(100 - $r.Sustain)) % fart, når den bliver varm." 'For varm: støv, en træt køler, tør kølepasta eller blokeret luft (fx en bærbar på en dyne).' "Rens støv af køler og blæsere, giv luft omkring pc'en, og vælg 'Bedste ydeevne'. Hjælper det ikke, så kig på køleren eller kølepastaen." }
+  if ($r.Cpu1 -and $r.CpuN -and $hw.Cores) {
+    $ratio = [double]$r.CpuN / [double]$r.Cpu1; $exp = [double]$hw.Cores * 0.55
+    if ($ratio -lt $exp) { & $add "Alle kerner tilsammen yder kun $([math]::Round($ratio, 1))× én kerne (forventet mindst $([math]::Round($exp, 1))× med $($hw.Cores) kerner)." "Noget i baggrunden bruger processoren, eller den får for lidt strøm (meget almindeligt på bærbare i stille tilstand)." "Luk tunge programmer, og vælg 'Bedste ydeevne'. På en bærbar: vælg også ydelsestilstand i producentens program (fx Lenovo Vantage eller G-Helper)." }
+  }
+  try {
+    $mods = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+    $rated = ($mods | ForEach-Object { Get-RamRated ([string]$_.PartNumber) } | Where-Object { $_ } | Measure-Object -Maximum).Maximum
+    if ($rated -and $hw.RamMHz -and $rated -gt [double]$hw.RamMHz * 1.12) { & $add "Hukommelsen kører $($hw.RamMHz) MHz, men er lavet til $rated MHz." 'XMP (Intel) eller EXPO (AMD) er ikke slået til i BIOS.' "Gå i BIOS (tryk Del eller F2 ved opstart), og slå XMP/EXPO til. Det giver ofte mærkbart flere FPS i CPU-tunge spil." }
+  } catch {}
+  try {
+    $free = (Get-PSDrive ($env:SystemDrive.Substring(0, 1))); $pct = 100 * $free.Free / ($free.Free + $free.Used)
+    if ($pct -lt 10) { & $add "Systemdisken er næsten fuld ($([math]::Round($pct)) % ledig)." 'En fuld SSD bliver langsommere, og Windows mangler plads til opdateringer.' "Brug 'Oprydning' og 'Filer' i Opticon, og flyt store filer væk." }
+  } catch {}
+  if ($r.DiskR -and $hw.Disk -match '(?i)nvme|\b9[789]0\b|sn[5-8]\d0|kc3000|mp600|p[35]\b|firecuda 5|990|980|970' -and $r.DiskR -lt 1200) { & $add "Din NVMe-disk læser kun $($r.DiskR) MB/s." 'Den sidder måske i en langsommere M.2-plads, er meget fuld, eller bliver for varm.' "Tjek i bundkortets manual, at disken sidder i en M.2-plads med fuld PCIe-hastighed, og frigør plads." }
+  elseif ($r.DiskR -and $r.DiskR -lt 250 -and $r.Iops -and $r.Iops -lt 400) { & $add "Windows ligger på en langsom disk ($($r.DiskR) MB/s, $($r.Iops) små læsninger/sek)." 'Det ligner en mekanisk harddisk.' "Et skift til en SSD er den opgradering, du mærker mest i hverdagen." }
+  if ($r.Gpu -and $r.GpuRenderer -and $hw.Gpu -match '(?i)nvidia|radeon rx|radeon pro|arc a|arc b') {
+    $vend = if ($hw.Gpu -match '(?i)nvidia') { 'nvidia' } elseif ($hw.Gpu -match '(?i)arc') { 'arc' } else { 'radeon' }
+    if ([string]$r.GpuRenderer -notmatch "(?i)$vend") { & $add "Grafiktesten kørte på $($r.GpuRenderer) og ikke på dit $($hw.Gpu)." 'Windows valgte den indbyggede grafik til browseren.' "Indstillinger → System → Skærm → Grafik → vælg Microsoft Edge (og dine spil) → 'Høj ydeevne'." }
+  }
+  if ($r.Gpu -and (Test-HzCap ([pscustomobject]@{ Fps = $r.Gpu; P1 = $r.GpuLow }))) { [void]$out.Add("ℹ  Grafikken lå lige på $($r.Gpu) fps, som er en almindelig skærmfrekvens. Tallet kan være begrænset af skærmen og ikke af grafikkortet.") }
+  if ((Get-Smi) -and (Test-Path $GpuPlFile)) { try { $g = Get-Content $GpuPlFile -Raw | ConvertFrom-Json; [void]$out.Add("ℹ  Du har valgt en lavere strømgrænse til grafikkortet ($($g.Pct) %, $($g.Watts) W). Det sparer strøm, men kan koste lidt FPS. Nulstil den under Optimering, hvis du vil se kortets fulde ydelse.") } catch {} }
+  return @($out)
+}
+function Show-BenchAdvice($r) {
+  $a = @(Get-BenchAdvice $r)
+  $ui.BenchAdvice.Text = if ($a.Count) { $a -join "`n`n" } else { "✓  Ingen tegn på, at noget holder din pc tilbage. Processor, hukommelse, disk og grafik opfører sig, som de skal ud fra det, Opticon kan se." }
+  $ui.BenchAdviceBox.Visibility = 'Visible'
 }
 function Show-Bench($r) {
   $hw = $r.Hw
@@ -5351,8 +5394,9 @@ function Show-Bench($r) {
   $ui.BSusSub.Text = $(if ($r.Sustain -ge 95) { 'Holder farten fint, når den bliver varm' } elseif ($r.Sustain -ge 85) { 'Taber lidt fart, når den bliver varm' } else { 'Taber mærkbart fart, når den bliver varm. Tjek køling og støv.' })
   $ui.BRam.Text = "$($r.Ram) GB/s"; $ui.BRamSub.Text = 'kopierer data i hukommelsen'
   $ui.BDisk.Text = "$($r.DiskR) MB/s"; $ui.BDiskSub.Text = "læs · skriv $($r.DiskW) MB/s · $($r.Iops) små læsninger/sek"
-  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu)" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { 'tegninger af testscenen pr. sekund (1080p)' } else { 'grafikdelen blev ikke målt' })
+  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { "laveste 1 %: $(if ($r.GpuLow) { "$($r.GpuLow) fps" } else { '–' }) · Opticons testscene i 1080p" } else { 'grafikdelen blev ikke målt' })
   $ui.BtnBenchShare.IsEnabled = [bool]$r.Score
+  try { Show-BenchAdvice $r } catch { Log "Råd-fejl: $_" }
   # Forskel i forhold til testen før denne (så du kan se, om en ændring i Optimering hjalp)
   $h = @(Get-BenchHist); $idx = -1
   for ($i = $h.Count - 1; $i -ge 0; $i--) { if ([string]$h[$i].Date -eq [string]$r.Date) { $idx = $i; break } }
@@ -5400,6 +5444,7 @@ function Finish-Bench($gpuStep, $gpuErr) {
   if (-not $b) { return }
   $r = [ordered]@{ V = $BenchTestVersion; Date = (Get-Date).ToString('s'); App = $AppVersion; Hw = $b.Hw
                    Cpu1 = $b.Cpu1; CpuN = $b.CpuN; Sustain = $b.Sustain; Ram = $b.Ram; DiskR = $b.DiskR; DiskW = $b.DiskW; Iops = $b.Iops
+                   GpuRenderer = $script:LastGpuRenderer
                    Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.P1) { [math]::Round([double]$gpuStep.P1) } else { $null }); Score = 0 }
   $r.Score = Bench-Total $r
   $h = @(Get-BenchHist) + @([pscustomobject]$r)
@@ -5432,7 +5477,7 @@ function Load-BenchCompare {
       @{ N = 'CPU · alle kerner'; Mine = $me.CpuN; P = 'cpuN'; L = $sameCpu; W = "$kind med $($me.Hw.Cpu)"; U = '' }
       @{ N = 'Holder farten'; Mine = $me.Sustain; P = 'sustain'; L = $sameCpu; W = "$kind med $($me.Hw.Cpu)"; U = ' %' }
       @{ N = 'Hukommelse'; Mine = $me.Ram; P = 'ram'; L = $sameCpu; W = "$kind med $($me.Hw.Cpu)"; U = ' GB/s' }
-      @{ N = 'Grafik (1080p)'; Mine = $me.Gpu; P = 'gpu'; L = $sameGpu; W = "$kind med $($me.Hw.Gpu)"; U = ' tegn./s' }
+      @{ N = 'Grafik (1080p)'; Mine = $me.Gpu; P = 'gpu'; L = $sameGpu; W = "$kind med $($me.Hw.Gpu)"; U = ' fps' }
     )
     $rows = @(); $cpuDiff = $null; $gpuDiff = $null
     foreach ($d in $defs) {

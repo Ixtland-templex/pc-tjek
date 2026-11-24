@@ -1,7 +1,11 @@
 {
-  "version": "2.34",
+  "version": "2.35",
   "date": "2026-11-24",
   "notes": [
+    "Grafiktest giver nu rigtige FPS uden skærmens Hz-loft (testversion 3)",
+    "Rettet: grafikdelen af benchmark og opløsningstest gav ingen målinger",
+    "Ny: Hvad betyder dine tal? – advarer om varmetab, RAM uden XMP, langsom disk, forkert grafikkort m.m. og siger hvad du kan gøre",
+    "Optimering ryddet op: tydelige live-tal, ekstra lister kun under Vis alt",
     "Ny: ✅ Hjalp det? – én historik over dine ændringer med måling før og efter",
     "Opstart måles ved de næste opstarter, oprydning som ledig plads, GPU-profiler i samme test",
     "Knap: Jeg har ændret noget – kører den store test og sammenligner med testen før",
@@ -47,7 +51,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "A770FB0B3EC781B30925EB4839B2748BC6BB90E7E6AE7F68DD65C8F57AA74671"
+      "sha256": "AA528413A44AC40D817364D6ECFDC9C5C960B77C2A639B114709BB4BA2CDF633"
     },
     {
       "name": "PC-Tjek-Start.ps1",

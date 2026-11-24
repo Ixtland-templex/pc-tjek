@@ -1,15 +1,14 @@
-# Modtager delte Opticon-resultater (GitHub-opslag med titlen "[Opticon-resultat] ...")
-# og gemmer dem i results/results.json i grenen "results". Opslaget lukkes automatisk.
+# Modtager delte Opticon-resultater (GitHub-opslag med titlen "[Opticon-resultat] ...").
+# Hvert resultat gemmes som sin egen fil i grenen "results" (results/entries/<nr>.json), og results/results.json
+# bygges igen ud fra alle filerne. Ingen kø: samtidige indsendelser prøver igen, så intet går tabt.
+# Samme opslag kan køres igen (fx når det redigeres eller genåbnes) uden at give dubletter.
 name: Opticon-resultater
 on:
   issues:
-    types: [opened]
+    types: [opened, edited, reopened]
 permissions:
   contents: write
   issues: write
-concurrency:
-  group: opticon-results
-  cancel-in-progress: false
 jobs:
   add:
     if: startsWith(github.event.issue.title, '[Opticon-resultat]')
@@ -22,6 +21,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
             const issue = context.payload.issue;
             const num = (x, lo, hi) => typeof x === 'number' && isFinite(x) && x >= lo && x <= hi;
             const str = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
@@ -31,34 +31,43 @@ jobs:
               if (!m) throw new Error('Ingen JSON fundet.');
               const r = JSON.parse(m[1]);
               const s = r.scores || {};
-              const ok = r.v === 1 && str(r.cpu, 100) && str(r.gpu, 100) && !r.battery &&
+              const ok = (r.v >= 1 && r.v <= 3) && str(r.cpu, 100) && str(r.gpu, 100) && !r.battery &&
                 num(s.cpu1, 1, 100000) && num(s.cpuN, 1, 5000000) && num(s.sustain, 1, 150) &&
-                num(s.ram, 0.1, 1000) && num(s.diskR, 0, 100000) && (s.gpu === null || num(s.gpu, 0, 100000)) && num(s.total, 1, 1000000);
-              if (!ok) throw new Error('Tallene ser ikke gyldige ud.');
+                num(s.ram, 0.1, 1000) && num(s.diskR, 0, 100000) && num(s.gpu, 0, 1000000) && num(s.total, 1, 1000000);
+              if (!ok) throw new Error('Tallene ser ikke gyldige ud (kun fulde tests tilsluttet strøm kan deles).');
               entry = {
-                v: 1, id: issue.number, date: new Date().toISOString().slice(0, 10), app: String(r.app || '').slice(0, 10),
+                v: r.v, id: issue.number, date: new Date().toISOString().slice(0, 10), app: String(r.app || '').slice(0, 10),
                 cpu: r.cpu.trim(), gpu: r.gpu.trim(), cores: r.cores | 0, threads: r.threads | 0,
                 ramGB: r.ramGB | 0, ramMHz: r.ramMHz | 0, disk: String(r.disk || '').slice(0, 80), laptop: !!r.laptop, battery: false,
+                power: String(r.power || '').slice(0, 40),
                 scores: { cpu1: s.cpu1, cpuN: s.cpuN, sustain: s.sustain, ram: s.ram, diskR: s.diskR, diskW: s.diskW || 0, iops: s.iops || 0, gpu: s.gpu, total: s.total }
               };
             } catch (e) { problem = e.message; }
 
             if (entry) {
-              const sh = (cmd, args) => exec.exec(cmd, args);
-              await sh('git', ['config', 'user.name', 'opticon-bot']);
-              await sh('git', ['config', 'user.email', 'opticon-bot@users.noreply.github.com']);
-              const has = (await exec.getExecOutput('git', ['ls-remote', '--heads', 'origin', 'results'])).stdout.trim().length > 0;
-              if (has) { await sh('git', ['fetch', 'origin', 'results']); await sh('git', ['checkout', '-B', 'results', 'origin/results']); }
-              else { await sh('git', ['checkout', '--orphan', 'results']); await sh('git', ['rm', '-rf', '--quiet', '.']); }
-              fs.mkdirSync('results', { recursive: true });
-              const f = 'results/results.json';
-              const list = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : [];
-              if (!list.some(x => x.id === entry.id)) list.push(entry);
-              fs.writeFileSync(f, JSON.stringify(list, null, 1));
-              await sh('git', ['add', f]);
-              await sh('git', ['commit', '-m', `Resultat #${issue.number}: ${entry.cpu} / ${entry.gpu}`]);
-              await sh('git', ['push', 'origin', 'results']);
+              const run = (args) => exec.exec('git', args);
+              const out = async (args) => (await exec.getExecOutput('git', args, { ignoreReturnCode: true })).exitCode;
+              await run(['config', 'user.name', 'opticon-bot']);
+              await run(['config', 'user.email', 'opticon-bot@users.noreply.github.com']);
+              let saved = false;
+              for (let attempt = 1; attempt <= 6 && !saved; attempt++) {
+                const has = (await exec.getExecOutput('git', ['ls-remote', '--heads', 'origin', 'results'])).stdout.trim().length > 0;
+                if (has) { await run(['fetch', 'origin', 'results']); await run(['checkout', '-f', '-B', 'results', 'origin/results']); }
+                else { await run(['checkout', '-f', '--orphan', 'results']); await out(['rm', '-rf', '--quiet', '.']); }
+                const dir = 'results/entries';
+                fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(path.join(dir, `${entry.id}.json`), JSON.stringify(entry, null, 1));
+                const all = fs.readdirSync(dir).filter(f => f.endsWith('.json')).map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+                all.sort((a, b) => a.id - b.id);
+                fs.writeFileSync('results/results.json', JSON.stringify(all, null, 1));
+                await run(['add', 'results']);
+                if (await out(['diff', '--cached', '--quiet']) === 0) { saved = true; break; }   // allerede gemt (genkørsel)
+                await run(['commit', '-m', `Resultat #${entry.id}: ${entry.cpu} / ${entry.gpu}`]);
+                if (await out(['push', 'origin', 'results']) === 0) { saved = true; break; }
+                await new Promise(r => setTimeout(r, 2000 + Math.random() * 4000));   // en anden indsendelse kom først: prøv igen
+              }
+              if (!saved) { entry = null; problem = 'Kunne ikke gemme lige nu. Rediger opslaget en smule, så prøves det igen.'; }
             }
             await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number,
-              body: entry ? '✅ Tak! Dit resultat er tilføjet og kan ses i Opticon om et par minutter.' : `⚠️ Resultatet kunne ikke tilføjes: ${problem}` });
-            await github.rest.issues.update({ ...context.repo, issue_number: issue.number, state: 'closed' });
+              body: entry ? '✅ Tak! Dit resultat er gemt og kan ses i Opticon om et par minutter.' : `⚠️ Resultatet kunne ikke tilføjes: ${problem}` });
+            if (entry) await github.rest.issues.update({ ...context.repo, issue_number: issue.number, state: 'closed' });

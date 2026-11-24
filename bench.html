@@ -64,44 +64,31 @@ addEventListener('error', e => post('/jserr', { e: String(e.message || e) }));
 c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'PC-Tjek GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
 addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
 let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
-// Opløsningstest: scenen tegnes i en usynlig billedbuffer i den valgte opløsning og skaleres til skærmen.
-// For at komme forbi skærmens Hz-loft tegnes den K gange pr. skærmbillede; FPS = antal tegninger pr. sekund.
-let fbo = null, rb = null, fw = 0, fh = 0, K = 1, kUntil = 0;
+// Opløsningstest: scenen tegnes i præcis den valgte opløsning (lærredet får den størrelse og skaleres til skærmen).
+// Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
+let fw = 0, fh = 0, warmUntil = 0;
 function setRes(str){
   const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
   const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
-  fw = w; fh = h;
-  if (!fbo) { fbo = gl.createFramebuffer(); rb = gl.createRenderbuffer(); }
-  gl.bindRenderbuffer(gl.RENDERBUFFER, rb); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, w, h);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rb);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  K = 1; kUntil = performance.now() + 3000; win = []; winStart = performance.now();
+  fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
+  warmUntil = performance.now() + 1500; win = []; winStart = performance.now();
 }
-if (resMode) { setRes(q.get('r0') || '1920x1080'); post('/calib', { work: 0 }); }
-function adaptK(fps){ if (fps > 50) K = Math.min(48, Math.max(K + 1, Math.ceil(K * fps / 40))); else if (fps < 22 && K > 1) K = Math.max(1, Math.floor(K * fps / 35)); }
-function drawRes(now){
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.viewport(0, 0, fw, fh); gl.uniform2f(uR, fw, fh);
-  for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, c.width, c.height);
-  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
-  const sc = Math.min(c.width / fw, c.height / fh), dw = Math.round(fw * sc), dh = Math.round(fh * sc), dx = (c.width - dw) >> 1, dy = (c.height - dh) >> 1;
-  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-  gl.blitFramebuffer(0, 0, fw, fh, dx, dy, dx + dw, dy + dh, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+if (resMode) {
+  c.style.objectFit = 'contain';
+  removeEventListener('resize', resize);
+  setRes(q.get('r0') || '1920x1080');
+  post('/calib', { work: 0 });
 }
-// Kalibrering: juster belastningen, så FPS ligger under skærmens Hz (ellers begrænser vsync målingen)
-function calibrate(fps){ if (fps > 55) work = Math.min(3.0, work * 1.3); else if (fps < 25) work = Math.max(0.4, work * 0.85); resize(); }
+try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); post('/renderer', { r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
 function frame(now){
   if (done) return;
   const dt = now - last; last = now; frames++; win.push(dt);
-  if (resMode) drawRes(now);
-  else { gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3);
   if (resMode && now - winStart >= 1000) {
-    const ms = now - winStart, f = win.length, rfps = 1000 * f / ms;
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
-    const fps = rfps * K;
-    if (now < kUntil) adaptK(rfps); else post('/fps', { f: f * K, ms, p99: p99 / K });
-    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} tegninger/s<br><small>${now < kUntil ? 'Finder belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    if (now >= warmUntil) post('/fps', { f, ms, p99 });
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
     win = []; winStart = now;
   } else if (!resMode && now - winStart >= 1000) {
     const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
