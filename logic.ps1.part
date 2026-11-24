@@ -758,6 +758,54 @@ $ui.BtnUpdRun.Add_Click({
 #  Ydelse og helbred
 # =====================================================================
 function HRow($ok, $name, $val, $note) { $r = New-Object PcTjek.Row; $r.Status = $(switch ($ok) { 2 { '🟢' } 1 { '🟡' } 0 { '🔴' } default { 'ℹ' } }); $r.Navn = $name; $r.Info = [string]$val; $r.Note = $note; $r }
+$HagsSource = @'
+using System;
+using System.Runtime.InteropServices;
+namespace PcTjek {
+  public static class Hags {
+    [StructLayout(LayoutKind.Sequential)] struct AdapterInfo { public uint hAdapter; public uint LuidLow; public int LuidHigh; public uint NumOfSources; public int Precise; }
+    [StructLayout(LayoutKind.Sequential)] struct EnumAdapters2 { public uint NumAdapters; public IntPtr pAdapters; }
+    [StructLayout(LayoutKind.Sequential)] struct QueryInfo { public uint hAdapter; public int Type; public IntPtr pData; public uint DataSize; }
+    [StructLayout(LayoutKind.Sequential)] struct CloseAdapter { public uint hAdapter; }
+    [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref EnumAdapters2 e);
+    [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QueryInfo q);
+    [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CloseAdapter c);
+    // -1 = ukendt, 0 = understøttes ikke, 1 = understøttet men slået fra, 2 = slået til
+    public static int State() {
+      int best = -1;
+      EnumAdapters2 e = new EnumAdapters2();
+      if (D3DKMTEnumAdapters2(ref e) != 0 || e.NumAdapters == 0) return -1;
+      int sz = Marshal.SizeOf(typeof(AdapterInfo));
+      IntPtr buf = Marshal.AllocHGlobal(sz * (int)e.NumAdapters);
+      IntPtr caps = Marshal.AllocHGlobal(4);
+      try {
+        e.pAdapters = buf;
+        if (D3DKMTEnumAdapters2(ref e) != 0) return -1;
+        for (int i = 0; i < e.NumAdapters; i++) {
+          AdapterInfo a = (AdapterInfo)Marshal.PtrToStructure(new IntPtr(buf.ToInt64() + i * sz), typeof(AdapterInfo));
+          Marshal.WriteInt32(caps, 0);
+          QueryInfo q = new QueryInfo(); q.hAdapter = a.hAdapter; q.Type = 70; q.pData = caps; q.DataSize = 4;
+          if (D3DKMTQueryAdapterInfo(ref q) == 0) {
+            int v = Marshal.ReadInt32(caps);
+            int st = (v & 1) == 0 ? 0 : ((v & 2) != 0 ? 2 : 1);
+            if (st > best) best = st;
+          }
+          CloseAdapter c = new CloseAdapter(); c.hAdapter = a.hAdapter; D3DKMTCloseAdapter(ref c);
+        }
+      } finally { Marshal.FreeHGlobal(buf); Marshal.FreeHGlobal(caps); }
+      return best;
+    }
+  }
+}
+'@
+# Spørger grafikdriveren direkte (samme kilde som Windows' egen indstilling). Registret mangler ofte værdien, når Windows selv har slået det til
+function Get-HagsState {
+  $reg = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
+  $live = -1
+  try { Import-OpticonType 'PcTjek.Hags' $HagsSource; $live = [PcTjek.Hags]::State() } catch { Log "GPU-planlægning: $_" }
+  [pscustomobject]@{ Live = $live; Reg = $reg }
+}
+
 function Load-Health {
   $rows = New-Object System.Collections.ArrayList
   foreach ($d in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
@@ -791,8 +839,15 @@ function Load-Health {
   $gm = (Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -ErrorAction SilentlyContinue).AutoGameModeEnabled
   $script:GameModeOn = ($null -eq $gm) -or ($gm -eq 1)
   [void]$rows.Add((HRow $(if ($script:GameModeOn) { 2 } else { 1 }) 'Spiltilstand' $(if ($script:GameModeOn) { 'Til' } else { 'Fra' }) $(if ($script:GameModeOn) { 'Windows prioriterer spil' } else { 'Slå den til: Windows prioriterer spil og pauser opdateringer under spil' })))
-  $hags = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
-  [void]$rows.Add((HRow $(if ($hags -eq 2) { 2 } else { 3 }) 'Hardware-accelereret GPU-planlægning' $(if ($hags -eq 2) { 'Til' } else { 'Fra' }) 'Kan slås til i Indstillinger → Skærm → Grafik (kræver genstart). Giver lavere latens i nogle spil'))
+  $hg = Get-HagsState
+  $hTip = 'Kan slås til i Indstillinger → System → Skærm → Grafik (kræver genstart). Giver lavere latens i nogle spil'
+  $hRow = switch ($hg.Live) {
+    2 { if ($hg.Reg -eq 1) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Til (slås fra ved genstart)' 'Du har slået den fra i Indstillinger. Det sker, når pc''en genstarter' } else { HRow 2 'Hardware-accelereret GPU-planlægning' 'Til' 'Lavere latens i spil, der kan bruge det' } }
+    1 { if ($hg.Reg -eq 2) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Til efter genstart' 'Den er slået til, men virker først, når pc''en har været genstartet' } else { HRow 3 'Hardware-accelereret GPU-planlægning' 'Fra' $hTip } }
+    0 { HRow 3 'Hardware-accelereret GPU-planlægning' 'Understøttes ikke' 'Grafikkortet eller driveren kan ikke bruge funktionen. Det er helt fint' }
+    default { if ($hg.Reg -eq 2) { HRow 2 'Hardware-accelereret GPU-planlægning' 'Til' 'Lavere latens i spil, der kan bruge det' } elseif ($hg.Reg -eq 1) { HRow 3 'Hardware-accelereret GPU-planlægning' 'Fra' $hTip } else { HRow 3 'Hardware-accelereret GPU-planlægning' 'Windows bestemmer' 'Se status i Indstillinger → System → Skærm → Grafik' } }
+  }
+  [void]$rows.Add($hRow)
   $script:DvrOn = Test-BgRecording
   [void]$rows.Add((HRow $(if ($script:DvrOn) { 1 } else { 2 }) 'Optagelse i baggrunden (Game Bar)' $(if ($script:DvrOn) { 'Til' } else { 'Fra' }) $(if ($script:DvrOn) { 'Optager hele tiden de sidste minutter af dine spil. Det holder grafikkortets videochip i gang og kan give små hak. Slå den fra, hvis du ikke bruger "Optag hvad der skete"' } else { 'Godt: intet optages i baggrunden, mens du spiller' })))
   $boot = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 -ErrorAction SilentlyContinue |
@@ -1808,6 +1863,33 @@ function Smi-Q($fields) {
   @((& $smi -i (Get-GpuId) "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { $v = 0.0; if ([double]::TryParse(([string]$_).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } })
 }
 function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
+# Stopper en GPU-test, der hænger: lukker testvinduet, sætter strømtilstand/strømgrænse tilbage og giver besked
+function Stop-HungGpuTest($j, $why) {
+  Log "GPU-test stoppet af vagthunden: $why"
+  [void]$script:Jobs.Remove($j)
+  try { [void]$j.PS.BeginStop($null, $null) } catch {}   # vent ikke på den: tråden kan sidde fast
+  $prof = [string]$j.S.Prof; if (-not $prof) { $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser' }
+  foreach ($n in 'msedge', 'chrome') {
+    try { Get-CimInstance Win32_Process -Filter "Name='$n.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} } } catch {}
+  }
+  $restored = ''
+  if (Test-Path $GpuRestoreFile) {
+    try {
+      $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
+      if ($g.Overlay) {
+        # Sættes tilbage i en separat tråd: var det netop skiftet af strømtilstand, der hang, må appen ikke også hænge
+        $rrs = [runspacefactory]::CreateRunspace(); $rrs.Open(); $rp = [powershell]::Create(); $rp.Runspace = $rrs
+        [void]$rp.AddScript({ param($t, $g, $f) for ($k = 0; $k -lt 3; $k++) { [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 500; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0 -and $x.ToString() -eq ([guid]$g).ToString()) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; return } } }.ToString()).AddArgument([PcTjek.PowerMode]).AddArgument([string]$g.Overlay).AddArgument($GpuRestoreFile)
+        [void]$rp.BeginInvoke()
+        $restored = " Strømtilstanden sættes tilbage til $(PowerMode-Name $g.Overlay)."
+      } elseif ($g.Watts) {
+        if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue; $restored = ' Strømgrænsen er sat tilbage.' } else { $restored = ' Opticon prøver at sætte strømgrænsen tilbage næste gang, appen starter.' }
+      }
+    } catch { Log "Vagthund-gendannelse: $_" }
+  }
+  if ($script:Jobs.Count -eq 0) { $ui.Busy.Visibility = 'Hidden' }
+  try { & $j.Done $null "Testen hang og blev stoppet automatisk ($why).$restored Send gerne de sidste linjer fra loggen, så kan det rettes." $j.Ctx } catch { Log "Done-fejl: $_" }
+}
 function Start-GpuBench($mode) {
   if ($mode -ne 'bench' -and -not (Confirm-ModeFree 'GPU-testen')) { return }
   if ($mode -eq 'auto' -and -not (Get-Smi)) {
@@ -1923,6 +2005,11 @@ function Start-GpuBench($mode) {
       if (-not $script:GpuMeasuring) { $script:GpuProgTimer.Stop(); return }
       $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.GpuMode } | Select-Object -First 1
       if (-not $j) { return }
+      # Vagthund udefra: hænger testen (intet livstegn i 25 sek, eller langt over tiden), stopper appen den selv
+      $nowT = [DateTime]::UtcNow.Ticks
+      if ($j.S.Beat -and ($nowT - [int64]$j.S.Beat) -gt 25 * 1e7) { Stop-HungGpuTest $j "testen svarede ikke i 25 sek (hang ved: $($j.S.Where))"; return }
+      if ($j.S.Deadline -and $nowT -gt ([int64]$j.S.Deadline + 45 * 1e7)) { Stop-HungGpuTest $j "testen gik langt over tiden (sidst ved: $($j.S.Where))"; return }
+      if (-not $j.S.Beat -and ((Get-Date) - $j.T0).TotalSeconds -gt 60) { Stop-HungGpuTest $j 'testen kom aldrig i gang'; return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(if ($script:BenchNativeRes -and $script:BenchNativeRes -ne '3840x2160') { ", $(($script:BenchNativeRes) -replace 'x', '×')" }) og 4K$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }

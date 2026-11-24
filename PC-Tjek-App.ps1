@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.56'
+$AppVersion = '2.57'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1808,7 +1808,11 @@ function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRa
 resize(); addEventListener('resize', resize);
 addEventListener('error', e => post('/jserr', { e: String(e.message || e) }));
 c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'Opticon GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
-function stopTest() { post('/abort'); o.innerHTML = 'Opticon GPU-test<br><small>Stopper…</small>'; }
+let stopping = 0, lastOk = performance.now();
+function stopTest() { stopping = performance.now(); post('/abort'); o.innerHTML = 'Opticon GPU-test<br><small>Stopper…</small>'; setTimeout(() => { try { window.close(); } catch (e) {} }, 4000); }
+// Svarer Opticon ikke, får man det at vide i stedet for en test, der bare kører videre
+function hung(){ return performance.now() - lastOk > 6000; }
+function info(t){ if (stopping) return 'Stopper… (lukker om lidt)'; if (hung()) return '⚠ Opticon svarer ikke. Tryk Alt+F4 for at lukke testen'; return t; }
 addEventListener('keydown', e => { if (e.key === 'Escape' || e.key === 'q' || e.key === 'Q') stopTest(); });
 { const b = document.createElement('button'); b.textContent = '✕  Stop testen'; b.onclick = stopTest;
   b.style.cssText = 'position:fixed;top:14px;right:14px;z-index:10;padding:10px 16px;border-radius:10px;border:1px solid #3B3366;background:#1B1630;color:#E6E9F0;font:600 14px Segoe UI,sans-serif;cursor:pointer;opacity:.85';
@@ -1855,7 +1859,7 @@ function frame(now){
     const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
     if (calibUntil && now < calibUntil) { calibrate(fps); }
     else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
-    o.innerHTML = `Opticon GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    o.innerHTML = `Opticon GPU-test · ${fps.toFixed(0)} fps<br><small>${info((calibUntil ? 'Kalibrerer belastning…' : label) + fmtR(remain) + ' · Esc for at stoppe')}</small>`;
     win = []; rafs = 0; winStart = now;
   }
   requestAnimationFrame(frame);
@@ -1868,11 +1872,11 @@ if (resMode) setInterval(() => {
   const s = win.slice().sort((a, b) => a - b), p99 = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * .99))] : 0;
   post('/dbg', { K, rafs, f, ms: Math.round(ms), w: fw, h: fh, warm: now < warmUntil });
   if (now >= warmUntil && f > 0) post('/fps', { f, ms, p99 });
-  o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+  o.innerHTML = `Opticon GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${info(label + fmtR(remain) + ' · Esc for at stoppe')}</small>`;
   win = []; rafs = 0; draws = 0; gpuMs = 0; winStart = now;
 }, 1000);
 setInterval(() => fetch('/state').then(r => r.json()).then(s => {
-  label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+  lastOk = performance.now(); label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
 }).catch(() => {}), resMode ? 400 : 1000);
 </script></body></html>
 '@
@@ -1888,26 +1892,55 @@ $GpuBenchScript = {
   function Num($x) { $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
   $gid = if ($arg.GpuId) { [string]$arg.GpuId } else { '0' }   # samme fysiske kort hele vejen (UUID)
   function Q($fields) { @((& $smi -i $gid "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
+  function Beat($where) { $sync.Beat = [DateTime]::UtcNow.Ticks; if ($where) { $sync.Where = $where } }
+  Beat 'start'
+  # Batteri og GPU-belastning måles i en separat tråd: et langsomt Windows-opslag kan aldrig få selve testen til at hænge
+  $side = $null; $sideSh = [hashtable]::Synchronized(@{ U = $null; W = $null; Stop = $false; Slow = '' })
+  if (-not $hasSmi) {
+    try {
+      $srs = [runspacefactory]::CreateRunspace(); $srs.Open()
+      $side = [powershell]::Create(); $side.Runspace = $srs
+      [void]$side.AddScript({
+        param($sh)
+        while (-not $sh.Stop) {
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          try { $sh.U = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
+          if ($sw.ElapsedMilliseconds -gt 3000) { $sh.Slow = "GPU-belastning $([math]::Round($sw.Elapsed.TotalSeconds)) s" }
+          $sw.Restart()
+          try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; $sh.W = if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { [math]::Round($bt.DischargeRate / 1000, 1) } else { $null } } catch {}
+          if ($sw.ElapsedMilliseconds -gt 3000) { $sh.Slow += " batteri $([math]::Round($sw.Elapsed.TotalSeconds)) s" }
+          Start-Sleep -Milliseconds 900
+        }
+      }.ToString()).AddArgument($sideSh)
+      [void]$side.BeginInvoke()
+    } catch { $side = $null }
+  }
   function Sample {
     if ($hasSmi) { $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'; return [pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] } }
-    # Målingerne må aldrig få testen til at hænge: maks. 2 sek pr. opslag, og er de langsomme, springes de over resten af testen
-    $sw = [Diagnostics.Stopwatch]::StartNew(); $u = $null
-    if (-not $script:NoUtil) {
-      try { $u = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -OperationTimeoutSec 2 -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
-      if ($sw.ElapsedMilliseconds -gt 1500) { $script:NoUtil = $true }
-    }
-    $sw.Restart(); $w = $null
-    if (-not $script:NoBatt) {
-      try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -OperationTimeoutSec 2 -ErrorAction Stop | Select-Object -First 1; if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { $w = [math]::Round($bt.DischargeRate / 1000, 1) } } catch {}
-      if ($sw.ElapsedMilliseconds -gt 1500) { $script:NoBatt = $true }
-    }
+    $u = $sideSh.U; $w = $sideSh.W
     return [pscustomobject]@{ W = $w; T = $null; F = $null; C = $null; U = $u }
   }
   # Appens egen PcTjek.PowerMode findes allerede (jobbet kører inde i appen), så der skal intet oversættes
   $pmType = 'PcTjek.PowerMode' -as [type]
   if (-not $pmType) { if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }; $pmType = 'PcTjek.PowerModeB' -as [type] }
   function Get-PM { try { $g = [guid]::Empty; if ($pmType::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-  function Set-PM($g) { try { [void]$pmType::PowerSetActiveOverlayScheme([guid]$g) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PM) -eq ([guid]$g).ToString()) }
+  # Skift af strømtilstand sker i en separat tråd med tidsgrænse, så et Windows-kald, der hænger, ikke låser testen
+  function Set-PM($g) {
+    Beat "strømtilstand $g"
+    $ok = $false
+    try {
+      $prs = [runspacefactory]::CreateRunspace(); $prs.Open()
+      $pp = [powershell]::Create(); $pp.Runspace = $prs
+      [void]$pp.AddScript({ param($t, $g) [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 300; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0) { $x.ToString() } }.ToString()).AddArgument($pmType).AddArgument($g)
+      $ph = $pp.BeginInvoke()
+      $end = (Get-Date).AddSeconds(6)
+      while (-not $ph.IsCompleted -and (Get-Date) -lt $end) { Pump; Beat; Start-Sleep -Milliseconds 80 }
+      if ($ph.IsCompleted) { $ok = ([string](@($pp.EndInvoke($ph))[-1]) -eq ([guid]$g).ToString()); try { $pp.Dispose(); $prs.Dispose() } catch {} }
+      else { [void]$script:BDiag.Add("skift af strømtilstand svarede ikke inden 6 sek ($($modeNames[[string]$g]))"); try { [void]$pp.BeginStop($null, $null) } catch {} }
+    } catch { [void]$script:BDiag.Add("strømtilstand: $($_.Exception.Message)") }
+    Beat 'måler'
+    return $ok
+  }
   $modeNames = @{ '961cc777-2547-4f9d-8174-7d86181b8a7a' = 'Bedste energieffektivitet'; '00000000-0000-0000-0000-000000000000' = 'Balanceret'; 'ded574b5-45a0-4f42-8737-46345c09c238' = 'Bedste ydeevne' }
   $origMode = Get-PM; $changedMode = $false
   $lim = if ($hasSmi) { Q 'power.limit,power.default_limit,power.min_limit,power.max_limit' } else { @($null, $null, $null, $null) }
@@ -1953,10 +1986,12 @@ $GpuBenchScript = {
   }
   # Sikkerhedsnet: testen stopper altid senest her, uanset hvad der sker
   $script:BDeadline = (Get-Date).AddSeconds(90 + @($arg.Steps).Count * ([double]$arg.StepSec + 25)); $script:BTimeout = $false
+  $sync.Deadline = $script:BDeadline.ToUniversalTime().Ticks
   function Test-Deadline { if (-not $script:BAbort -and (Get-Date) -gt $script:BDeadline) { $script:BAbort = $true; $script:BTimeout = $true } }
-  function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Test-Deadline; Start-Sleep -Milliseconds 80 } }
+  function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Beat; Test-Deadline; Start-Sleep -Milliseconds 80 } }
   # Browserens profil skal ligge i din egen mappe: Edge/Chrome kan ikke arbejde i den låste ProgramData-mappe
   $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser'
+  $sync.Prof = $prof
   New-Item -ItemType Directory -Force $prof | Out-Null
   $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))$(if ($resList.Count) { "&res=1&r0=$($resList[0])" })"
   $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-gpu-vsync --disable-frame-rate-limit" }
@@ -1967,8 +2002,8 @@ $GpuBenchScript = {
     $sync.Status = 'Starter testscenen...'
     Start-Process -FilePath $browser -ArgumentList $bargs | Out-Null
     $tw = (Get-Date).AddSeconds(25)
-    while ($script:BFps.Count -eq 0 -and -not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 }
-    if (-not $script:BCalib) { $sync.Status = 'Kalibrerer belastning...'; $tw = (Get-Date).AddSeconds(15); while (-not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 } }
+    while ($script:BFps.Count -eq 0 -and -not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Beat 'venter på testscenen'; Start-Sleep -Milliseconds 100 }
+    if (-not $script:BCalib) { $sync.Status = 'Kalibrerer belastning...'; $tw = (Get-Date).AddSeconds(15); while (-not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Beat 'kalibrerer'; Start-Sleep -Milliseconds 100 } }
     if ($script:BErr) { throw "Testsiden fejlede: $($script:BErr)" }
     if (-not $script:BCalib -and $script:BFps.Count -eq 0) { throw 'Testscenen startede ikke. Er Edge eller Chrome blokeret?' }
     $steps = @($arg.Steps); $total = $steps.Count
@@ -2011,7 +2046,7 @@ $GpuBenchScript = {
           $lastF = $script:BFps | Select-Object -Last 1
           $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps$(if ($null -ne $sm.W) { " · $([int]$sm.W) W" })$(if ($null -ne $sm.T) { " · $([int]$sm.T) °C" })$(if ($null -ne $sm.U -and -not $hasSmi) { " · belastning $($sm.U) %" }) · ⏱ $(Fmt-Rem (Remain)) tilbage"
         }
-        Test-Deadline
+        Beat "måler trin $($i + 1)"; Test-Deadline
         Start-Sleep -Milliseconds 80
       }
       Pump; $script:BMeas = $false
@@ -2036,13 +2071,15 @@ $GpuBenchScript = {
     }
     if ($changedMode -and $origMode) { if (-not (Set-PM $origMode)) { $okRestore = $false } }
     if ($arg.RestoreFile -and $okRestore) { Remove-Item -LiteralPath ([string]$arg.RestoreFile) -Force -ErrorAction SilentlyContinue }
+    $sideSh.Stop = $true; if ($side) { try { [void]$side.BeginStop($null, $null) } catch {} }
+    Beat 'rydder op'
     $script:BState.Done = $true
     try { WaitPump 1.5 } catch {}
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
     try { $listener.Stop(); $listener.Close() } catch {}
   }
   if ($script:BTimeout) { [void]$script:BDiag.Add('stoppet af sikkerhedsnettet (tog for lang tid)') }
-  if ($script:NoUtil -or $script:NoBatt) { [void]$script:BDiag.Add("langsomme målinger sprunget over:$(if ($script:NoUtil) { ' GPU-belastning' })$(if ($script:NoBatt) { ' batteri-watt' })") }
+  if ($sideSh.Slow) { [void]$script:BDiag.Add("langsomme Windows-opslag (kørte ved siden af):$($sideSh.Slow)") }
   return @{ Steps = @($results); Timeout = $script:BTimeout; Diag = (@($script:BDiag) -join ' · ') + " · trin i alt: $(@($arg.Steps).Count)"; FpsPosts = $script:BFps.Count; Renderer = $script:BRenderer; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
 }
 
@@ -5524,6 +5561,33 @@ function Smi-Q($fields) {
   @((& $smi -i (Get-GpuId) "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { $v = 0.0; if ([double]::TryParse(([string]$_).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } })
 }
 function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
+# Stopper en GPU-test, der hænger: lukker testvinduet, sætter strømtilstand/strømgrænse tilbage og giver besked
+function Stop-HungGpuTest($j, $why) {
+  Log "GPU-test stoppet af vagthunden: $why"
+  [void]$script:Jobs.Remove($j)
+  try { [void]$j.PS.BeginStop($null, $null) } catch {}   # vent ikke på den: tråden kan sidde fast
+  $prof = [string]$j.S.Prof; if (-not $prof) { $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser' }
+  foreach ($n in 'msedge', 'chrome') {
+    try { Get-CimInstance Win32_Process -Filter "Name='$n.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} } } catch {}
+  }
+  $restored = ''
+  if (Test-Path $GpuRestoreFile) {
+    try {
+      $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
+      if ($g.Overlay) {
+        # Sættes tilbage i en separat tråd: var det netop skiftet af strømtilstand, der hang, må appen ikke også hænge
+        $rrs = [runspacefactory]::CreateRunspace(); $rrs.Open(); $rp = [powershell]::Create(); $rp.Runspace = $rrs
+        [void]$rp.AddScript({ param($t, $g, $f) for ($k = 0; $k -lt 3; $k++) { [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 500; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0 -and $x.ToString() -eq ([guid]$g).ToString()) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; return } } }.ToString()).AddArgument([PcTjek.PowerMode]).AddArgument([string]$g.Overlay).AddArgument($GpuRestoreFile)
+        [void]$rp.BeginInvoke()
+        $restored = " Strømtilstanden sættes tilbage til $(PowerMode-Name $g.Overlay)."
+      } elseif ($g.Watts) {
+        if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue; $restored = ' Strømgrænsen er sat tilbage.' } else { $restored = ' Opticon prøver at sætte strømgrænsen tilbage næste gang, appen starter.' }
+      }
+    } catch { Log "Vagthund-gendannelse: $_" }
+  }
+  if ($script:Jobs.Count -eq 0) { $ui.Busy.Visibility = 'Hidden' }
+  try { & $j.Done $null "Testen hang og blev stoppet automatisk ($why).$restored Send gerne de sidste linjer fra loggen, så kan det rettes." $j.Ctx } catch { Log "Done-fejl: $_" }
+}
 function Start-GpuBench($mode) {
   if ($mode -ne 'bench' -and -not (Confirm-ModeFree 'GPU-testen')) { return }
   if ($mode -eq 'auto' -and -not (Get-Smi)) {
@@ -5639,6 +5703,11 @@ function Start-GpuBench($mode) {
       if (-not $script:GpuMeasuring) { $script:GpuProgTimer.Stop(); return }
       $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.GpuMode } | Select-Object -First 1
       if (-not $j) { return }
+      # Vagthund udefra: hænger testen (intet livstegn i 25 sek, eller langt over tiden), stopper appen den selv
+      $nowT = [DateTime]::UtcNow.Ticks
+      if ($j.S.Beat -and ($nowT - [int64]$j.S.Beat) -gt 25 * 1e7) { Stop-HungGpuTest $j "testen svarede ikke i 25 sek (hang ved: $($j.S.Where))"; return }
+      if ($j.S.Deadline -and $nowT -gt ([int64]$j.S.Deadline + 45 * 1e7)) { Stop-HungGpuTest $j "testen gik langt over tiden (sidst ved: $($j.S.Where))"; return }
+      if (-not $j.S.Beat -and ((Get-Date) - $j.T0).TotalSeconds -gt 60) { Stop-HungGpuTest $j 'testen kom aldrig i gang'; return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(if ($script:BenchNativeRes -and $script:BenchNativeRes -ne '3840x2160') { ", $(($script:BenchNativeRes) -replace 'x', '×')" }) og 4K$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
