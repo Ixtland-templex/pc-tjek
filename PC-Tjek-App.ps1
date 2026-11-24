@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.43'
+$AppVersion = '2.44'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -35,7 +35,12 @@ $IgnoreFile = Join-Path $OutDir 'markeret-ok.txt'
 $JobBase = Join-Path $env:ProgramData 'PC-Tjek'
 $JobRoot = Join-Path $JobBase 'jobs'
 New-Item -ItemType Directory -Force $JobRoot | Out-Null
-try { & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /T /C /Q | Out-Null } catch {}
+# Lås kun selve mappen; alt indeni arver adgangen derfra.
+# (Før blev låsen også sat direkte på hver fil med /T, og det efterlod filer helt uden adgang. /reset reparerer dem.)
+try {
+  & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /C /Q | Out-Null
+  & icacls.exe (Join-Path $JobBase '*') /reset /T /C /Q | Out-Null
+} catch {}
 Get-ChildItem $JobRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 $ConfigFile = Join-Path $PSScriptRoot 'pc-tjek.config.json'
 $UpdateUrl = $null
@@ -4379,7 +4384,8 @@ function Save-MbKey([string]$plain) {
   $enc = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($plain), [Text.Encoding]::UTF8.GetBytes('Opticon-MB'), 'CurrentUser')
   $tmp = "$MbKeyFile.tmp"
   [IO.File]::WriteAllText($tmp, 'v2:' + [Convert]::ToBase64String($enc))
-  Move-Item -LiteralPath $tmp -Destination $MbKeyFile -Force
+  if (Test-Path -LiteralPath $MbKeyFile) { Remove-Item -LiteralPath $MbKeyFile -Force -ErrorAction Stop }
+  Move-Item -LiteralPath $tmp -Destination $MbKeyFile -Force -ErrorAction Stop
   $script:MbErrLogged = $false
   if ((Get-MbKey) -ne $plain) { throw 'Nøglen blev gemt, men kunne ikke læses tilbage.' }
 }

@@ -933,7 +933,8 @@ function Save-MbKey([string]$plain) {
   $enc = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($plain), [Text.Encoding]::UTF8.GetBytes('Opticon-MB'), 'CurrentUser')
   $tmp = "$MbKeyFile.tmp"
   [IO.File]::WriteAllText($tmp, 'v2:' + [Convert]::ToBase64String($enc))
-  Move-Item -LiteralPath $tmp -Destination $MbKeyFile -Force
+  if (Test-Path -LiteralPath $MbKeyFile) { Remove-Item -LiteralPath $MbKeyFile -Force -ErrorAction Stop }
+  Move-Item -LiteralPath $tmp -Destination $MbKeyFile -Force -ErrorAction Stop
   $script:MbErrLogged = $false
   if ((Get-MbKey) -ne $plain) { throw 'Nøglen blev gemt, men kunne ikke læses tilbage.' }
 }

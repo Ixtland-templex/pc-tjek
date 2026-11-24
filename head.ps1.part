@@ -35,7 +35,12 @@ $IgnoreFile = Join-Path $OutDir 'markeret-ok.txt'
 $JobBase = Join-Path $env:ProgramData 'PC-Tjek'
 $JobRoot = Join-Path $JobBase 'jobs'
 New-Item -ItemType Directory -Force $JobRoot | Out-Null
-try { & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /T /C /Q | Out-Null } catch {}
+# Lås kun selve mappen; alt indeni arver adgangen derfra.
+# (Før blev låsen også sat direkte på hver fil med /T, og det efterlod filer helt uden adgang. /reset reparerer dem.)
+try {
+  & icacls.exe $JobBase /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' /C /Q | Out-Null
+  & icacls.exe (Join-Path $JobBase '*') /reset /T /C /Q | Out-Null
+} catch {}
 Get-ChildItem $JobRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 $ConfigFile = Join-Path $PSScriptRoot 'pc-tjek.config.json'
 $UpdateUrl = $null

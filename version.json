@@ -1,7 +1,8 @@
 {
-  "version": "2.43",
+  "version": "2.44",
   "date": "2026-11-24",
   "notes": [
+    "Rettet: filer i Opticons låste mappe (C:\\ProgramData\\PC-Tjek) kunne ende helt uden adgang efter en genstart. Det ramte bl.a. MalwareBazaar-nøglen og genstarten efter opdatering. De repareres automatisk nu",
     "Grafiktesten måler nu grafikkortet og ikke skærmen: scenen tegnes flere gange pr. skærmopdatering, indtil grafikkortet er fuldt optaget (FPS uden V-Sync)",
     "Benchmark tester også grafikken i din skærms egen opløsning (fx 2560×1440 eller 1920×1200), ud over 1080p til sammenligning",
     "Rettet: MalwareBazaar-nøglen blev ikke husket efter genstart (gemmes nu på en ny måde og tjekkes med det samme)",
@@ -70,7 +71,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "6426E27D4EC368045CB2BE8757D6A0E90F9290B48CACBE05E53A89C896181EBA"
+      "sha256": "779CA1E674DB1DEB05DF57C3F399523EB820051C21D9F7495BE2B426EA182A96"
     },
     {
       "name": "PC-Tjek-Start.ps1",
