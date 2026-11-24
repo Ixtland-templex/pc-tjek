@@ -1,7 +1,7 @@
 import hashlib, json, re, datetime
 R='/home/claude/pc-tjek/'
 rd=lambda f: open(R+f,encoding='utf-8-sig').read().replace('\r\n','\n')
-ver='2.52'
+ver='2.54'
 BRAND='Opticon'   # skift navnet her
 head=re.sub(r"\$AppVersion = '[\d.]+'", f"$AppVersion = '{ver}'", rd('head.ps1.part'))
 app=head+rd('modes.ps1.part')+rd('engine.ps1.part')+rd('gui.ps1.part')+rd('logic.ps1.part')
@@ -26,8 +26,7 @@ files=[]
 for f in ['PC-Tjek-App.ps1','PC-Tjek-Start.ps1','PC-Tjek-Vagt.ps1','Uninstall-PCTjek.ps1','PC-Tjek.ico']:
     files.append({'name':f,'sha256':hashlib.sha256(open(R+f,'rb').read()).hexdigest().upper()})
 # Kun nyhederne i DENNE version vises i appen. Ældre punkter står i historikken på GitHub.
-notes=["Ny: 🔬 Hjalp det i mit spil? Mål FØR, lav én ændring (fx DLSS, undervolt eller strømgrænse), mål EFTER. Opticon siger, om FPS, 1 % low, hak og strømforbrug blev bedre, og om forskellen er større end det normale udsving",
- "Spilmålinger viser nu også grafikkortets strømforbrug og temperatur (NVIDIA)",
- "Resultaterne gemmes under Hjalp det?, hvor der også er en knap til at starte en test"]
+notes=["Rettet: 'Find den bedste strømtilstand' og Mål FØR/EFTER kunne gå i stå på nogle pc'er (fx Snapdragon). De bruger nu samme måling som Benchmark",
+ "Snapdragon-pc'er: Opticon anbefaler og åbner Snapdragon Control Panel til grafikdriveren (Adreno)"]
 open(R+'version.json','w',encoding='utf-8').write(json.dumps({'version':ver,'date':'2026-11-24','notes':notes,'files':files},ensure_ascii=False,indent=2))
 print(files)

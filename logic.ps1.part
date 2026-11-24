@@ -1426,7 +1426,11 @@ function Show-Tweaks {
     if ($oldDrv -or $oldBios) { Set-Badge 'Drv' 'info' 'ℹ Tjek hos producenten' } else { Set-Badge 'Drv' 'good' '✓ Ret nye versioner' }
     if ($oldDrv) { $ui.DrvNow.Foreground = $Brush.ConvertFromString('#F6C344') }
     $ui.DrvStepsText.Text = "Grafikdriver:`n1.  Tryk på 'Opdatér grafikdriver'. Det åbner NVIDIA App / AMD Software (eller Windows Update).`n2.  Gå til Drivere, og tryk Hent/Installér.`n`nBIOS (kun hvis du vil):`n1.  Tryk på 'Find BIOS-opdatering', og åbn producentens side for $($d.Board).`n2.  Læs producentens vejledning grundigt. Sluk ALDRIG pc'en under en BIOS-opdatering.`n3.  Efter opdateringen skal $(if ($t.Ram) { $t.Ram.Prof } else { 'XMP' }) ofte slås til igen."
-    $ui.DrvAction.Content = '⬇  Opdatér grafikdriver'; $ui.DrvAction.Visibility = 'Visible'
+    $gt = Get-GpuTool
+    $ui.DrvAction.Content = "⬇  Opdatér grafikdriver ($($gt.Name))"; $ui.DrvAction.Visibility = 'Visible'
+    if ($gt.Vendor -eq 'qualcomm') {
+      $ui.DrvStepsText.Text = "Grafikdriver (Snapdragon):`n1.  Tryk på 'Opdatér grafikdriver'. Det åbner Snapdragon Control Panel (eller Qualcomms side, hvor du kan hente det gratis).`n2.  Gå til Software Update, og installér den nyeste Adreno-driver.`n3.  Under Game Library kan du bruge spilprofiler og optimering med ét klik.`n`nNye Adreno-drivere giver ofte mærkbart bedre ydelse og færre fejl i spil på Snapdragon."
+    }
     $vi = $null; try { $vi = Get-VendorInfo } catch {}
     if ($vi -and $vi.Tool -and $vi.Tool.Name -ne 'Windows Update') {
       $vn = if ($vi.App) { $vi.App.Name } else { $vi.Tool.Name }
@@ -1454,10 +1458,42 @@ $ui.RamAction.Add_Click({
   if ($LASTEXITCODE -ne 0) { Msg "Din pc understøtter ikke genstart direkte til BIOS fra Windows.`n`nGenstart i stedet, og tryk gentagne gange på Del-tasten, mens pc'en starter." 'Genstart til BIOS' | Out-Null }
 })
 $ui.HzAction.Add_Click({ Start-Process 'ms-settings:display-advanced' })
-$ui.DrvAction.Add_Click({
+# Grafikkortets eget program (driver og spilindstillinger): NVIDIA App, AMD Software, Snapdragon Control Panel eller Intel
+function Get-GpuTool {
+  $gn = ''; try { $gn = [string](Get-GpuName) } catch {}
   $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $amd = "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe"
-  if ($nv) { Start-Process $nv } elseif (Test-Path $amd) { Start-Process $amd } else { Start-Process 'ms-settings:windowsupdate-optionalupdates' }
+  $start = { param($rx) try { @(Get-StartApps | Where-Object { $_.Name -match $rx })[0] } catch { $null } }
+  if ($nv) { return @{ Name = 'NVIDIA App'; Exe = $nv; Vendor = 'nvidia' } }
+  if (Test-Path $amd) { return @{ Name = 'AMD Software'; Exe = $amd; Vendor = 'amd' } }
+  if ($gn -match '(?i)adreno|qualcomm|snapdragon') {
+    $a = & $start '(?i)Snapdragon Control Panel|Adreno Control Panel'
+    return @{ Name = 'Snapdragon Control Panel'; AppId = $(if ($a) { $a.AppID }); Vendor = 'qualcomm'; Url = 'https://www.qualcomm.com/news/onq/2025/11/windows-on-snapdragon-performance-boosts'
+              Hint = 'Snapdragon Control Panel er Qualcomms program til Snapdragon X-pc''er: det holder grafikdriveren (Adreno) opdateret og har spilprofiler og optimering med ét klik.' }
+  }
+  if ($gn -match '(?i)nvidia|geforce|rtx|gtx') { return @{ Name = 'NVIDIA App'; Vendor = 'nvidia'; Url = 'https://www.nvidia.com/en-us/software/nvidia-app/' } }
+  if ($gn -match '(?i)radeon|amd') { return @{ Name = 'AMD Software'; Vendor = 'amd'; Url = 'https://www.amd.com/en/support/download/drivers.html' } }
+  if ($gn -match '(?i)intel|arc|iris|uhd') {
+    $a = & $start '(?i)Intel.*Graphics Software|Arc Control|Intel.*Graphics Command Center'
+    return @{ Name = $(if ($a) { $a.Name } else { 'Intel Driver & Support Assistant' }); AppId = $(if ($a) { $a.AppID }); Vendor = 'intel'; Url = 'https://www.intel.com/content/www/us/en/support/intel-driver-support-assistant.html' }
+  }
+  return @{ Name = 'Windows Update'; Vendor = ''; Uri = 'ms-settings:windowsupdate-optionalupdates' }
+}
+function Open-GpuTool($t) {
+  if (-not $t) { $t = Get-GpuTool }
+  try {
+    if ($t.Exe) { Start-Process $t.Exe }
+    elseif ($t.AppId) { Start-Process "shell:AppsFolder\$($t.AppId)" }
+    elseif ($t.Url) { Start-Process $t.Url }
+    else { Start-Process $t.Uri }
+  } catch { Msg "Kunne ikke åbne $($t.Name): $($_.Exception.Message)" | Out-Null }
+}
+$ui.DrvAction.Add_Click({
+  $t = Get-GpuTool
+  if ($t.Vendor -eq 'qualcomm' -and -not $t.AppId) {
+    if ((Msg "$($t.Hint)`n`nDet er ikke installeret endnu. Åbn Qualcomms side, hvor det kan hentes (gratis)?" 'Snapdragon Control Panel' 'YesNo' 'Information') -ne 'Yes') { return }
+  }
+  Open-GpuTool $t
 })
 $ui.DrvAction2.Add_Click({
   $vi = $null; try { $vi = Get-VendorInfo } catch {}
@@ -1781,7 +1817,8 @@ function Start-GpuBench($mode) {
     $bt = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1 } catch {}
     $battTxt = if ($bt -and $bt.PowerOnline) { "`n`n🔌 Tip: Tag laderen ud før testen. Så kan PC-Tjek også måle, hvor mange watt pc'en bruger i hver tilstand. Med laderen i måles kun FPS." } elseif ($bt) { "`n`n🔋 Du kører på batteri, så PC-Tjek måler også, hvor mange watt pc'en bruger." } else { '' }
     if ((Msg "Testen tager ca. 3 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver Windows' 3 strømtilstande: Bedste energieffektivitet, Balanceret og Bedste ydeevne.`n•  Rør ikke musen, og luk tunge programmer først.`n•  Tryk Esc for at stoppe.$battTxt`n`nDin nuværende tilstand ($(PowerMode-Name $cur)) sættes tilbage bagefter.`n`nStart testen?" 'Find den bedste strømtilstand' 'YesNo' 'Question') -ne 'Yes') { return }
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
+    # Samme robuste måling som Benchmark (fast opløsning, tid pr. billede): den gamle måde kunne gå i stå på nogle pc'er
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Res = @('1920x1080', '1920x1080', '1920x1080'); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'auto') {
     $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'
@@ -1789,7 +1826,7 @@ function Start-GpuBench($mode) {
     if (-not $def) { Msg 'Dit grafikkort tillader ikke, at strømgrænsen ændres (det er fx tilfældet på mange bærbare). Brug i stedet "Test dine egne indstillinger".' 'GPU' | Out-Null; return }
     $steps = @(100, 90, 80, 70 | ForEach-Object { [math]::Max($min, $def * $_ / 100) } | Select-Object -Unique)
     if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
-    $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Res = @($steps | ForEach-Object { '1920x1080' }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'bench') {
     $nat = Get-NativeRes; $script:BenchNativeRes = $(if ($nat -and $nat -ne '1920x1080') { $nat } else { $null })
@@ -1818,7 +1855,7 @@ function Start-GpuBench($mode) {
     $ui.GridGpuRes.Visibility = 'Collapsed'; $ui.GpuResVerdict.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Visible'; $ui.GpuResBar.Value = 0
   } else {
     if ($mode -eq 'after' -and -not $script:GpuWork) { Msg 'Mål FØR først.' 'GPU' | Out-Null; return }
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Work = $(if ($mode -eq 'after') { $script:GpuWork } else { 0 }); StepSec = 45; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Res = @('1920x1080'); Work = $(if ($mode -eq 'after') { $script:GpuWork } else { 0 }); StepSec = 45; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
     $ui.GpuMeasureBar.Visibility = 'Visible'; $ui.GpuMeasureBar.Value = 0
     $ui.GpuResult.Text = "Måler $(if ($mode -eq 'before') { 'FØR' } else { 'EFTER' })... Testscenen åbner i fuld skærm om et øjeblik. Rør ikke musen."
     $ui.GpuVerdict.Text = ''
@@ -1871,7 +1908,7 @@ function Start-GpuBench($mode) {
     }
     elseif ($c.GpuMode -eq 'occheck') { Show-OcCheck $res $steps }
     elseif ($c.GpuMode -eq 'before') {
-      $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $res.Work
+      $script:GpuBefore = $steps[0]; $script:GpuAfter = $null; $script:GpuWork = $(if ($res.Work) { $res.Work } else { 1 })
       $b = $steps[0]
       $ui.GpuResult.Text = "FØR: $($b.Fps) fps$(if ($b.P1) { " · laveste 1 % $([math]::Round($b.P1))" })$(if ($null -ne $b.W) { " · $([math]::Round($b.W)) W" })$(if ($null -ne $b.T) { " · $([math]::Round($b.T)) °C" })$(if ($null -ne $b.F) { " · blæser $([math]::Round($b.F)) %" })$(if ($b.C) { " · $([math]::Round($b.C)) MHz" })"
       $ui.GpuVerdict.Text = "Lav nu ÉN ændring i Afterburner (fx en spændingskurve eller et lavere power limit), og tryk så 'Mål EFTER'."
@@ -1956,7 +1993,7 @@ function Show-OcEstimate {
   $b = $script:OcBase; if (-not $b -or -not $b.Fps) { return }
   if (-not (Get-Smi)) {   # AMD/Intel: ingen strøm-/clockdata at regne på
     $gn = [string](Get-GpuName)
-    $igpu = $gn -match '(?i)\b\d{3,4}M\b|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d|UHD|Iris|Intel\(R\) Graphics|Arc\(TM\) Graphics'
+    $igpu = $gn -match '(?i)\b\d{3,4}M\b|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d|UHD|Iris|Intel\(R\) Graphics|Arc\(TM\) Graphics|Adreno'
     foreach ($n in 'OcEstFps', 'OcEstW', 'OcEstT', 'OcEstN') { $ui[$n].Text = '–' }
     foreach ($n in 'OcEstFpsSub', 'OcEstWSub', 'OcEstTSub', 'OcEstNSub') { $ui[$n].Text = '' }
     if ($igpu) {
@@ -2052,6 +2089,8 @@ $ui.BtnOcTune.Add_Click({
       $t = "PC-Tjek overclocker ikke selv. Brug AMDs eget program:`n`nAMD Software (Adrenalin):`n1.  Gå til Ydeevne → Tuning.`n2.  Vælg 'Automatisk: Overclock GPU' (eller 'Undervolt GPU' for mindre strøm).`n3.  Kom tilbage, og tryk '3 · Tjek OC'.`n`nPå integreret grafik (fx Radeon 860M) er der ofte få eller ingen tuning-muligheder. Så er 'Find den bedste strømtilstand' den bedste vej."
       if ((Msg "$t`n`nÅbn AMD Software nu?" 'Find overclock automatisk' 'YesNo' 'Information') -ne 'Yes') { return }
       if (Test-Path $amd) { Start-Process $amd } else { Start-Process 'https://www.amd.com/en/support/download/drivers.html' }
+    } elseif ($gn -match '(?i)adreno|qualcomm|snapdragon') {
+      if ((Msg "Snapdragon-grafik (Adreno) kan ikke overclockes. Det, der giver mest, er:`n`n1.  Den nyeste Adreno-driver via Snapdragon Control Panel.`n2.  Optimering med ét klik for spillet i Snapdragon Control Panel.`n3.  'Find den bedste strømtilstand' ovenfor (og lader i, når du spiller).`n`nÅbn Snapdragon Control Panel nu?" 'OC-tjek' 'YesNo' 'Information') -eq 'Yes') { Open-GpuTool (Get-GpuTool) }
     } else {
       Msg "Intel-grafik har næsten ingen overclock-muligheder. Brug i stedet 'Find den bedste strømtilstand' ovenfor." 'OC-tjek' | Out-Null
     }
@@ -2289,6 +2328,7 @@ $ui.GpuHow.Add_Click({
 })
 $ui.GpuStepsText.Text = "Vælg ét mål ad gangen, og mål før og efter:`n`n🔋  MINDRE STRØM`n•  Nemmest: sæt et FPS-loft lidt over din skærms Hz (fx 141 på en 144 Hz-skærm) i spillet eller i NVIDIA-kontrolpanelet. Så arbejder kortet ikke for billeder, du ikke kan se.`n•  Eller sænk 'Power limit' 10-20 % i MSI Afterburner, og se, hvad det koster i FPS.`n`n🤫  MINDRE STØJ`n•  Brug kortets egen Quiet-profil (BIOS-knap på kortet eller producentens program), hvis den findes.`n•  Eller lav en roligere blæserkurve i Afterburner. Hold øje med temperaturen her i appen.`n`n⚡  SAMME YDELSE VED FÆRRE WATT (undervolt)`n•  NVIDIA App → System → Ydeevne → automatisk tuning (på understøttede kort).`n•  MSI Afterburner → Ctrl+F → spændings-/frekvenskurve: lås fx en lidt lavere frekvens ved en lavere spænding.`n•  AMD: Adrenalin → Ydeevne → Tuning → Undervolt GPU.`n`nTest stabiliteten ved at spille et par timer. Går et spil ned eller får du grafikfejl, så skru lidt tilbage. Det ødelægger ikke kortet, men kan give nedbrud."
 $ui.BtnGpuTool.Add_Click({
+  $t = Get-GpuTool; if ($t.Vendor -in 'qualcomm', 'intel') { Open-GpuTool $t; return }
   $nv = @("$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\CEF\NVIDIA App.exe", "$env:ProgramFiles\NVIDIA Corporation\NVIDIA App\NVIDIA App.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
   $amd = "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe"
   if ($nv) { Start-Process $nv } elseif (Test-Path $amd) { Start-Process $amd } else { Msg 'Hverken NVIDIA App eller AMD Adrenalin blev fundet. Installér dit grafikkorts program fra producenten.' 'GPU' | Out-Null }
@@ -2308,8 +2348,8 @@ function Set-GpuChoice($k) {
   $nv = [bool](Get-Smi)
   $ui.ChooseHelp.Text = switch ($k) {
     'power' { if ($nv) { "Opticon prøver selv 4 strømgrænser i testscenen og finder den laveste, hvor du beholder næsten al ydelse. Ét klik, ca. 4 minutter." } else { "Opticon prøver Windows' 3 strømtilstande i testscenen og anbefaler den mest sparsomme, der stadig yder godt. Ét klik, ca. 3 minutter." } }
-    'fps'   { "1) Mål udgangspunkt. 2) Lad $(if ($nv) { 'NVIDIA App eller Afterburner' } else { 'AMD Software' }) finde et overclock automatisk. 3) Tjek, at det giver flere FPS og holder i 5 minutter. 'FPS ved Full HD, 2K og 4K' viser forskellen mellem opløsninger." }
-    'own'   { "Til ændringer, du selv laver i $(if ($nv) { 'MSI Afterburner eller NVIDIA App' } else { 'AMD Software' }): 1) Tryk Mål FØR. 2) Lav ÉN ændring, og tryk Anvend/Apply. 3) Tryk Mål EFTER. Opticon viser forskellen i FPS, strøm og temperatur." }
+    'fps'   { "1) Mål udgangspunkt. 2) Lad $(if ($nv) { 'NVIDIA App eller Afterburner' } else { (Get-GpuTool).Name }) finde et overclock automatisk. 3) Tjek, at det giver flere FPS og holder i 5 minutter. 'FPS ved Full HD, 2K og 4K' viser forskellen mellem opløsninger." }
+    'own'   { "Til ændringer, du selv laver i $(if ($nv) { 'MSI Afterburner eller NVIDIA App' } else { (Get-GpuTool).Name }): 1) Tryk Mål FØR. 2) Lav ÉN ændring, og tryk Anvend/Apply. 3) Tryk Mål EFTER. Opticon viser forskellen i FPS, strøm og temperatur." }
     default { "Alle værktøjer vises, også dine gemte målinger og andres resultater med samme kort." }
   }
 }

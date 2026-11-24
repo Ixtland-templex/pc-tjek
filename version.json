@@ -1,15 +1,14 @@
 {
-  "version": "2.52",
+  "version": "2.54",
   "date": "2026-11-24",
   "notes": [
-    "Ny: 🔬 Hjalp det i mit spil? Mål FØR, lav én ændring (fx DLSS, undervolt eller strømgrænse), mål EFTER. Opticon siger, om FPS, 1 % low, hak og strømforbrug blev bedre, og om forskellen er større end det normale udsving",
-    "Spilmålinger viser nu også grafikkortets strømforbrug og temperatur (NVIDIA)",
-    "Resultaterne gemmes under Hjalp det?, hvor der også er en knap til at starte en test"
+    "Rettet: 'Find den bedste strømtilstand' og Mål FØR/EFTER kunne gå i stå på nogle pc'er (fx Snapdragon). De bruger nu samme måling som Benchmark",
+    "Snapdragon-pc'er: Opticon anbefaler og åbner Snapdragon Control Panel til grafikdriveren (Adreno)"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "242B0E1B0AC8F248597F519B39ACE31F0E4BECC32D12268E845A9D037E8CDA3B"
+      "sha256": "A49B37FCC29F3D1FAC29992CC28348FFFB96D9A20D85DD410D033E5F69000F38"
     },
     {
       "name": "PC-Tjek-Start.ps1",
