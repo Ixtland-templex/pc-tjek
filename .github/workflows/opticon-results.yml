@@ -1,0 +1,64 @@
+# Modtager delte Opticon-resultater (GitHub-opslag med titlen "[Opticon-resultat] ...")
+# og gemmer dem i results/results.json i grenen "results". Opslaget lukkes automatisk.
+name: Opticon-resultater
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: opticon-results
+  cancel-in-progress: false
+jobs:
+  add:
+    if: startsWith(github.event.issue.title, '[Opticon-resultat]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const issue = context.payload.issue;
+            const num = (x, lo, hi) => typeof x === 'number' && isFinite(x) && x >= lo && x <= hi;
+            const str = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
+            let entry = null, problem = '';
+            try {
+              const m = (issue.body || '').match(/```json\s*([\s\S]*?)```/);
+              if (!m) throw new Error('Ingen JSON fundet.');
+              const r = JSON.parse(m[1]);
+              const s = r.scores || {};
+              const ok = r.v === 1 && str(r.cpu, 100) && str(r.gpu, 100) && !r.battery &&
+                num(s.cpu1, 1, 100000) && num(s.cpuN, 1, 5000000) && num(s.sustain, 1, 150) &&
+                num(s.ram, 0.1, 1000) && num(s.diskR, 0, 100000) && (s.gpu === null || num(s.gpu, 0, 100000)) && num(s.total, 1, 1000000);
+              if (!ok) throw new Error('Tallene ser ikke gyldige ud.');
+              entry = {
+                v: 1, id: issue.number, date: new Date().toISOString().slice(0, 10), app: String(r.app || '').slice(0, 10),
+                cpu: r.cpu.trim(), gpu: r.gpu.trim(), cores: r.cores | 0, threads: r.threads | 0,
+                ramGB: r.ramGB | 0, ramMHz: r.ramMHz | 0, disk: String(r.disk || '').slice(0, 80), laptop: !!r.laptop, battery: false,
+                scores: { cpu1: s.cpu1, cpuN: s.cpuN, sustain: s.sustain, ram: s.ram, diskR: s.diskR, diskW: s.diskW || 0, iops: s.iops || 0, gpu: s.gpu, total: s.total }
+              };
+            } catch (e) { problem = e.message; }
+
+            if (entry) {
+              const sh = (cmd, args) => exec.exec(cmd, args);
+              await sh('git', ['config', 'user.name', 'opticon-bot']);
+              await sh('git', ['config', 'user.email', 'opticon-bot@users.noreply.github.com']);
+              const has = (await exec.getExecOutput('git', ['ls-remote', '--heads', 'origin', 'results'])).stdout.trim().length > 0;
+              if (has) { await sh('git', ['fetch', 'origin', 'results']); await sh('git', ['checkout', '-B', 'results', 'origin/results']); }
+              else { await sh('git', ['checkout', '--orphan', 'results']); await sh('git', ['rm', '-rf', '--quiet', '.']); }
+              fs.mkdirSync('results', { recursive: true });
+              const f = 'results/results.json';
+              const list = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : [];
+              if (!list.some(x => x.id === entry.id)) list.push(entry);
+              fs.writeFileSync(f, JSON.stringify(list, null, 1));
+              await sh('git', ['add', f]);
+              await sh('git', ['commit', '-m', `Resultat #${issue.number}: ${entry.cpu} / ${entry.gpu}`]);
+              await sh('git', ['push', 'origin', 'results']);
+            }
+            await github.rest.issues.createComment({ ...context.repo, issue_number: issue.number,
+              body: entry ? '✅ Tak! Dit resultat er tilføjet og kan ses i Opticon om et par minutter.' : `⚠️ Resultatet kunne ikke tilføjes: ${problem}` });
+            await github.rest.issues.update({ ...context.repo, issue_number: issue.number, state: 'closed' });
