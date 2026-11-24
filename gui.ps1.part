@@ -575,6 +575,29 @@ $GameMeasureScript = {
   }
 }
 
+$MbLookupScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $out = New-Object System.Collections.ArrayList
+  foreach ($h in @($arg.Hashes)) {
+    $sync.Status = 'Spørger MalwareBazaar...'
+    $o = [ordered]@{ Hash = $h; Status = ''; Signature = ''; FileName = ''; FirstSeen = ''; Tags = '' }
+    try {
+      $r = Invoke-RestMethod -Uri 'https://mb-api.abuse.ch/api/v1/' -Method Post -Body @{ query = 'get_info'; hash = $h } -Headers @{ 'Auth-Key' = [string]$arg.Key } -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+      $o.Status = [string]$r.query_status
+      if ($r.query_status -eq 'ok' -and $r.data) {
+        $d = @($r.data)[0]
+        $o.Signature = [string]$d.signature; $o.FileName = [string]$d.file_name; $o.FirstSeen = [string]$d.first_seen; $o.Tags = (@($d.tags) -join ', ')
+      }
+    } catch {
+      $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+      $o.Status = if ($code -eq 401 -or $code -eq 403) { 'auth' } else { 'net: ' + $_.Exception.Message }
+    }
+    [void]$out.Add([pscustomobject]$o)
+  }
+  return [pscustomobject]@{ Results = @($out) }
+}
+
 $UpdateCheckScript = {
   param($sync, $arg)
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -1916,6 +1939,30 @@ namespace OptiBench
                   <Button Name="BtnDrvShow" Content="📂  Vis filen" IsEnabled="False"/>
                   <Button Name="BtnDrvApps" Content="🗑  Afinstallér programmer"/>
                   <Button Name="BtnDrvInfo" Content="ℹ  Om LOLDrivers"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,12,0,0">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="MbBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#6B7488" VerticalAlignment="Center" Text="Fra"/>
+                  <StackPanel><TextBlock Text="🦠  Ekstra virustjek med MalwareBazaar (valgfrit)" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="MbSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Slået fra. Alt andet i Opticon virker fint uden."/></StackPanel>
+                </DockPanel>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,10,0,0" LineHeight="20" Text="MalwareBazaar er en gratis database med over 1 million bekræftede malware-filer, drevet af den schweiziske non-profit abuse.ch. Over 500 sikkerhedsteams bruger den hver dag. Med en nøgle tjekker Opticon op til 60 nye, usignerede programfiler ved hver scanning, og du kan tjekke en enkelt fil, du er i tvivl om. Kun filens fingeraftryk (SHA256) sendes, aldrig selve filen eller dit navn."/>
+                <Border CornerRadius="10" Background="#1B1630" BorderBrush="#3B3366" BorderThickness="1" Padding="14,10" Margin="0,12,0,0">
+                  <StackPanel>
+                    <TextBlock Text="🔑  Sådan får du din gratis nøgle (ca. 2 min)" FontWeight="SemiBold"/>
+                    <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" LineHeight="20" Text="1. Tryk Åbn abuse.ch herunder.&#x0a;2. Log ind med Google, GitHub eller LinkedIn. Det er gratis, og der skal ikke bruges kort.&#x0a;3. På din kontoside står din Auth-Key: en lang række bogstaver og tal. Kopiér den.&#x0a;4. Sæt den ind i feltet herunder, og tryk Gem. Opticon tester den med det samme.&#x0a;&#x0a;Nøglen gemmes krypteret og kun på denne pc. Del den ikke med andre."/>
+                  </StackPanel>
+                </Border>
+                <DockPanel Margin="0,12,0,0">
+                  <Button Name="BtnMbOpen" DockPanel.Dock="Left" Content="🌐  Åbn abuse.ch"/>
+                  <Button Name="BtnMbSave" DockPanel.Dock="Right" Content="💾  Gem og test" Style="{StaticResource Primary}" Margin="8,0,0,0"/>
+                  <PasswordBox Name="MbKeyBox" Height="34" VerticalContentAlignment="Center" Padding="8,0" Background="#141823" Foreground="#E6E9F0" BorderBrush="#2A3142" CaretBrush="#E6E9F0" ToolTip="Sæt din Auth-Key ind her"/>
+                </DockPanel>
+                <WrapPanel Margin="0,10,0,0">
+                  <Button Name="BtnMbFile" Content="🔎  Tjek en fil" IsEnabled="False"/>
+                  <Button Name="BtnMbRemove" Content="🗑  Fjern nøglen" IsEnabled="False"/>
                 </WrapPanel>
               </StackPanel>
             </Border>

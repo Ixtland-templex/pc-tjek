@@ -1,7 +1,9 @@
 {
-  "version": "2.37",
+  "version": "2.38",
   "date": "2026-11-24",
   "notes": [
+    "Ny (valgfri): 🦠 Ekstra virustjek med MalwareBazaar – over 1 million kendte malware-filer. Indsæt din egen gratis nøgle under Sikkerhedstjek (guide inde i appen)",
+    "Med nøgle: nye usignerede filer tjekkes ved hver scanning, og du kan tjekke en enkelt fil. Kun fingeraftrykket sendes, aldrig filen",
     "Ny: 🎮 Mål i mit spil (under Benchmark) – rigtig FPS, 1 % low og hak i dit eget spil med Intel PresentMon, og om det er grafikkort, processor eller et FPS-loft, der bremser",
     "Spilmålinger gemmes, så du kan se om en ændring hjalp (Mod sidst)",
     "Sikkerhedstjek: 3 ekstra Defender-regler (ASR), som Microsoft anbefaler alle at slå til",
@@ -57,7 +59,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "820DC64CC6D3AAF7338DA421F95964CF48C92FACF2447A0588652386028046A9"
+      "sha256": "F83BD7B171C4838F42496F79B560DE1C73CBD20B1906B753415DFB45DF9E0902"
     },
     {
       "name": "PC-Tjek-Start.ps1",

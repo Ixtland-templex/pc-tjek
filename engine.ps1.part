@@ -359,6 +359,36 @@ $ScanScript = {
     }
   }
 
+  # Valgfrit: slå usignerede filers fingeraftryk (SHA256) op i MalwareBazaar (kun hashen sendes, aldrig filen)
+  if ($arg -and $arg.MbKey) {
+    $mbList = @($AllFinds | Where-Object { $_.Kategori -eq 'Ny fil' -and $_.SHA256 } | Select-Object -First 60)
+    if ($mbList.Count) {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Status "MalwareBazaar tjekker $($mbList.Count) usignerede filer"
+      $mi = 0; $mbFail = 0; $mbHits = 0
+      foreach ($x in $mbList) {
+        $mi++; Sub (0.95 + 0.05 * $mi / $mbList.Count) "MalwareBazaar: fil $mi af $($mbList.Count)"
+        try {
+          $mr = Invoke-RestMethod -Uri 'https://mb-api.abuse.ch/api/v1/' -Method Post -Body @{ query = 'get_info'; hash = $x.SHA256 } -Headers @{ 'Auth-Key' = [string]$arg.MbKey } -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+          if ($mr.query_status -eq 'ok' -and $mr.data) {
+            $d0 = @($mr.data)[0]; $mbHits++
+            $fam = [string]$d0.signature
+            $x.Niveau = 4; $x.Risiko = 'Kritisk'; $x.Kategori = 'Trussel'
+            $x.Titel = "Kendt malware: $(Split-Path $x.Sti -Leaf)$(if ($fam) { " ($fam)" })"
+            $x.Hvorfor = "Filens fingeraftryk findes i MalwareBazaar, en database med over 1 million bekræftede malware-filer.$(if ($fam) { " Familie: $fam." }) Først set: $($d0.first_seen)."
+            $x.Raad = 'Brug trinnet "Fjern virus" på Overblik, eller kør en Defender Offline-scanning. Har filen kørt, så skift dine vigtigste adgangskoder fra en anden enhed.'
+            Add-Time (Get-Date) 'MalwareBazaar' "Kendt malware fundet: $(Split-Path $x.Sti -Leaf)" $x.Sti
+          } elseif ($mr.query_status -eq 'hash_not_found') {
+            $x.Detalje = '✓ Ukendt for MalwareBazaar · ' + $x.Detalje
+          } else { $mbFail++ }
+        } catch { $mbFail++ }
+        if ($mbFail -ge 3 -and $mbHits -eq 0 -and $mi -le 3) { break }
+        Start-Sleep -Milliseconds 150
+      }
+      if ($arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  MalwareBazaar: {1} tjekket, {2} kendt malware, {3} fejl`r`n" -f (Get-Date), $mi, $mbHits, $mbFail), [Text.Encoding]::UTF8) } catch {} }
+    }
+  }
+
   # ---------- 6. Browser ----------
   Phase 8 'Tjekker browserudvidelser'
   $browsers = @{ Chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"; Edge = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }

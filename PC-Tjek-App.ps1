@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.37'
+$AppVersion = '2.38'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -729,6 +729,36 @@ $ScanScript = {
     }
   }
 
+  # Valgfrit: slå usignerede filers fingeraftryk (SHA256) op i MalwareBazaar (kun hashen sendes, aldrig filen)
+  if ($arg -and $arg.MbKey) {
+    $mbList = @($AllFinds | Where-Object { $_.Kategori -eq 'Ny fil' -and $_.SHA256 } | Select-Object -First 60)
+    if ($mbList.Count) {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Status "MalwareBazaar tjekker $($mbList.Count) usignerede filer"
+      $mi = 0; $mbFail = 0; $mbHits = 0
+      foreach ($x in $mbList) {
+        $mi++; Sub (0.95 + 0.05 * $mi / $mbList.Count) "MalwareBazaar: fil $mi af $($mbList.Count)"
+        try {
+          $mr = Invoke-RestMethod -Uri 'https://mb-api.abuse.ch/api/v1/' -Method Post -Body @{ query = 'get_info'; hash = $x.SHA256 } -Headers @{ 'Auth-Key' = [string]$arg.MbKey } -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+          if ($mr.query_status -eq 'ok' -and $mr.data) {
+            $d0 = @($mr.data)[0]; $mbHits++
+            $fam = [string]$d0.signature
+            $x.Niveau = 4; $x.Risiko = 'Kritisk'; $x.Kategori = 'Trussel'
+            $x.Titel = "Kendt malware: $(Split-Path $x.Sti -Leaf)$(if ($fam) { " ($fam)" })"
+            $x.Hvorfor = "Filens fingeraftryk findes i MalwareBazaar, en database med over 1 million bekræftede malware-filer.$(if ($fam) { " Familie: $fam." }) Først set: $($d0.first_seen)."
+            $x.Raad = 'Brug trinnet "Fjern virus" på Overblik, eller kør en Defender Offline-scanning. Har filen kørt, så skift dine vigtigste adgangskoder fra en anden enhed.'
+            Add-Time (Get-Date) 'MalwareBazaar' "Kendt malware fundet: $(Split-Path $x.Sti -Leaf)" $x.Sti
+          } elseif ($mr.query_status -eq 'hash_not_found') {
+            $x.Detalje = '✓ Ukendt for MalwareBazaar · ' + $x.Detalje
+          } else { $mbFail++ }
+        } catch { $mbFail++ }
+        if ($mbFail -ge 3 -and $mbHits -eq 0 -and $mi -le 3) { break }
+        Start-Sleep -Milliseconds 150
+      }
+      if ($arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  MalwareBazaar: {1} tjekket, {2} kendt malware, {3} fejl`r`n" -f (Get-Date), $mi, $mbHits, $mbFail), [Text.Encoding]::UTF8) } catch {} }
+    }
+  }
+
   # ---------- 6. Browser ----------
   Phase 8 'Tjekker browserudvidelser'
   $browsers = @{ Chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"; Edge = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }
@@ -1392,6 +1422,29 @@ $GameMeasureScript = {
     Limit = $limit; GpuShare = $(if ($null -ne $gpuShare) { [math]::Round($gpuShare * 100) } else { $null }); CpuShare = $(if ($null -ne $cpuShare) { [math]::Round($cpuShare * 100) } else { $null })
     VSync = [math]::Round($vsShare * 100); Mode = $mode; Runtime = $rt
   }
+}
+
+$MbLookupScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $out = New-Object System.Collections.ArrayList
+  foreach ($h in @($arg.Hashes)) {
+    $sync.Status = 'Spørger MalwareBazaar...'
+    $o = [ordered]@{ Hash = $h; Status = ''; Signature = ''; FileName = ''; FirstSeen = ''; Tags = '' }
+    try {
+      $r = Invoke-RestMethod -Uri 'https://mb-api.abuse.ch/api/v1/' -Method Post -Body @{ query = 'get_info'; hash = $h } -Headers @{ 'Auth-Key' = [string]$arg.Key } -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+      $o.Status = [string]$r.query_status
+      if ($r.query_status -eq 'ok' -and $r.data) {
+        $d = @($r.data)[0]
+        $o.Signature = [string]$d.signature; $o.FileName = [string]$d.file_name; $o.FirstSeen = [string]$d.first_seen; $o.Tags = (@($d.tags) -join ', ')
+      }
+    } catch {
+      $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+      $o.Status = if ($code -eq 401 -or $code -eq 403) { 'auth' } else { 'net: ' + $_.Exception.Message }
+    }
+    [void]$out.Add([pscustomobject]$o)
+  }
+  return [pscustomobject]@{ Results = @($out) }
 }
 
 $UpdateCheckScript = {
@@ -2738,6 +2791,30 @@ namespace OptiBench
                 </WrapPanel>
               </StackPanel>
             </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,12,0,0">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="MbBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#6B7488" VerticalAlignment="Center" Text="Fra"/>
+                  <StackPanel><TextBlock Text="🦠  Ekstra virustjek med MalwareBazaar (valgfrit)" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="MbSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Slået fra. Alt andet i Opticon virker fint uden."/></StackPanel>
+                </DockPanel>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,10,0,0" LineHeight="20" Text="MalwareBazaar er en gratis database med over 1 million bekræftede malware-filer, drevet af den schweiziske non-profit abuse.ch. Over 500 sikkerhedsteams bruger den hver dag. Med en nøgle tjekker Opticon op til 60 nye, usignerede programfiler ved hver scanning, og du kan tjekke en enkelt fil, du er i tvivl om. Kun filens fingeraftryk (SHA256) sendes, aldrig selve filen eller dit navn."/>
+                <Border CornerRadius="10" Background="#1B1630" BorderBrush="#3B3366" BorderThickness="1" Padding="14,10" Margin="0,12,0,0">
+                  <StackPanel>
+                    <TextBlock Text="🔑  Sådan får du din gratis nøgle (ca. 2 min)" FontWeight="SemiBold"/>
+                    <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" LineHeight="20" Text="1. Tryk Åbn abuse.ch herunder.&#x0a;2. Log ind med Google, GitHub eller LinkedIn. Det er gratis, og der skal ikke bruges kort.&#x0a;3. På din kontoside står din Auth-Key: en lang række bogstaver og tal. Kopiér den.&#x0a;4. Sæt den ind i feltet herunder, og tryk Gem. Opticon tester den med det samme.&#x0a;&#x0a;Nøglen gemmes krypteret og kun på denne pc. Del den ikke med andre."/>
+                  </StackPanel>
+                </Border>
+                <DockPanel Margin="0,12,0,0">
+                  <Button Name="BtnMbOpen" DockPanel.Dock="Left" Content="🌐  Åbn abuse.ch"/>
+                  <Button Name="BtnMbSave" DockPanel.Dock="Right" Content="💾  Gem og test" Style="{StaticResource Primary}" Margin="8,0,0,0"/>
+                  <PasswordBox Name="MbKeyBox" Height="34" VerticalContentAlignment="Center" Padding="8,0" Background="#141823" Foreground="#E6E9F0" BorderBrush="#2A3142" CaretBrush="#E6E9F0" ToolTip="Sæt din Auth-Key ind her"/>
+                </DockPanel>
+                <WrapPanel Margin="0,10,0,0">
+                  <Button Name="BtnMbFile" Content="🔎  Tjek en fil" IsEnabled="False"/>
+                  <Button Name="BtnMbRemove" Content="🗑  Fjern nøglen" IsEnabled="False"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
           </StackPanel>
         </ScrollViewer>
       </Grid>
@@ -3547,7 +3624,7 @@ foreach ($nav in $pages.Keys) {
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
     if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {}; try { Show-VendorCard } catch { Log "Producent-fejl: $_" } }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
-    if ($sender.Name -eq 'NavSecure') { try { Load-DriversCache; if (-not $script:SecLoaded) { Load-Secure } } catch { Log "Sikkerhed-fejl: $_" } }
+    if ($sender.Name -eq 'NavSecure') { try { Load-DriversCache; Show-MbState; if (-not $script:SecLoaded) { Load-Secure } } catch { Log "Sikkerhed-fejl: $_" } }
     if ($sender.Name -eq 'NavHelped') { try { Update-Changes; Show-Changes } catch { Log "Hjalp det-fejl: $_" } }
     if ($sender.Name -eq 'NavBench') { try { Load-Bench } catch { Log "Benchmark-fejl: $_" } }
     if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
@@ -3755,7 +3832,7 @@ $ui.BtnScan.Add_Click({
   $ui.ScanCard.Visibility = 'Visible'; $ui.StoryCard.Visibility = 'Collapsed'; $ui.PlanCard.Visibility = 'Hidden'; $script:ShowDetails = $false
   $ui.ScoreLabel.Text = 'scanner...'
   Log 'Scan startet'
-  Invoke-Bg $ScanScript @{ LogFile = $LogFile } {
+  Invoke-Bg $ScanScript @{ LogFile = $LogFile; MbKey = (Get-MbKey) } {
     param($res, $err, $c)
     $ui.ScanCard.Visibility = 'Collapsed'; $ui.PlanCard.Visibility = 'Visible'; $ui.BtnDetails.Content = 'Vis detaljer'
     $ui.BtnScan.IsEnabled = $true; $ui.BtnScan.Content = "🔍   Scan igen"
@@ -4374,6 +4451,95 @@ $ui.GridDrv.Add_SelectionChanged({ $ui.BtnDrvShow.IsEnabled = [bool]$ui.GridDrv.
 $ui.BtnDrvShow.Add_Click({ $p = $ui.GridDrv.SelectedItem.Sti; if ($p) { Start-Process explorer.exe "/select,`"$p`"" } })
 $ui.BtnDrvApps.Add_Click({ Start-Process 'ms-settings:appsfeatures' })
 $ui.BtnDrvInfo.Add_Click({ Start-Process 'https://www.loldrivers.io/' })
+# ---------- MalwareBazaar-nøgle (valgfri, gemt krypteret med Windows DPAPI for denne bruger) ----------
+$MbKeyFile = Join-Path $JobBase 'abusech-key.dat'
+function Get-MbKey {
+  try {
+    if (-not (Test-Path $MbKeyFile)) { return $null }
+    $ss = ConvertTo-SecureString ([IO.File]::ReadAllText($MbKeyFile).Trim()) -ErrorAction Stop
+    $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) }
+  } catch { return $null }
+}
+function Show-MbState {
+  $has = [bool](Get-MbKey)
+  $ui.BtnMbFile.IsEnabled = $has; $ui.BtnMbRemove.IsEnabled = $has
+  if ($has) {
+    $ui.MbBig.Text = 'Til'; $ui.MbBig.Foreground = $Brush.ConvertFromString('#34D399')
+    if (-not $script:MbMsg) { $ui.MbSub.Text = 'Slået til. Nye usignerede filer tjekkes ved hver scanning, og du kan tjekke en enkelt fil.' }
+  } else {
+    $ui.MbBig.Text = 'Fra'; $ui.MbBig.Foreground = $Brush.ConvertFromString('#6B7488')
+    if (-not $script:MbMsg) { $ui.MbSub.Text = 'Slået fra. Alt andet i Opticon virker fint uden.' }
+  }
+  $script:MbMsg = $false
+}
+function Invoke-MbLookup($key, [string[]]$hashes, [scriptblock]$then, $ctx) {
+  Invoke-Bg $MbLookupScript @{ Key = $key; Hashes = $hashes } {
+    param($res, $err, $c)
+    if ($res -is [array]) { $res = @($res | Where-Object { $_.Results })[-1] }
+    & $c.Then $(if ($res) { @($res.Results) } else { @() }) $err $c.Ctx
+  } @{ Then = $then; Ctx = $ctx }
+}
+$ui.BtnMbOpen.Add_Click({ Start-Process 'https://auth.abuse.ch/' })
+$ui.BtnMbSave.Add_Click({
+  $plain = $ui.MbKeyBox.Password.Trim()
+  if ($plain.Length -lt 20 -or $plain -match '\s') { Msg 'Det ligner ikke en Auth-Key. Den er en lang række bogstaver og tal uden mellemrum. Kopiér den igen fra din kontoside på abuse.ch.' 'MalwareBazaar' 'OK' 'Warning' | Out-Null; return }
+  $ui.BtnMbSave.IsEnabled = $false; $ui.MbSub.Text = 'Tester nøglen...'
+  # Test med et tilfældigt fingeraftryk: "ikke fundet" betyder, at nøglen virker
+  $probe = -join ((1..64) | ForEach-Object { '0123456789abcdef'[(Get-Random -Maximum 16)] })
+  Invoke-MbLookup $plain @($probe) {
+    param($results, $err, $ctx)
+    $ui.BtnMbSave.IsEnabled = $true
+    $st = if ($results.Count) { [string]$results[0].Status } else { "fejl: $err" }
+    if ($st -eq 'hash_not_found' -or $st -eq 'ok') {
+      try {
+        $enc = ConvertFrom-SecureString $ui.MbKeyBox.SecurePassword
+        [IO.File]::WriteAllText($MbKeyFile, $enc)
+        $ui.MbKeyBox.Clear()
+        Log 'MalwareBazaar-nøgle gemt (krypteret)'
+        $ui.MbSub.Text = '✓ Nøglen virker og er gemt krypteret. Nye usignerede filer tjekkes nu ved hver scanning.'; $script:MbMsg = $true
+      } catch { $ui.MbSub.Text = "Nøglen virker, men kunne ikke gemmes: $($_.Exception.Message)"; $script:MbMsg = $true }
+    } elseif ($st -eq 'auth' -or $st -match '(?i)auth|key') {
+      $ui.MbSub.Text = '✗ abuse.ch kender ikke nøglen. Tjek at du har kopieret hele Auth-Key fra din kontoside.'; $script:MbMsg = $true
+    } else {
+      $ui.MbSub.Text = "✗ Kunne ikke teste nøglen lige nu ($st). Tjek internettet, og prøv igen."; $script:MbMsg = $true
+    }
+    Show-MbState
+  } $null
+})
+$ui.BtnMbRemove.Add_Click({
+  if ((Msg 'Fjern MalwareBazaar-nøglen fra denne pc? Det ekstra virustjek slås fra.' 'MalwareBazaar' 'YesNo' 'Question') -ne 'Yes') { return }
+  Remove-Item $MbKeyFile -Force -ErrorAction SilentlyContinue; Log 'MalwareBazaar-nøgle fjernet'; Show-MbState
+})
+$ui.BtnMbFile.Add_Click({
+  $dlg = New-Object Microsoft.Win32.OpenFileDialog
+  $dlg.Title = 'Vælg en fil, du vil tjekke'; $dlg.InitialDirectory = (Join-Path $env:USERPROFILE 'Downloads')
+  if (-not $dlg.ShowDialog()) { return }
+  $f = $dlg.FileName
+  try { $sha = (Get-FileHash -LiteralPath $f -Algorithm SHA256 -ErrorAction Stop).Hash } catch {
+    Msg "Kunne ikke læse filen. Hvis Windows nægter at åbne den, har Defender sandsynligvis allerede blokeret den som virus.`n`n$($_.Exception.Message)" 'Tjek en fil' 'OK' 'Warning' | Out-Null; return
+  }
+  $sig = $null; try { $sig = Get-AuthenticodeSignature -LiteralPath $f } catch {}
+  $ui.MbSub.Text = "Tjekker $(Split-Path $f -Leaf)..."; $script:MbMsg = $true
+  Invoke-MbLookup (Get-MbKey) @($sha) {
+    param($results, $err, $ctx)
+    $r = if ($results.Count) { $results[0] } else { $null }
+    $name = Split-Path $ctx.File -Leaf
+    $signed = if ($ctx.Sig -and $ctx.Sig.Status -eq 'Valid') { "Signeret af: $(([string]$ctx.Sig.SignerCertificate.Subject -replace '^CN=([^,]+).*$', '$1'))" } else { 'Ikke digitalt signeret' }
+    if ($r -and $r.Status -eq 'ok') {
+      Log "MalwareBazaar: KENDT MALWARE $name ($($r.Signature))"
+      $ui.MbSub.Text = "⚠ $name er kendt malware."; $script:MbMsg = $true
+      Msg "⚠  KENDT MALWARE`n`n$name findes i MalwareBazaar.`n`nFamilie: $(if ($r.Signature) { $r.Signature } else { 'ukendt' })`nFørst set: $($r.FirstSeen)`nMærker: $($r.Tags)`n`nÅbn den IKKE. Slet den, og kør en Defender-scanning. Har du allerede åbnet den, så kør Defender Offline-scan (under Ydelse og helbred), og skift dine vigtigste adgangskoder fra en anden enhed." 'Tjek en fil' 'OK' 'Error' | Out-Null
+    } elseif ($r -and $r.Status -eq 'hash_not_found') {
+      $ui.MbSub.Text = "✓ $name er ikke kendt malware."; $script:MbMsg = $true
+      Msg "✓  Ikke kendt malware`n`n$name findes ikke blandt de over 1 million kendte malware-filer.`n$signed`n`nGod at vide: helt ny malware er ikke altid nået ind i databasen endnu. Er du stadig i tvivl, så tjek den også på VirusTotal, eller lad være med at åbne den." 'Tjek en fil' 'OK' 'Information' | Out-Null
+    } else {
+      $why = if ($r) { $r.Status } else { $err }
+      $ui.MbSub.Text = "Kunne ikke tjekke filen ($why)."; $script:MbMsg = $true
+    }
+    Show-MbState
+  } @{ File = $f; Sig = $sig }
+})
 function Load-DriversCache {
   if ($script:DrvShown) { return }
   $script:DrvShown = $true
