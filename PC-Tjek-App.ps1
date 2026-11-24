@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.41'
+$AppVersion = '2.42'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1834,12 +1834,12 @@ $GpuBenchScript = {
       # Målingerne fra dette trin (mærket med trinnummer, ikke tid, så urets opløsning ikke kan drille)
       $fw = @($script:BFps | Where-Object { $_.Meas -and $_.Step -eq $i -and $_.Ms -gt 0 })
       if (-not $fw.Count) { $fw = @($script:BFps | Where-Object { $_.Time -ge $t0.AddSeconds(-1) -and $_.Ms -gt 0 }) }   # reserve
-      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek")
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
       $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
       $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
+      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek, fps=$fps")
       [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Applied = $applied; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {
@@ -3493,6 +3493,8 @@ function Get-JobResult($j) {
       if ($o -is [psobject] -and $null -ne $o.BaseObject -and $o.BaseObject -isnot [Management.Automation.PSCustomObject]) { $o.BaseObject } else { $o }
     })
     if ($items.Count -eq 1) { $res = $items[0] } elseif ($items.Count -gt 1) { $res = $items }
+    # Samme form som før (da jobbene var separate processer): en kopi af resultatet, uafhængig af jobbets runspace
+    if ($null -ne $res) { try { $res = [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($res, 8)) } catch { Log "Resultat-kopi fejlede: $_" } }
   } catch {
     $e = $_.Exception
     while ($e.InnerException -and ($e -is [Management.Automation.MethodInvocationException] -or $e -is [Management.Automation.CmdletInvocationException] -or $e.Message -match '^Exception calling')) { $e = $e.InnerException }
@@ -5248,7 +5250,8 @@ function Start-GpuBench($mode) {
     $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'; $ui.GpuOcBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
-    $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
+    $steps = @(); if ($res) { foreach ($st in @($res.Steps)) { if ($null -ne $st -and $st.Fps) { $steps += $st } } }
+    if ($res -and -not ($res -is [array])) { Log "GPU-test resultat: $(@($res.Steps).Count) trin, $($steps.Count) med FPS$(if (@($res.Steps).Count) { ' · første: fps=' + @($res.Steps)[0].Fps + ' p1=' + @($res.Steps)[0].P1 })" }
     if ($c.GpuMode -eq 'occheck' -and $res -and $res.Lost) { Show-OcCheck $res $steps; return }   # et nedbrud ER resultatet
     if ($c.GpuMode -eq 'bench') {
       $script:LastGpuRenderer = if ($res -and -not ($res -is [array])) { [string]$res.Renderer } else { '' }

@@ -936,12 +936,12 @@ $GpuBenchScript = {
       # Målingerne fra dette trin (mærket med trinnummer, ikke tid, så urets opløsning ikke kan drille)
       $fw = @($script:BFps | Where-Object { $_.Meas -and $_.Step -eq $i -and $_.Ms -gt 0 })
       if (-not $fw.Count) { $fw = @($script:BFps | Where-Object { $_.Time -ge $t0.AddSeconds(-1) -and $_.Ms -gt 0 }) }   # reserve
-      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek")
       $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
       $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
       $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
       $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
       $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
+      [void]$script:BDiag.Add("trin $($i + 1): $($fw.Count) af $($script:BFps.Count) målinger, $([math]::Round(($t1 - $t0).TotalSeconds)) sek, fps=$fps")
       [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Applied = $applied; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
     }
   } finally {

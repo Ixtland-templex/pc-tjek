@@ -1,7 +1,8 @@
 {
-  "version": "2.41",
+  "version": "2.42",
   "date": "2026-11-24",
   "notes": [
+    "Baggrundsopgaver afleverer nu deres resultat præcis som før (rettelse til grafiktesten)",
     "Sårbare drivere: bruger nu Windows' egen beskyttelse (Microsofts blokeringsliste + Hukommelsesintegritet) i stedet for en scanning, som antivirus forvekslede med et angrebsværktøj",
     "Rettet: MalwareBazaar-nøglen kunne ikke testes (svaret blev læst forkert)",
     "Grafiktesten tæller nu målingerne pr. trin, så de ikke kan falde udenfor, og logger hvad der skete",
@@ -65,7 +66,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "AEF19F3BE8DBD7D2177C42649A56767972C0EFAE16045753D06BD9D88B74BA1A"
+      "sha256": "F8BAD7976AADB52BA66323993AEB8BC3B303DD9D07B7166B00E562313C18946D"
     },
     {
       "name": "PC-Tjek-Start.ps1",

@@ -58,6 +58,8 @@ function Get-JobResult($j) {
       if ($o -is [psobject] -and $null -ne $o.BaseObject -and $o.BaseObject -isnot [Management.Automation.PSCustomObject]) { $o.BaseObject } else { $o }
     })
     if ($items.Count -eq 1) { $res = $items[0] } elseif ($items.Count -gt 1) { $res = $items }
+    # Samme form som før (da jobbene var separate processer): en kopi af resultatet, uafhængig af jobbets runspace
+    if ($null -ne $res) { try { $res = [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($res, 8)) } catch { Log "Resultat-kopi fejlede: $_" } }
   } catch {
     $e = $_.Exception
     while ($e.InnerException -and ($e -is [Management.Automation.MethodInvocationException] -or $e -is [Management.Automation.CmdletInvocationException] -or $e.Message -match '^Exception calling')) { $e = $e.InnerException }
@@ -1813,7 +1815,8 @@ function Start-GpuBench($mode) {
     $ui.GpuAutoBar.Visibility = 'Collapsed'; $ui.GpuMeasureBar.Visibility = 'Collapsed'; $ui.GpuResBar.Visibility = 'Collapsed'; $ui.GpuOcBar.Visibility = 'Collapsed'
     try { $win.Activate() | Out-Null } catch {}
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
-    $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
+    $steps = @(); if ($res) { foreach ($st in @($res.Steps)) { if ($null -ne $st -and $st.Fps) { $steps += $st } } }
+    if ($res -and -not ($res -is [array])) { Log "GPU-test resultat: $(@($res.Steps).Count) trin, $($steps.Count) med FPS$(if (@($res.Steps).Count) { ' · første: fps=' + @($res.Steps)[0].Fps + ' p1=' + @($res.Steps)[0].P1 })" }
     if ($c.GpuMode -eq 'occheck' -and $res -and $res.Lost) { Show-OcCheck $res $steps; return }   # et nedbrud ER resultatet
     if ($c.GpuMode -eq 'bench') {
       $script:LastGpuRenderer = if ($res -and -not ($res -is [array])) { [string]$res.Renderer } else { '' }
