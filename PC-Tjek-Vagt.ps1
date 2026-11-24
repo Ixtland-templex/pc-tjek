@@ -47,6 +47,7 @@ $ModeLast       = Join-Path $ModeBase 'mode-last.json'
 $ModeStopFlag   = Join-Path $ModeBase 'mode-stop.flag'
 $GamesFile      = Join-Path $ModeBase 'spil.json'
 $GpuRestoreFile = Join-Path $ModeBase 'gpu-restore.json'
+$ModePending    = Join-Path $ModeBase 'mode-pending.json'   # det, der IKKE kunne sættes tilbage; prøves igen
 $HostsFile      = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $HostsBegin     = '# >>> Opticon Fokus (fjernes automatisk, når fokus slutter)'
 $HostsEnd       = '# <<< Opticon Fokus'
@@ -86,6 +87,14 @@ function Get-GpuPlNow {
   return $null
 }
 function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
+# Sæt OG bekræft: læs værdien tilbage, før det kaldes en succes
+function Restore-GpuPl($w) {
+  if (-not ([int]$w -gt 0)) { return $true }
+  [void](Set-GpuPlNow $w)
+  Start-Sleep -Milliseconds 300
+  $now = Get-GpuPlNow
+  return ($null -ne $now -and [math]::Abs($now - [int]$w) -le 2)
+}
 
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
 $ToastKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
@@ -118,7 +127,7 @@ function Set-HostsBlock($sites) {
 function Start-GameMode($game) {
   if (Test-Path $ModeFile) { return $null }
   $m = [ordered]@{ Mode = 'Spil'; Name = [string]$game.Name; Exe = [string]$game.Exe; Started = (Get-Date).ToString('s'); Until = ''
-                   Paused = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @(); Notes = @() }
+                   Paused = @(); NotClosed = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @(); Notes = @() }
   Save-ModeState $m
   if ($game.Mute) { $m.PrevToast = Get-Toasts; Save-ModeState $m; Set-Toasts 0 }
   if ([int]$game.GpuWatts -gt 0) {
@@ -126,22 +135,25 @@ function Start-GameMode($game) {
     if ($prev) { $m.PrevPl = $prev; Save-ModeState $m; if (Set-GpuPlNow $game.GpuWatts) { $m.NewPl = [int]$game.GpuWatts } else { $m.PrevPl = $null } }
     Save-ModeState $m
   }
-  $paused = New-Object System.Collections.ArrayList
+  $asked = New-Object System.Collections.ArrayList
   foreach ($n in @($game.Close)) {
     if (-not $n -or ($ModeNever -contains ([string]$n).ToLower())) { continue }
     $ps = @(Get-Process -Name $n -ErrorAction SilentlyContinue)
     if (-not $ps.Count) { continue }
     $path = ($ps | Where-Object { $_.Path } | Select-Object -First 1).Path
-    [void]$paused.Add([ordered]@{ Name = [string]$n; Path = [string]$path })
-    $m.Paused = @($paused); Save-ModeState $m
-    if (([string]$n).ToLower() -eq 'onedrive' -and $path) { try { Start-Process -FilePath $path -ArgumentList '/shutdown' -WindowStyle Hidden } catch {}; Start-Sleep -Milliseconds 800 }
-    foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) { try { [void]$p.CloseMainWindow() } catch {} }
+    [void]$asked.Add([ordered]@{ Name = [string]$n; Path = [string]$path })
+    # Kun en almindelig lukning, som når du selv trykker på krydset. Intet tvangsstop, så du aldrig mister noget, der ikke er gemt.
+    if (([string]$n).ToLower() -eq 'onedrive' -and $path) { try { Start-Process -FilePath $path -ArgumentList '/shutdown' -WindowStyle Hidden } catch {} }
+    foreach ($p in $ps) { try { [void]$p.CloseMainWindow() } catch {} }
   }
-  if ($paused.Count) {
-    Start-Sleep -Milliseconds 2000
-    foreach ($x in $paused) { foreach ($p in @(Get-Process -Name $x.Name -ErrorAction SilentlyContinue)) { try { $p.Kill() } catch {} } }
+  $closed = New-Object System.Collections.ArrayList; $open = New-Object System.Collections.ArrayList
+  if ($asked.Count) {
+    $until = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $until -and @($asked | Where-Object { Get-Process -Name $_.Name -ErrorAction SilentlyContinue }).Count) { Start-Sleep -Milliseconds 400 }
+    foreach ($x in $asked) { if (Get-Process -Name $x.Name -ErrorAction SilentlyContinue) { [void]$open.Add($x.Name) } else { [void]$closed.Add($x) } }
   }
-  ModeLog "Spil-tilstand startet: $($game.Name) ($($paused.Count) ting sat på pause)"
+  $m.Paused = @($closed); $m.NotClosed = @($open); Save-ModeState $m
+  ModeLog "Spil-tilstand startet: $($game.Name) (lukket: $(@($closed | ForEach-Object { $_.Name }) -join ', '); kunne ikke lukkes: $($open -join ', '))"
   return $m
 }
 function Start-FocusMode([int]$min, [bool]$mute, $sites) {
@@ -162,10 +174,10 @@ function Stop-Mode($reason) {
   try { Move-Item -LiteralPath $ModeFile -Destination $ModeEnding -Force -ErrorAction Stop } catch { return $null }
   $m = $null; try { $m = Get-Content $ModeEnding -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
   $done = New-Object System.Collections.ArrayList
+  $r = @{ Fail = @() }
   if ($m) {
-    if ($null -ne $m.PrevToast) { Set-Toasts ([int]$m.PrevToast); [void]$done.Add('Windows-beskeder er som før') }
-    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør Opticon igen.') } }
-    if ($m.PrevPl) { if (Set-GpuPlNow $m.PrevPl) { [void]$done.Add("Grafikkortet er tilbage på $($m.PrevPl) W") } else { [void]$done.Add("Kunne ikke sætte grafikkortet tilbage til $($m.PrevPl) W") } }
+    $r = Restore-Parts $m.PrevToast @($m.Sites) $m.PrevPl
+    foreach ($x in $r.Ok) { [void]$done.Add($x) }
     foreach ($p in @($m.Paused)) {
       if (-not $p.Path -or -not (Test-Path -LiteralPath $p.Path)) { continue }
       if (Get-Process -Name $p.Name -ErrorAction SilentlyContinue) { continue }
@@ -173,13 +185,45 @@ function Stop-Mode($reason) {
       try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$($p.Path)`""; [void]$done.Add("$($p.Name) er startet igen") } catch {}
     }
   }
-  try { Remove-HostsBlock } catch {}
   $sum = [ordered]@{ Mode = $(if ($m) { $m.Mode } else { '' }); Name = $(if ($m) { $m.Name } else { '' }); Started = $(if ($m) { $m.Started } else { '' })
-                     Ended = (Get-Date).ToString('s'); Reason = [string]$reason; Done = @($done) }
+                     Ended = (Get-Date).ToString('s'); Reason = [string]$reason; Done = @($done); Failed = @($r.Fail | ForEach-Object { $_.Text }) }
   try { [IO.File]::WriteAllText($ModeLast, ($sum | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false)) } catch {}
   Remove-Item $ModeEnding, $ModeStopFlag -Force -ErrorAction SilentlyContinue
   ModeLog "$($sum.Mode) sluttede ($reason): $(@($done) -join ' · ')"
   return $sum
+}
+# Sætter beskeder, sider og grafikkort tilbage, og BEKRÆFTER hver del. Det, der fejler, gemmes og prøves igen senere.
+function Restore-Parts($prevToast, $sites, $prevPl) {
+  $ok = New-Object System.Collections.ArrayList; $fail = New-Object System.Collections.ArrayList
+  if ($null -ne $prevToast) {
+    Set-Toasts ([int]$prevToast)
+    if ((Get-Toasts) -eq [int]$prevToast) { [void]$ok.Add('Windows-beskeder er som før') } else { [void]$fail.Add(@{ Kind = 'toast'; Value = [int]$prevToast; Text = 'Windows-beskeder kunne ikke slås til igen' }) }
+  }
+  $hostsNeeded = @($sites).Count -or ((Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*"))
+  if ($hostsNeeded) {
+    try { Remove-HostsBlock } catch {}
+    $still = (Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*")
+    if ($still) { [void]$fail.Add(@{ Kind = 'hosts'; Value = $null; Text = 'Blokeringen af sider kunne ikke fjernes' }) }
+    elseif (@($sites).Count) { [void]$ok.Add("Siderne er åbne igen ($(@($sites) -join ', '))") }
+  }
+  if ($prevPl) {
+    if (Restore-GpuPl $prevPl) { [void]$ok.Add("Grafikkortet er tilbage på $($prevPl) W (bekræftet)") }
+    else { [void]$fail.Add(@{ Kind = 'gpu'; Value = [int]$prevPl; Text = "Grafikkortet kunne ikke sættes tilbage til $($prevPl) W" }) }
+  }
+  # Gem det, der fejlede, så det prøves igen ved næste start
+  $old = @(); if (Test-Path $ModePending) { try { $old = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch {} }
+  $keep = @(@($old | Where-Object { $k = $_.Kind; -not ($fail | Where-Object { $_.Kind -eq $k }) }) + @($fail))
+  if ($fail.Count) { try { [IO.File]::WriteAllText($ModePending, (ConvertTo-Json -InputObject @($keep) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}; ModeLog "Kunne ikke sætte tilbage: $(@($fail | ForEach-Object { $_.Text }) -join ' · ')" }
+  return @{ Ok = @($ok); Fail = @($fail) }
+}
+# Prøv igen at sætte det tilbage, der fejlede sidst
+function Retry-Pending {
+  if (-not (Test-Path $ModePending)) { return }
+  $items = @(); try { $items = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return }
+  Remove-Item $ModePending -Force -ErrorAction SilentlyContinue
+  $t = ($items | Where-Object Kind -eq 'toast' | Select-Object -First 1); $g = ($items | Where-Object Kind -eq 'gpu' | Select-Object -First 1); $h = ($items | Where-Object Kind -eq 'hosts')
+  $r = Restore-Parts $(if ($t) { $t.Value } else { $null }) $(if ($h) { @('x') } else { @() }) $(if ($g) { $g.Value } else { $null })
+  if (-not $r.Fail.Count) { ModeLog 'Det, der manglede at blive sat tilbage, er nu på plads' }
 }
 # Afbrudt GPU-test: gendan strømgrænsen, hvis test-processen ikke længere kører
 function Repair-GpuRestore {
@@ -188,21 +232,37 @@ function Repair-GpuRestore {
     $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $p = $null; if ($g.Pid) { $p = Get-Process -Id ([int]$g.Pid) -ErrorAction SilentlyContinue }
     if ($p -and $p.ProcessName -eq 'powershell') { return $false }   # testen kører stadig
-    if ([int]$g.Watts -gt 0) { [void](Set-GpuPlNow $g.Watts) }
+    if (-not (Restore-GpuPl $g.Watts)) {   # behold filen, så det prøves igen
+      ModeLog "GPU-testen blev afbrudt, men strømgrænsen kunne ikke bekræftes sat tilbage til $($g.Watts) W. Prøver igen senere."
+      return $false
+    }
     Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue
-    ModeLog "GPU-testen blev afbrudt. Strømgrænsen er sat tilbage til $($g.Watts) W."
+    ModeLog "GPU-testen blev afbrudt. Strømgrænsen er sat tilbage til $($g.Watts) W (bekræftet)."
     return $true
   } catch { return $false }
 }
 # Ved opstart: ryd op efter alt, der blev afbrudt
 function Repair-Modes {
   [void](Repair-GpuRestore)
+  Retry-Pending
   if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
   $m = Get-ModeState
   if (-not $m) { return $null }
   if ($m.Mode -eq 'Fokus' -and $m.Until -and (Get-Date) -gt [datetime]$m.Until) { return (Stop-Mode 'tiden var gået') }
   if ($m.Mode -eq 'Spil' -and -not (Get-Process -Name (Exe-Key $m.Exe) -ErrorAction SilentlyContinue)) { return (Stop-Mode 'spillet var lukket') }
   return $null
+}
+
+# Sæt ALT tilbage nu (bruges, når Vagten slås fra, og før afinstallation)
+function Restore-Everything($reason) {
+  $s = $null
+  if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
+  if (Test-Path $ModeFile) { $s = Stop-Mode $reason }
+  if (Test-Path $GpuRestoreFile) {
+    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
+  }
+  Retry-Pending
+  return $s
 }
 
 function Open-App { try { Start-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop } catch { Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$AppDir\PC-Tjek-App.ps1`"" } }
@@ -566,10 +626,12 @@ function End-ModeWithPopup($reason) {
   if (-not $s) { return }
   $held = @($script:Held); $script:Held.Clear()
   $label = if ($s.Mode -eq 'Fokus') { '🔕 Fokus er slut' } else { "🎮 Spil-tilstand slut: $($s.Name)" }
+  $fails = @($s.Failed)
   $body = ((@($s.Done) | ForEach-Object { "✓  $_" }) -join "`n")
+  if ($fails.Count) { $body += "`n" + ((@($fails) | ForEach-Object { "⚠  $_. Prøver igen ved næste start." }) -join "`n") }
   if ($held.Count) { $body += "`n`nImens fik du $($held.Count) besked$(if ($held.Count -ne 1) { 'er' }) fra Vagten:`n" + ((@($held) | Select-Object -First 5 | ForEach-Object { "•  $_" }) -join "`n") }
-  if (-not $body.Trim()) { $body = 'Alt er som før.' }
-  Show-Popup 'safe' $label $body.Trim() @(@{ Text = 'Åbn Opticon'; Kind = 'normal'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'primary'; Action = $null }) $(if ($held.Count) { 0 } else { 20 }) -Force
+  if (-not $body.Trim()) { $body = 'Der var intet at sætte tilbage.' }
+  Show-Popup $(if ($fails.Count) { 'caution' } else { 'safe' }) $label $body.Trim() @(@{ Text = 'Åbn Opticon'; Kind = 'normal'; Action = { Open-App } }, @{ Text = 'OK'; Kind = 'primary'; Action = $null }) $(if ($held.Count) { 0 } else { 20 }) -Force
 }
 function Mode-Tick {
   $m = Get-ModeState
@@ -595,9 +657,12 @@ function Mode-Tick {
     if ($k -and $running.ContainsKey($k) -and $k -ne $script:SkipGame) {
       $nm = Start-GameMode $g
       if ($nm) {
-        $txt = if (@($nm.Paused).Count) { "Sat på pause: $((@($nm.Paused) | ForEach-Object { $_.Name }) -join ', '). Det starter igen, når du lukker spillet." } else { 'Beskeder fra Opticon venter, til du er færdig.' }
+        $txt = ''
+        if (@($nm.Paused).Count) { $txt += "Lukket: $((@($nm.Paused) | ForEach-Object { $_.Name }) -join ', '). De startes igen, når du lukker spillet.`n" }
+        if (@($nm.NotClosed).Count) { $txt += "Kunne ikke lukkes: $(@($nm.NotClosed) -join ', '). Opticon tvinger aldrig noget til at lukke. Luk dem selv, hvis du vil.`n" }
+        $txt += 'Beskeder fra Opticon venter, til du er færdig.'
         if ($nm.NewPl) { $txt += "`nGrafikkort: $($nm.NewPl) W." }
-        Show-Popup 'info' "🎮 Spil-tilstand: $($g.Name)" $txt @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) 6 -Force
+        Show-Popup 'info' "🎮 Spil-tilstand: $($g.Name)" $txt.Trim() @(@{ Text = 'OK'; Kind = 'normal'; Action = $null }) $(if (@($nm.NotClosed).Count) { 15 } else { 6 }) -Force
       }
       break
     }

@@ -1,7 +1,12 @@
 {
-  "version": "2.25",
+  "version": "2.26",
   "date": "2026-11-24",
   "notes": [
+    "Spil-tilstand lukker nu kun programmer pænt (som krydset) og tvinger aldrig noget. Intet er valgt på forhånd",
+    "Viser \"Lukket\" og \"Kunne ikke lukkes\"",
+    "Gendannelse bliver nu bekræftet. Det, der fejler, prøves igen ved næste start",
+    "Tilstande sættes tilbage, når Vagten slås fra, og før afinstallation",
+    "OC-tjek: tydeligere om hvad der er målt, og skønnet fylder mindre",
     "Nyt navn: Opticon 🛡🤖 med nyt logo",
     "Visuelt løft: blødere farver, nye knapper, afkrydsningsfelter og scrollbarer",
     "Genvejene skifter selv navn til Opticon",
@@ -22,15 +27,15 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "595E24FADE825C29D7A438DD4E9E0A11933FEBD8E0F808A1A632E05D550DCE2B"
+      "sha256": "47B7AFC0507E6937E5B64E7F3488F38B6D3ECC647EBF3648F3D7C752B247D465"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "B0B17CC0438D316A797115CD68D0F05596690D7CC6F721FE4E63754D5AC49DD0"
+      "sha256": "C253870611C2293DB504060E96B872E79EB6051DB0EDB75DA3D653621DFAD23F"
     },
     {
       "name": "Uninstall-PCTjek.ps1",
-      "sha256": "3E5F721104C3F7FE604F495FD80A866DF70F34BD7C913BD10BD432D2B10D624C"
+      "sha256": "A6A81083F197E6FC99087C2ABCE16A6B795B2E1198F85F0E96EEE48691C1F84D"
     },
     {
       "name": "PC-Tjek.ico",

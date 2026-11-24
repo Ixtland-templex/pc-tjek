@@ -7,6 +7,7 @@
   * Rapporter, snapshots, fortryd-log og fejl-log ligger i  Overførsler\PC-Tjek-rapport\
   Installation: kør "Installer Opticon.cmd" én gang. Derefter starter appen fra ikonet uden UAC og uden konsol.
 #>
+param([switch]$RestoreOnly)   # bruges af afinstalleren: sæt alt tilbage og afslut
 
 # ---------- Elevering + STA (bruges kun, hvis appen startes uden installeren) ----------
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -14,13 +15,13 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$PSCommandPath`""
   return
 }
-if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
   Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$PSCommandPath`""
   return
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.25'
+$AppVersion = '2.26'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -133,6 +134,7 @@ $ModeLast       = Join-Path $ModeBase 'mode-last.json'
 $ModeStopFlag   = Join-Path $ModeBase 'mode-stop.flag'
 $GamesFile      = Join-Path $ModeBase 'spil.json'
 $GpuRestoreFile = Join-Path $ModeBase 'gpu-restore.json'
+$ModePending    = Join-Path $ModeBase 'mode-pending.json'   # det, der IKKE kunne sættes tilbage; prøves igen
 $HostsFile      = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $HostsBegin     = '# >>> Opticon Fokus (fjernes automatisk, når fokus slutter)'
 $HostsEnd       = '# <<< Opticon Fokus'
@@ -172,6 +174,14 @@ function Get-GpuPlNow {
   return $null
 }
 function Set-GpuPlNow($w) { $s = Get-SmiPath; if ($s -and [int]$w -gt 0) { $null = & $s -pl ([int]$w) 2>&1; return ($LASTEXITCODE -eq 0) }; return $false }
+# Sæt OG bekræft: læs værdien tilbage, før det kaldes en succes
+function Restore-GpuPl($w) {
+  if (-not ([int]$w -gt 0)) { return $true }
+  [void](Set-GpuPlNow $w)
+  Start-Sleep -Milliseconds 300
+  $now = Get-GpuPlNow
+  return ($null -ne $now -and [math]::Abs($now - [int]$w) -le 2)
+}
 
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
 $ToastKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
@@ -204,7 +214,7 @@ function Set-HostsBlock($sites) {
 function Start-GameMode($game) {
   if (Test-Path $ModeFile) { return $null }
   $m = [ordered]@{ Mode = 'Spil'; Name = [string]$game.Name; Exe = [string]$game.Exe; Started = (Get-Date).ToString('s'); Until = ''
-                   Paused = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @(); Notes = @() }
+                   Paused = @(); NotClosed = @(); PrevPl = $null; NewPl = $null; PrevToast = $null; Sites = @(); Notes = @() }
   Save-ModeState $m
   if ($game.Mute) { $m.PrevToast = Get-Toasts; Save-ModeState $m; Set-Toasts 0 }
   if ([int]$game.GpuWatts -gt 0) {
@@ -212,22 +222,25 @@ function Start-GameMode($game) {
     if ($prev) { $m.PrevPl = $prev; Save-ModeState $m; if (Set-GpuPlNow $game.GpuWatts) { $m.NewPl = [int]$game.GpuWatts } else { $m.PrevPl = $null } }
     Save-ModeState $m
   }
-  $paused = New-Object System.Collections.ArrayList
+  $asked = New-Object System.Collections.ArrayList
   foreach ($n in @($game.Close)) {
     if (-not $n -or ($ModeNever -contains ([string]$n).ToLower())) { continue }
     $ps = @(Get-Process -Name $n -ErrorAction SilentlyContinue)
     if (-not $ps.Count) { continue }
     $path = ($ps | Where-Object { $_.Path } | Select-Object -First 1).Path
-    [void]$paused.Add([ordered]@{ Name = [string]$n; Path = [string]$path })
-    $m.Paused = @($paused); Save-ModeState $m
-    if (([string]$n).ToLower() -eq 'onedrive' -and $path) { try { Start-Process -FilePath $path -ArgumentList '/shutdown' -WindowStyle Hidden } catch {}; Start-Sleep -Milliseconds 800 }
-    foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) { try { [void]$p.CloseMainWindow() } catch {} }
+    [void]$asked.Add([ordered]@{ Name = [string]$n; Path = [string]$path })
+    # Kun en almindelig lukning, som når du selv trykker på krydset. Intet tvangsstop, så du aldrig mister noget, der ikke er gemt.
+    if (([string]$n).ToLower() -eq 'onedrive' -and $path) { try { Start-Process -FilePath $path -ArgumentList '/shutdown' -WindowStyle Hidden } catch {} }
+    foreach ($p in $ps) { try { [void]$p.CloseMainWindow() } catch {} }
   }
-  if ($paused.Count) {
-    Start-Sleep -Milliseconds 2000
-    foreach ($x in $paused) { foreach ($p in @(Get-Process -Name $x.Name -ErrorAction SilentlyContinue)) { try { $p.Kill() } catch {} } }
+  $closed = New-Object System.Collections.ArrayList; $open = New-Object System.Collections.ArrayList
+  if ($asked.Count) {
+    $until = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $until -and @($asked | Where-Object { Get-Process -Name $_.Name -ErrorAction SilentlyContinue }).Count) { Start-Sleep -Milliseconds 400 }
+    foreach ($x in $asked) { if (Get-Process -Name $x.Name -ErrorAction SilentlyContinue) { [void]$open.Add($x.Name) } else { [void]$closed.Add($x) } }
   }
-  ModeLog "Spil-tilstand startet: $($game.Name) ($($paused.Count) ting sat på pause)"
+  $m.Paused = @($closed); $m.NotClosed = @($open); Save-ModeState $m
+  ModeLog "Spil-tilstand startet: $($game.Name) (lukket: $(@($closed | ForEach-Object { $_.Name }) -join ', '); kunne ikke lukkes: $($open -join ', '))"
   return $m
 }
 function Start-FocusMode([int]$min, [bool]$mute, $sites) {
@@ -248,10 +261,10 @@ function Stop-Mode($reason) {
   try { Move-Item -LiteralPath $ModeFile -Destination $ModeEnding -Force -ErrorAction Stop } catch { return $null }
   $m = $null; try { $m = Get-Content $ModeEnding -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
   $done = New-Object System.Collections.ArrayList
+  $r = @{ Fail = @() }
   if ($m) {
-    if ($null -ne $m.PrevToast) { Set-Toasts ([int]$m.PrevToast); [void]$done.Add('Windows-beskeder er som før') }
-    if (@($m.Sites).Count) { try { Remove-HostsBlock; [void]$done.Add("Siderne er åbne igen ($(@($m.Sites) -join ', '))") } catch { [void]$done.Add('Kunne ikke fjerne blokeringen af sider. Kør Opticon igen.') } }
-    if ($m.PrevPl) { if (Set-GpuPlNow $m.PrevPl) { [void]$done.Add("Grafikkortet er tilbage på $($m.PrevPl) W") } else { [void]$done.Add("Kunne ikke sætte grafikkortet tilbage til $($m.PrevPl) W") } }
+    $r = Restore-Parts $m.PrevToast @($m.Sites) $m.PrevPl
+    foreach ($x in $r.Ok) { [void]$done.Add($x) }
     foreach ($p in @($m.Paused)) {
       if (-not $p.Path -or -not (Test-Path -LiteralPath $p.Path)) { continue }
       if (Get-Process -Name $p.Name -ErrorAction SilentlyContinue) { continue }
@@ -259,13 +272,45 @@ function Stop-Mode($reason) {
       try { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList "`"$($p.Path)`""; [void]$done.Add("$($p.Name) er startet igen") } catch {}
     }
   }
-  try { Remove-HostsBlock } catch {}
   $sum = [ordered]@{ Mode = $(if ($m) { $m.Mode } else { '' }); Name = $(if ($m) { $m.Name } else { '' }); Started = $(if ($m) { $m.Started } else { '' })
-                     Ended = (Get-Date).ToString('s'); Reason = [string]$reason; Done = @($done) }
+                     Ended = (Get-Date).ToString('s'); Reason = [string]$reason; Done = @($done); Failed = @($r.Fail | ForEach-Object { $_.Text }) }
   try { [IO.File]::WriteAllText($ModeLast, ($sum | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false)) } catch {}
   Remove-Item $ModeEnding, $ModeStopFlag -Force -ErrorAction SilentlyContinue
   ModeLog "$($sum.Mode) sluttede ($reason): $(@($done) -join ' · ')"
   return $sum
+}
+# Sætter beskeder, sider og grafikkort tilbage, og BEKRÆFTER hver del. Det, der fejler, gemmes og prøves igen senere.
+function Restore-Parts($prevToast, $sites, $prevPl) {
+  $ok = New-Object System.Collections.ArrayList; $fail = New-Object System.Collections.ArrayList
+  if ($null -ne $prevToast) {
+    Set-Toasts ([int]$prevToast)
+    if ((Get-Toasts) -eq [int]$prevToast) { [void]$ok.Add('Windows-beskeder er som før') } else { [void]$fail.Add(@{ Kind = 'toast'; Value = [int]$prevToast; Text = 'Windows-beskeder kunne ikke slås til igen' }) }
+  }
+  $hostsNeeded = @($sites).Count -or ((Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*"))
+  if ($hostsNeeded) {
+    try { Remove-HostsBlock } catch {}
+    $still = (Test-Path $HostsFile) -and ([IO.File]::ReadAllText($HostsFile) -like "*$HostsBegin*")
+    if ($still) { [void]$fail.Add(@{ Kind = 'hosts'; Value = $null; Text = 'Blokeringen af sider kunne ikke fjernes' }) }
+    elseif (@($sites).Count) { [void]$ok.Add("Siderne er åbne igen ($(@($sites) -join ', '))") }
+  }
+  if ($prevPl) {
+    if (Restore-GpuPl $prevPl) { [void]$ok.Add("Grafikkortet er tilbage på $($prevPl) W (bekræftet)") }
+    else { [void]$fail.Add(@{ Kind = 'gpu'; Value = [int]$prevPl; Text = "Grafikkortet kunne ikke sættes tilbage til $($prevPl) W" }) }
+  }
+  # Gem det, der fejlede, så det prøves igen ved næste start
+  $old = @(); if (Test-Path $ModePending) { try { $old = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch {} }
+  $keep = @(@($old | Where-Object { $k = $_.Kind; -not ($fail | Where-Object { $_.Kind -eq $k }) }) + @($fail))
+  if ($fail.Count) { try { [IO.File]::WriteAllText($ModePending, (ConvertTo-Json -InputObject @($keep) -Depth 3), (New-Object Text.UTF8Encoding $false)) } catch {}; ModeLog "Kunne ikke sætte tilbage: $(@($fail | ForEach-Object { $_.Text }) -join ' · ')" }
+  return @{ Ok = @($ok); Fail = @($fail) }
+}
+# Prøv igen at sætte det tilbage, der fejlede sidst
+function Retry-Pending {
+  if (-not (Test-Path $ModePending)) { return }
+  $items = @(); try { $items = @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return }
+  Remove-Item $ModePending -Force -ErrorAction SilentlyContinue
+  $t = ($items | Where-Object Kind -eq 'toast' | Select-Object -First 1); $g = ($items | Where-Object Kind -eq 'gpu' | Select-Object -First 1); $h = ($items | Where-Object Kind -eq 'hosts')
+  $r = Restore-Parts $(if ($t) { $t.Value } else { $null }) $(if ($h) { @('x') } else { @() }) $(if ($g) { $g.Value } else { $null })
+  if (-not $r.Fail.Count) { ModeLog 'Det, der manglede at blive sat tilbage, er nu på plads' }
 }
 # Afbrudt GPU-test: gendan strømgrænsen, hvis test-processen ikke længere kører
 function Repair-GpuRestore {
@@ -274,21 +319,42 @@ function Repair-GpuRestore {
     $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
     $p = $null; if ($g.Pid) { $p = Get-Process -Id ([int]$g.Pid) -ErrorAction SilentlyContinue }
     if ($p -and $p.ProcessName -eq 'powershell') { return $false }   # testen kører stadig
-    if ([int]$g.Watts -gt 0) { [void](Set-GpuPlNow $g.Watts) }
+    if (-not (Restore-GpuPl $g.Watts)) {   # behold filen, så det prøves igen
+      ModeLog "GPU-testen blev afbrudt, men strømgrænsen kunne ikke bekræftes sat tilbage til $($g.Watts) W. Prøver igen senere."
+      return $false
+    }
     Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue
-    ModeLog "GPU-testen blev afbrudt. Strømgrænsen er sat tilbage til $($g.Watts) W."
+    ModeLog "GPU-testen blev afbrudt. Strømgrænsen er sat tilbage til $($g.Watts) W (bekræftet)."
     return $true
   } catch { return $false }
 }
 # Ved opstart: ryd op efter alt, der blev afbrudt
 function Repair-Modes {
   [void](Repair-GpuRestore)
+  Retry-Pending
   if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
   $m = Get-ModeState
   if (-not $m) { return $null }
   if ($m.Mode -eq 'Fokus' -and $m.Until -and (Get-Date) -gt [datetime]$m.Until) { return (Stop-Mode 'tiden var gået') }
   if ($m.Mode -eq 'Spil' -and -not (Get-Process -Name (Exe-Key $m.Exe) -ErrorAction SilentlyContinue)) { return (Stop-Mode 'spillet var lukket') }
   return $null
+}
+
+# Sæt ALT tilbage nu (bruges, når Vagten slås fra, og før afinstallation)
+function Restore-Everything($reason) {
+  $s = $null
+  if ((Test-Path $ModeEnding) -and -not (Test-Path $ModeFile)) { try { Move-Item $ModeEnding $ModeFile -Force } catch {} }
+  if (Test-Path $ModeFile) { $s = Stop-Mode $reason }
+  if (Test-Path $GpuRestoreFile) {
+    try { $g = Get-Content $GpuRestoreFile -Raw | ConvertFrom-Json; if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue } } catch {}
+  }
+  Retry-Pending
+  return $s
+}
+# Afinstallation: sæt aktive tilstande, grafikkort og blokeringer tilbage, og stop her (ingen vindue)
+if ($RestoreOnly) {
+  try { $r = Restore-Everything 'Opticon blev afinstalleret'; Log "Gendannet før afinstallation$(if ($r) { ": $(@($r.Done) -join ' · ')" })" } catch { Log "Gendannelse før afinstallation fejlede: $_" }
+  exit 0
 }
 $ScanScript = {
   param($sync, $arg)
@@ -2027,22 +2093,22 @@ $GpuBenchScript = {
                 </WrapPanel>
                 <ProgressBar Name="GpuOcBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="#F59E0B" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
                 <TextBlock Name="GpuOcBase" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
-                <Border Name="GpuOcEstBox" Visibility="Collapsed" CornerRadius="10" Background="#151A26" BorderBrush="#3B4A6B" BorderThickness="1" Padding="14,12" Margin="0,10,0,0">
-                  <StackPanel>
-                    <TextBlock Name="GpuOcEstTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                    <UniformGrid Columns="4" Margin="0,10,0,6">
-                      <StackPanel><TextBlock Text="FPS" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstFps" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
-                      <StackPanel><TextBlock Text="STRØM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstW" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstWSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
-                      <StackPanel><TextBlock Text="VARME" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstT" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstTSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
-                      <StackPanel><TextBlock Text="LARM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstN" FontSize="18" FontWeight="Bold"/><TextBlock Name="OcEstNSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
-                    </UniformGrid>
-                    <TextBlock Name="GpuOcEstText" Foreground="#C3CAD6" TextWrapping="Wrap" LineHeight="20"/>
-                  </StackPanel>
-                </Border>
                 <Border Name="GpuOcBox" Visibility="Collapsed" CornerRadius="10" BorderThickness="1" Padding="14,12" Margin="0,10,0,0">
                   <StackPanel>
                     <TextBlock Name="GpuOcTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
                     <TextBlock Name="GpuOcText" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="20"/>
+                  </StackPanel>
+                </Border>
+                <Border Name="GpuOcEstBox" Visibility="Collapsed" CornerRadius="10" Background="Transparent" BorderBrush="#2A3142" BorderThickness="1" Padding="12,10" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuOcEstTitle" FontSize="13" FontWeight="SemiBold" Foreground="#AEB6C6" TextWrapping="Wrap"/>
+                    <UniformGrid Columns="4" Margin="0,10,0,6">
+                      <StackPanel><TextBlock Text="FPS" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstFps" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="STRØM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstW" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstWSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="VARME" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstT" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstTSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="LARM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstN" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstNSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                    </UniformGrid>
+                    <TextBlock Name="GpuOcEstText" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" LineHeight="18"/>
                   </StackPanel>
                 </Border>
               </StackPanel>
@@ -3672,6 +3738,8 @@ function Install-Vagt {
   } catch { Msg "Kunne ikke slå vagten til: $($_.Exception.Message)" 'Vagt' 'OK' 'Error' | Out-Null; return $false }
 }
 function Remove-Vagt {
+  # Sæt en aktiv tilstand tilbage FØR Vagten stoppes, så intet bliver hængende
+  try { $s = Restore-Everything 'Vagten blev slået fra'; if ($s) { Show-ModeSummary $s } } catch { Log "Gendannelse før vagt-stop fejlede: $_" }
   try { Stop-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue } catch {}
   foreach ($p in Get-VagtProc) { try { Stop-Process -Id $p.ProcessId -Force } catch {} }
   try { Unregister-ScheduledTask -TaskName 'PC-Tjek Vagt' -Confirm:$false -ErrorAction Stop } catch {}
@@ -4076,12 +4144,12 @@ function Show-OcEstimate {
   elseif ($F -ge 70) { $ui.OcEstN.Text = 'mærkbart'; $ui.OcEstNSub.Text = "blæseren kører allerede $([math]::Round($F)) %" }
   else { $ui.OcEstN.Text = "+$([math]::Round([math]::Max(2, $tAdd * 2))) %"; $ui.OcEstNSub.Text = "blæser ca. $([math]::Round($F)) → $([math]::Round([math]::Min(100, $F + [math]::Max(2, $tAdd * 2)))) %" }
   $verdict = if ($g -lt 3) { "👎 Giver næppe mening: ca. +$([math]::Round($g, 1)) % FPS" } elseif ($g -lt 6) { "🤷 Måske: ca. +$([math]::Round($g, 1)) % FPS" } else { "👍 Værd at prøve: ca. +$([math]::Round($g, 1)) % FPS" }
-  $ui.GpuOcEstTitle.Text = "Skøn før du overclocker · $verdict"
+  $ui.GpuOcEstTitle.Text = "Skøn, ikke målt · $verdict"
   $tail = if ($g -lt 3) { "Brug hellere 'Find det bedste punkt' til mindre strøm, varme og larm. Det mærker du mere." }
           elseif ($g -lt 6) { "Det er svært at mærke i spil (fx 60 → $([math]::Round(60 * (1 + $g / 100))) fps). Det kan være værd det, hvis du ligger lige under din skærms Hz." }
           else { "Det kan mærkes lidt i tunge spil (fx 60 → $([math]::Round(60 * (1 + $g / 100))) fps). Til gengæld bliver kortet varmere og lidt mere højlydt." }
   $src = if ($ref) { $ref.Src } else { 'Skønnet bygger på, at nyere NVIDIA-kort typisk giver 3-8 % ved overclock, fordi GPU Boost allerede udnytter det meste fra fabrikken.' }
-  $ui.GpuOcEstText.Text = (@($why) + @($tail, "", "ℹ  $src Det er et skøn. Din chip kan være bedre eller dårligere. Trin 3 viser det rigtige tal.")) -join "`n"
+  $ui.GpuOcEstText.Text = (@($why) + @($tail, "", "ℹ  $src Det er et skøn ud fra din måling og andres tests. Din chip kan være bedre eller dårligere. Kun trin 3 måler det rigtige tal.")) -join "`n"
   $ui.GpuOcEstBox.Visibility = 'Visible'
   $script:OcEstGain = $g
 }
@@ -4099,21 +4167,22 @@ function Show-OcCheck($res, $steps) {
     $nums = "FPS $([math]::Round($b.Fps)) → $([math]::Round($s.Fps)) ($('{0:+0.0;-0.0;0}' -f $dF) %) · strøm $([math]::Round($b.W)) → $([math]::Round($s.W)) W ($('{0:+0;-0;0}' -f $dW) %) · clock $([math]::Round($b.C)) → $([math]::Round($s.C)) MHz (laveste $([math]::Round($s.Cmin))) · højeste temp $([math]::Round($s.Tmax)) °C"
   }
   $hot = if ($s -and $s.Tmax -ge 83) { "`n🌡  Højeste temperatur var $([math]::Round($s.Tmax)) °C. Det er varmt: giv blæserkurven lidt mere fart, eller skru lidt ned." } else { '' }
-  $note = "`n`nOpticon kan ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
+  $note = "`n`nMålt i Opticons testscene (2K, 5 minutter), ikke i et bestemt spil. 5 minutter fanger de værste fejl, men ikke alle. Opticon kan heller ikke se grafikfejl. Så du blinkende prikker, striber eller flimmer i testscenen, er overclocket heller ikke stabilt."
   if ($probs.Count) {
-    Set-OcBox 'bad' '⛔ Ikke stabilt' ("$($probs -join ' ')`n`nSkru core clock 15-30 MHz ned (eller memory 100-200 MHz) i Afterburner, eller kør NVIDIAs automatiske tuning igen. Tryk så '3 · Tjek OC' igen.$(if ($nums) { "`n`n$nums" })$hot")
+    Set-OcBox 'bad' '⛔ Fejl registreret i den 5-minutters test' ("$($probs -join ' ')`n`nSkru core clock 15-30 MHz ned (eller memory 100-200 MHz) i Afterburner, eller kør NVIDIAs automatiske tuning igen. Tryk så '3 · Tjek OC' igen.$(if ($nums) { "`n`n$nums" })$hot")
     Log "OC-tjek: ustabilt ($($probs -join ' '))"
   } elseif ($res.Aborted) {
     Set-OcBox 'warn' 'Stoppet før tid' "Testen skal køre alle 5 minutter, før du kan stole på, at overclocket holder.$(if ($nums) { "`n`n$nums" })"
   } elseif ($null -eq $dF) {
     Set-OcBox 'warn' 'Ingen sammenligning' 'Testen gav ingen brugbare tal at sammenligne med. Mål udgangspunktet igen (trin 1).'
   } elseif ($dF -ge 2) {
-    Set-OcBox 'ok' "✅ Stabilt i 5 minutter · $('{0:+0.0}' -f $dF) % FPS" ("$nums$(if ($script:OcEstGain) { "`nSkønnet var ca. +$([math]::Round($script:OcEstGain, 1)) %." })$hot`n`nNæste skridt: gem profilen (NVIDIA App gemmer selv; i Afterburner trykker du Save og et nummer). Spil et par timer. Går et spil ned, så skru 15 MHz ned.$note")
+    Set-OcBox 'ok' "✅ Ingen fejl registreret i den 5-minutters test · $('{0:+0.0}' -f $dF) % FPS" ("$nums$(if ($script:OcEstGain) { "`nSkønnet var ca. +$([math]::Round($script:OcEstGain, 1)) %." })$hot`n`nNæste skridt: gem profilen (NVIDIA App gemmer selv; i Afterburner trykker du Save og et nummer). Spil et par timer. Går et spil ned, så skru 15 MHz ned.$note")
     Log "OC-tjek: stabilt, $('{0:+0.0}' -f $dF) % FPS"
   } else {
-    Set-OcBox 'warn' "Stabilt, men kun $('{0:+0.0;-0.0;0}' -f $dF) % FPS" ("$nums$hot`n`nOverclocket giver næsten ingenting her. Det er ofte smartere at gå tilbage til standard og bruge 'Find det bedste punkt' til mindre strøm og støj i stedet.$note")
+    Set-OcBox 'warn' "Ingen fejl registreret, men kun $('{0:+0.0;-0.0;0}' -f $dF) % FPS" ("$nums$hot`n`nOverclocket giver næsten ingenting her. Det er ofte smartere at gå tilbage til standard og bruge 'Find det bedste punkt' til mindre strøm og støj i stedet.$note")
   }
   $ui.GpuOcInfo.Text = "Tjekket kl. $(Get-Date -Format 'HH:mm'). Ændr noget, og tjek igen for at sammenligne med udgangspunktet."
+  $ui.GpuOcEstBox.Visibility = 'Collapsed'   # det målte resultat erstatter skønnet
 }
 $ui.BtnOcBase.Add_Click({ Start-GpuBench 'ocbase' })
 $ui.BtnOcCheck.Add_Click({ Start-GpuBench 'occheck' })
@@ -4333,12 +4402,13 @@ function Mode-Text($m) {
   $bits = @()
   if ($m.Mode -eq 'Spil') {
     $t = "🎮 Spil er aktiv · $($m.Name)"
-    $n = @($m.Paused).Count
-    if ($n) { $bits += "$n ting sat på pause ($((@($m.Paused) | ForEach-Object { $_.Name }) -join ', '))" } else { $bits += 'intet lukket' }
+    $n = @($m.Paused).Count; $nc = @($m.NotClosed).Count
+    if ($n) { $bits += "lukket: $((@($m.Paused) | ForEach-Object { $_.Name }) -join ', ')" } else { $bits += 'intet lukket' }
+    if ($nc) { $bits += "kunne ikke lukkes: $(@($m.NotClosed) -join ', ')" }
     if ($null -ne $m.PrevToast) { $bits += 'beskeder dæmpet' }
     if ($m.NewPl) { $bits += "grafikkort $($m.NewPl) W (før $($m.PrevPl) W)" }
     $bits += "startet kl. $(([datetime]$m.Started).ToString('HH:mm'))"
-    $short = if ($n) { "$n ting sat på pause" } else { 'beskeder venter' }
+    $short = if ($n) { "$n lukket$(if ($nc) { " · $nc kunne ikke lukkes" })" } elseif ($nc) { "$nc kunne ikke lukkes" } else { 'beskeder venter' }
   } else {
     $left = [math]::Max(0, [math]::Ceiling(([datetime]$m.Until - (Get-Date)).TotalMinutes))
     $t = "🔕 Fokus · $left min tilbage"
@@ -4352,7 +4422,9 @@ function Mode-Text($m) {
 function Show-ModeSummary($s) {
   if (-not $s) { return }
   $d = (@($s.Done) | ForEach-Object { "✓  $_" }) -join "`n"
-  Msg "$(if ($s.Mode -eq 'Spil') { "Spil-tilstand ($($s.Name))" } else { 'Fokus' }) er slut.`n`n$(if ($d) { $d } else { 'Alt er som før.' })" 'Tilstand' | Out-Null
+  $f = (@($s.Failed) | ForEach-Object { "⚠  $_. Opticon prøver igen ved næste start." }) -join "`n"
+  $txt = (@($d, $f) | Where-Object { $_ }) -join "`n"
+  Msg "$(if ($s.Mode -eq 'Spil') { "Spil-tilstand ($($s.Name))" } else { 'Fokus' }) er slut.`n`n$(if ($txt) { $txt } else { 'Der var intet at sætte tilbage.' })" 'Tilstand' 'OK' $(if (@($s.Failed).Count) { 'Warning' } else { 'Information' }) | Out-Null
 }
 function Update-ModeUi {
   $m = Get-ModeState
@@ -4366,7 +4438,7 @@ function Update-ModeUi {
   } else { $ui.ModeSide.Visibility = 'Collapsed'; $ui.ModeActiveCard.Visibility = 'Collapsed' }
   if (Test-Path $ModeLast) {
     try { $l = Get-Content $ModeLast -Raw -ErrorAction Stop | ConvertFrom-Json
-      $ui.ModeLastText.Text = "Seneste: $(if ($l.Mode -eq 'Spil') { "🎮 $($l.Name)" } else { "🔕 Fokus $($l.Name)" }) sluttede $(([datetime]$l.Ended).ToString('dd-MM HH:mm')), fordi $($l.Reason). $(@($l.Done) -join ' · ')"
+      $ui.ModeLastText.Text = "Seneste: $(if ($l.Mode -eq 'Spil') { "🎮 $($l.Name)" } else { "🔕 Fokus $($l.Name)" }) sluttede $(([datetime]$l.Ended).ToString('dd-MM HH:mm')), fordi $($l.Reason). $(@($l.Done) -join ' · ')$(if (@($l.Failed).Count) { ' · ⚠ ' + (@($l.Failed) -join ' · ') })"
       $ui.ModeLastText.Visibility = 'Visible' } catch {}
   }
 }
@@ -4512,14 +4584,14 @@ function Measure-ModeApps {
       if ($ModeUsual -contains $k) { $note += 'Bruges tit under spil (launcher, chat, stream).' }
       elseif ($busy) { $note += 'Bruger meget lige nu.' }
       $r.Note = $note -join ' '
-      $r.Valgt = $(if ($g.Prev) { $prevClose -contains $k } else { $busy -and ($ModeUsual -notcontains $k) })
+      $r.Valgt = $(if ($g.Prev) { $prevClose -contains $k } else { $false })   # intet er valgt på forhånd: du bestemmer
       $r.Tal = [double]$p.Cpu * 2 + [double]$p.Io * 3
       [void]$rows.Add($r)
     }
     foreach ($k in $prevClose) { if (-not $seen.ContainsKey($k)) { $r = New-Object PcTjek.Row; $r.Navn = "$k  (kører ikke lige nu)"; $r.Id = $k; $r.Valgt = $true; $r.Info = '–'; $r.Gruppe = '–'; $r.Status = '–'; [void]$rows.Add($r) } }
     $ui.GridModeApps.ItemsSource = $rows
     $busyN = @($rows | Where-Object { $_.Tal -ge 6 }).Count
-    $ui.GameSetupSub.Text = "Sæt hak ved det, der må lukkes, når spillet starter. Det startes igen, når du lukker spillet. Øverst står det, der bruger mest lige nu$(if ($busyN) { " ($busyN program$(if ($busyN -ne 1) { 'mer' }) er travle)" })."
+    $ui.GameSetupSub.Text = "Sæt hak ved det, der må lukkes, når spillet starter. Opticon beder dem lukke pænt, som når du trykker på krydset, og tvinger aldrig noget. Beder et program om at gemme, bliver det bare åbent. Bagefter startes det igen. Øverst står det, der bruger mest lige nu$(if ($busyN) { " ($busyN program$(if ($busyN -ne 1) { 'mer' }) er travle)" })."
     $ui.BtnGameSave.IsEnabled = $true
   } $null
 }

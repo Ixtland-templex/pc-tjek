@@ -9,6 +9,12 @@ Write-Host '  Afinstallerer Opticon...' -ForegroundColor Magenta
 Unregister-ScheduledTask -TaskName 'PC-Tjek' -Confirm:$false -ErrorAction SilentlyContinue
 Stop-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*PC-Tjek-Vagt.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+# Sæt en aktiv Spil-/Fokus-tilstand, grafikkortet og evt. blokerede sider tilbage, før appen fjernes
+$appFile = Join-Path $PSScriptRoot 'PC-Tjek-App.ps1'
+if (Test-Path $appFile) {
+  Write-Host '  • Sætter alt tilbage, som Opticon har ændret midlertidigt...'
+  & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $appFile -RestoreOnly | Out-Null
+}
 Unregister-ScheduledTask -TaskName 'PC-Tjek Vagt' -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Opticon.lnk')
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path ([Environment]::GetFolderPath('Programs')) 'Opticon')
