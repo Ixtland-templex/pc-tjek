@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.29'
+$AppVersion = '2.31'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -1382,6 +1382,230 @@ $GpuBenchScript = {
 # =====================================================================
 #  GUI
 # =====================================================================
+
+# =====================================================================
+#  DEN STORE TEST (CPU, RAM, disk). Grafikdelen kører bagefter med testscenen.
+# =====================================================================
+$BenchScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'Stop'
+  $code = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Threading;
+
+namespace OptiBench
+{
+    public static class Cpu
+    {
+        // Én arbejdsenhed: heltal (primtal), kommatal (matrix), kryptografi (SHA-256) og komprimering
+        static int Unit(byte[] buf, double[] a, double[] b, double[] c, bool[] comp, SHA256 sha)
+        {
+            int count = 0;
+            Array.Clear(comp, 0, comp.Length);
+            int lim = comp.Length - 1;
+            for (int i = 2; i <= lim; i++)
+            {
+                if (!comp[i]) { count++; for (int j = i * 2; j <= lim; j += i) comp[j] = true; }
+            }
+            const int n = 48;
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++)
+                {
+                    double s = 0;
+                    for (int k = 0; k < n; k++) s += a[i * n + k] * b[k * n + j];
+                    c[i * n + j] = s;
+                }
+            byte[] h = sha.ComputeHash(buf);
+            count += h[0];
+            using (MemoryStream ms = new MemoryStream())
+            {
+                using (DeflateStream z = new DeflateStream(ms, CompressionMode.Compress, true)) { z.Write(buf, 0, buf.Length); }
+                count += (int)(ms.Length & 1);
+            }
+            return count;
+        }
+
+        // Kører arbejdsenheder i 'seconds' sekunder på 'threads' tråde. Returnerer enheder pr. sekund (i alt).
+        public static double Run(int threads, double seconds)
+        {
+            long total = 0;
+            object lk = new object();
+            Thread[] ts = new Thread[threads];
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int t = 0; t < threads; t++)
+            {
+                int seed = t + 1;
+                ts[t] = new Thread(() =>
+                {
+                    Random r = new Random(seed);
+                    byte[] buf = new byte[32 * 1024];
+                    for (int i = 0; i < buf.Length; i++) buf[i] = (byte)(r.Next(256) & (i % 7 == 0 ? 0xFF : 0x3F));
+                    double[] a = new double[48 * 48], b = new double[48 * 48], c = new double[48 * 48];
+                    for (int i = 0; i < a.Length; i++) { a[i] = r.NextDouble(); b[i] = r.NextDouble(); }
+                    bool[] comp = new bool[15001];
+                    long mine = 0; int sink = 0;
+                    using (SHA256 sha = SHA256.Create())
+                    {
+                        while (sw.Elapsed.TotalSeconds < seconds) { sink += Unit(buf, a, b, c, comp, sha); mine++; }
+                    }
+                    lock (lk) { total += mine; if (sink == int.MinValue) total++; }
+                });
+                ts[t].IsBackground = true;
+                ts[t].Start();
+            }
+            foreach (Thread th in ts) th.Join();
+            return total / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+        }
+    }
+
+    public static class Mem
+    {
+        // Kopierer store blokke på flere tråde. Returnerer GB/s (kopieret data pr. sekund).
+        public static double CopyGBs(int threads, double seconds)
+        {
+            const int size = 64 * 1024 * 1024;
+            long bytes = 0;
+            object lk = new object();
+            Thread[] ts = new Thread[threads];
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int t = 0; t < threads; t++)
+            {
+                ts[t] = new Thread(() =>
+                {
+                    byte[] src = new byte[size], dst = new byte[size];
+                    for (int i = 0; i < size; i += 4096) src[i] = (byte)i;
+                    long mine = 0;
+                    while (sw.Elapsed.TotalSeconds < seconds) { Buffer.BlockCopy(src, 0, dst, 0, size); mine += size; }
+                    lock (lk) { bytes += mine; }
+                });
+                ts[t].IsBackground = true;
+                ts[t].Start();
+            }
+            foreach (Thread th in ts) th.Join();
+            return bytes / Math.Max(0.001, sw.Elapsed.TotalSeconds) / 1e9;
+        }
+    }
+
+    public static class Disk
+    {
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteFile(IntPtr h, IntPtr buf, uint n, out uint done, IntPtr ov);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool ReadFile(IntPtr h, IntPtr buf, uint n, out uint done, IntPtr ov);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetFilePointerEx(IntPtr h, long dist, out long newPos, uint method);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr VirtualAlloc(IntPtr addr, UIntPtr size, uint type, uint prot);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool VirtualFree(IntPtr addr, UIntPtr size, uint type);
+
+        const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000, CREATE_ALWAYS = 2;
+        const uint NO_BUFFERING = 0x20000000, WRITE_THROUGH = 0x80000000, DELETE_ON_CLOSE = 0x04000000;
+
+        // Skriver og læser en testfil uden Windows' cache. Returnerer { skriv MB/s, læs MB/s, små læsninger pr. sek (4 KB) }
+        public static double[] Test(string path, long sizeMB, double randSeconds)
+        {
+            const uint chunk = 4 * 1024 * 1024;
+            long size = sizeMB * 1024 * 1024;
+            IntPtr buf = VirtualAlloc(IntPtr.Zero, (UIntPtr)chunk, 0x3000, 4);
+            IntPtr small = VirtualAlloc(IntPtr.Zero, (UIntPtr)4096, 0x3000, 4);
+            if (buf == IntPtr.Zero || small == IntPtr.Zero) throw new Exception("Kunne ikke reservere hukommelse til disktesten.");
+            byte[] rnd = new byte[chunk];
+            new Random(42).NextBytes(rnd);
+            Marshal.Copy(rnd, 0, buf, (int)chunk);
+            IntPtr h = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero, CREATE_ALWAYS, NO_BUFFERING | WRITE_THROUGH | DELETE_ON_CLOSE, IntPtr.Zero);
+            if (h == new IntPtr(-1)) throw new Exception("Kunne ikke oprette testfilen (fejl " + Marshal.GetLastWin32Error() + ").");
+            try
+            {
+                uint done;
+                long pos;
+                Stopwatch sw = Stopwatch.StartNew();
+                for (long w = 0; w < size; w += chunk)
+                    if (!WriteFile(h, buf, chunk, out done, IntPtr.Zero)) throw new Exception("Skrivefejl " + Marshal.GetLastWin32Error());
+                double write = size / 1048576.0 / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+
+                SetFilePointerEx(h, 0, out pos, 0);
+                sw.Restart();
+                for (long r = 0; r < size; r += chunk)
+                    if (!ReadFile(h, buf, chunk, out done, IntPtr.Zero)) throw new Exception("Læsefejl " + Marshal.GetLastWin32Error());
+                double read = size / 1048576.0 / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+
+                Random rr = new Random(7);
+                long blocks = size / 4096, ops = 0;
+                sw.Restart();
+                while (sw.Elapsed.TotalSeconds < randSeconds)
+                {
+                    long off = (long)(rr.NextDouble() * (blocks - 1)) * 4096;
+                    SetFilePointerEx(h, off, out pos, 0);
+                    if (!ReadFile(h, small, 4096, out done, IntPtr.Zero)) break;
+                    ops++;
+                }
+                double iops = ops / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+                return new double[] { write, read, iops };
+            }
+            finally
+            {
+                CloseHandle(h);
+                VirtualFree(buf, UIntPtr.Zero, 0x8000);
+                VirtualFree(small, UIntPtr.Zero, 0x8000);
+            }
+        }
+    }
+}
+'@
+  if (-not ('OptiBench.Cpu' -as [type])) { Add-Type -TypeDefinition $code -Language CSharp }
+  $sync.Status = 'Læser hardware...'; $sync.Progress = 1
+  $cpuO = Get-CimInstance Win32_Processor | Select-Object -First 1
+  $cpuName = (([string]$cpuO.Name) -replace '\((R|TM|tm)\)', '' -replace '\s+CPU\s*@.*$', '' -replace '\s+\d+-Core Processor', '' -replace '\s+', ' ').Trim()
+  $vids = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage|displaylink' })
+  $gpuO = $vids | Where-Object { $_.Name -match '(?i)nvidia|radeon rx|radeon pro|arc a|arc b' } | Select-Object -First 1
+  if (-not $gpuO) { $gpuO = $vids | Select-Object -First 1 }
+  $cs = Get-CimInstance Win32_ComputerSystem
+  $ramGB = [math]::Round($cs.TotalPhysicalMemory / 1GB)
+  $ramMHz = (Get-CimInstance Win32_PhysicalMemory | Measure-Object ConfiguredClockSpeed -Maximum).Maximum
+  $diskName = ''; try { $pn = Get-Partition -DriveLetter ($env:SystemDrive.Substring(0, 1)) | Select-Object -First 1; $diskName = (Get-Disk -Number $pn.DiskNumber).FriendlyName } catch {}
+  $laptop = ($cs.PCSystemType -eq 2)
+  $onBattery = $false; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; if ($bt) { $onBattery = -not $bt.PowerOnline } } catch {}
+  $threads = [Environment]::ProcessorCount
+  $hw = [ordered]@{ Cpu = $cpuName; Cores = [int]$cpuO.NumberOfCores; Threads = $threads; Gpu = [string]$gpuO.Name; RamGB = $ramGB; RamMHz = [int]$ramMHz; Disk = [string]$diskName; Laptop = $laptop; OnBattery = $onBattery }
+
+  # CPU: én kerne
+  $sync.Status = "CPU · én kerne (10 sek.)"; $sync.Progress = 3
+  [void][OptiBench.Cpu]::Run(1, 1.0)   # opvarmning
+  $one = [OptiBench.Cpu]::Run(1, 10.0)
+  $sync.Progress = 16
+  # CPU: alle kerner i 60 sek. Første 10 sek. = topydelse, sidste 10 sek. = varm pc
+  $buckets = New-Object System.Collections.ArrayList
+  for ($i = 0; $i -lt 12; $i++) {
+    $sync.Status = "CPU · alle $threads tråde · $([int](60 - $i * 5)) sek. tilbage (holder den farten, når den bliver varm?)"
+    [void]$buckets.Add([OptiBench.Cpu]::Run($threads, 5.0))
+    $sync.Progress = 16 + ($i + 1) * 5
+  }
+  $multi = ($buckets[0] + $buckets[1]) / 2
+  $hot = ($buckets[10] + $buckets[11]) / 2
+  $sustain = [math]::Round(100 * $hot / [math]::Max(1, $multi))
+  # RAM
+  $sync.Status = 'RAM · kopierer store blokke...'; $sync.Progress = 77
+  $ram = [OptiBench.Mem]::CopyGBs([math]::Min(4, $threads), 3.0)
+  # Disk
+  $sync.Status = 'Disk · skriver og læser en testfil på 512 MB (uden Windows-cache)...'; $sync.Progress = 82
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ('opticon-disktest-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  $d = @(0, 0, 0)
+  try { $d = [OptiBench.Disk]::Test($tmp, 512, 3.0) } catch { $sync.Status = "Disktesten fejlede: $($_.Exception.Message)" } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  $sync.Progress = 100
+  return @{ Hw = $hw; Cpu1 = [math]::Round($one); CpuN = [math]::Round($multi); Sustain = $sustain; Ram = [math]::Round($ram, 1)
+            DiskW = [math]::Round($d[0]); DiskR = [math]::Round($d[1]); Iops = [math]::Round($d[2]) }
+}
+
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -1578,6 +1802,7 @@ $GpuBenchScript = {
         <StackPanel Grid.Row="1">
           <RadioButton Name="NavHome"    Style="{StaticResource Nav}" GroupName="nav" IsChecked="True" Content="🏠   Overblik"/>
           <RadioButton Name="NavTweaks"  Style="{StaticResource Nav}" GroupName="nav" Content="⚡   Optimering"/>
+          <RadioButton Name="NavBench"   Style="{StaticResource Nav}" GroupName="nav" Content="🏁   Benchmark"/>
           <RadioButton Name="NavModes"   Style="{StaticResource Nav}" GroupName="nav" Content="🎮   Tilstande"/>
           <RadioButton Name="NavVagt"    Style="{StaticResource Nav}" GroupName="nav" Content="🛡   Vagt"/>
           <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
@@ -1736,6 +1961,103 @@ $GpuBenchScript = {
 
       <!-- VAGT -->
 
+
+      <!-- BENCHMARK -->
+      <Grid Name="PageBench" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="0,0,8,0">
+          <TextBlock Style="{StaticResource H1}" Text="Benchmark"/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik. Ca. 3 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
+          <Border Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="OPTICON-SCORE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BenchScore" Text="–" FontSize="48" FontWeight="Bold" Foreground="#A78BFA"/>
+                <TextBlock Name="BenchScoreSub" Text="ikke testet endnu" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="16,0,0,0">
+                <TextBlock Name="BenchHw" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                <StackPanel Orientation="Horizontal">
+                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 3 min)" Style="{StaticResource Primary}" Padding="18,11"/>
+                </StackPanel>
+                <ProgressBar Name="BenchBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="BenchStatus" Style="{StaticResource Sub}" FontSize="12" Margin="0,6,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <UniformGrid Columns="3" Margin="0,0,-10,4">
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="CPU · ÉN KERNE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BCpu1" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BCpu1Sub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="CPU · ALLE KERNER" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BCpuN" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BCpuNSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="HOLDER FARTEN (VARM)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BSus" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BSusSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="HUKOMMELSE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BRam" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BRamSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="DISK" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BDisk" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BDiskSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="GRAFIK (1080p-SCENE)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BGpu" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BGpuSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+          </UniformGrid>
+          <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                  <Button Name="BtnBenchGb" Content="🔎  Se andre i Geekbench"/>
+                  <Button Name="BtnBenchShare" Content="🌍  Del mit resultat" Style="{StaticResource Primary}" Margin="0" IsEnabled="False"/>
+                </StackPanel>
+                <TextBlock Text="🌍  Andre med samme hardware" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock Name="BenchCmpText" Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Kør testen for at se, hvordan din pc klarer sig mod andre med samme processor og grafikkort."/>
+              <DataGrid Name="GridBenchCmp" IsReadOnly="True" Margin="0,10,0,0" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="TEST" Binding="{Binding Navn}" Width="1.6*"/>
+                  <DataGridTextColumn Header="DIG" Binding="{Binding Info}" Width="1*"/>
+                  <DataGridTextColumn Header="ANDRE (MEDIAN)" Binding="{Binding Note}" Width="1.2*"/>
+                  <DataGridTextColumn Header="FORSKEL" Binding="{Binding Status}" Width="1*"/>
+                  <DataGridTextColumn Header="SAMMENLIGNET MED" Binding="{Binding Gruppe}" Width="2.2*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="📈  Din historik" FontSize="16" FontWeight="SemiBold"/>
+              <TextBlock Name="BenchHistEmpty" Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Ingen tests endnu."/>
+              <DataGrid Name="GridBenchHist" IsReadOnly="True" Margin="0,10,0,0" MaxHeight="260" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="DATO" Binding="{Binding Navn}" Width="1.2*"/>
+                  <DataGridTextColumn Header="SCORE" Binding="{Binding Info}" Width="0.8*"/>
+                  <DataGridTextColumn Header="CPU 1 / ALLE" Binding="{Binding Note}" Width="1.3*"/>
+                  <DataGridTextColumn Header="GRAFIK" Binding="{Binding Status}" Width="0.8*"/>
+                  <DataGridTextColumn Header="DISK LÆS" Binding="{Binding Gruppe}" Width="0.9*"/>
+                  <DataGridTextColumn Header="PC" Binding="{Binding Sti}" Width="2*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+        </ScrollViewer>
+      </Grid>
       <!-- TILSTANDE -->
       <Grid Name="PageModes" Visibility="Collapsed">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -2622,7 +2944,7 @@ function With-RestorePoint($why, $ctx, [scriptblock]$then) {
 # =====================================================================
 #  Navigation
 # =====================================================================
-$pages = @{ NavModes = 'PageModes'; NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
+$pages = @{ NavBench = 'PageBench'; NavModes = 'PageModes'; NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
 foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
@@ -2630,6 +2952,7 @@ foreach ($nav in $pages.Keys) {
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
     if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {}; try { Show-VendorCard } catch { Log "Producent-fejl: $_" } }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
+    if ($sender.Name -eq 'NavBench') { try { Load-Bench } catch { Log "Benchmark-fejl: $_" } }
     if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks' -and -not $script:TweaksLoaded) { try { Show-Tweaks } catch { Log "Tweak-fejl: $_" } }
     if ($sender.Name -eq 'NavTweaks') { try { Load-Gpu } catch { Log "GPU-fejl: $_" } } else { $gpuTimer.Stop() }
@@ -4043,7 +4366,7 @@ function Smi-Q($fields) {
 }
 function Pct-Str($a, $b) { if (-not $a -or $null -eq $b) { return '' }; $d = [math]::Round(($b - $a) / $a * 100); return " ($(if ($d -gt 0) { '+' })$d %)" }
 function Start-GpuBench($mode) {
-  if (-not (Confirm-ModeFree 'GPU-testen')) { return }
+  if ($mode -ne 'bench' -and -not (Confirm-ModeFree 'GPU-testen')) { return }
   if ($mode -eq 'auto' -and -not (Get-Smi)) {
     # AMD/Intel: afprøv Windows' tre strømtilstande i stedet for strømgrænser
     $cur = Get-PowerMode
@@ -4061,6 +4384,8 @@ function Start-GpuBench($mode) {
     if ((Msg "Testen tager ca. 4 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  Opticon prøver strømgrænserne 100, 90, 80 og 70 %.`n•  Rør ikke musen, og luk spil og tunge programmer først.`n•  Tryk Esc for at stoppe.`n`nDin oprindelige indstilling gendannes bagefter. Hvis du bruger MSI Afterburner, så luk den først.`n`nStart testen?" 'Find det bedste punkt' 'YesNo' 'Question') -ne 'Yes') { return }
     $arg = @{ Html = $GpuBenchHtml; Steps = $steps; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
+  } elseif ($mode -eq 'bench') {
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null); Res = @('1920x1080'); Work = 0; StepSec = 25; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile }
   } elseif ($mode -in 'ocbase', 'occheck') {
     if ($mode -eq 'occheck' -and -not $script:OcBase) { Msg 'Mål udgangspunktet først (trin 1), før du overclocker.' 'OC-tjek' | Out-Null; return }
     if ($mode -eq 'occheck') {
@@ -4099,6 +4424,7 @@ function Start-GpuBench($mode) {
     if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
     $steps = if ($res) { @($res.Steps | Where-Object { $_.Fps }) } else { @() }
     if ($c.GpuMode -eq 'occheck' -and $res -and $res.Lost) { Show-OcCheck $res $steps; return }   # et nedbrud ER resultatet
+    if ($c.GpuMode -eq 'bench') { Finish-Bench $(if ($steps.Count) { $steps[0] } else { $null }) $err; return }
     if ($err -or -not $steps.Count) {
       $msg = if ($err) { $err } elseif ($res -and $res.Aborted) { 'Testen blev stoppet.' } else { 'Testscenen gav ingen målinger.' }
       if ($c.GpuMode -eq 'auto') { $ui.GpuAutoInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -eq 'res') { $ui.GpuResInfo.Text = "⚠ $msg" } elseif ($c.GpuMode -like 'oc*') { $ui.GpuOcInfo.Text = "⚠ $msg" } else { $ui.GpuResult.Text = "⚠ $msg" }
@@ -4132,6 +4458,7 @@ function Start-GpuBench($mode) {
       if (-not $j) { return }
       $p = [double]$j.S.Progress
       if ($j.Ctx.GpuMode -eq 'auto') { if ($p -ge 0) { $ui.GpuAutoBar.Value = $p }; if ($j.S.Status) { $ui.GpuAutoInfo.Text = $j.S.Status } }
+      elseif ($j.Ctx.GpuMode -eq 'bench') { if ($p -ge 0) { $ui.BenchBar.Value = 75 + $p / 4 }; $ui.BenchStatus.Text = "Grafik · testscenen i 1080p$(Bench-Remain (75 + [math]::Max(0, $p) / 4))" }
       elseif ($j.Ctx.GpuMode -like 'oc*') { if ($p -ge 0) { $ui.GpuOcBar.Value = $p }; if ($j.S.Status) { $ui.GpuOcInfo.Text = $j.S.Status } }
       elseif ($j.Ctx.GpuMode -eq 'res') { if ($p -ge 0) { $ui.GpuResBar.Value = $p }; if ($j.S.Status) { $ui.GpuResInfo.Text = $j.S.Status } }
       else { if ($p -ge 0) { $ui.GpuMeasureBar.Value = $p }; if ($j.S.Status) { $ui.GpuMeasureInfo.Text = $j.S.Status } }
@@ -4869,6 +5196,167 @@ function Show-VendorCard {
 }
 $ui.BtnVendorOpen.Add_Click({ Open-VendorTool })
 
+
+# =====================================================================
+#  BENCHMARK: den store test, historik, sammenligning og deling
+# =====================================================================
+$BenchTestVersion = 1
+$BenchHistFile = Join-Path $OutDir 'benchmark-historik.json'
+$BenchRef = @{ Cpu1 = 1000; CpuN = 8000; Ram = 15; DiskR = 2000; Gpu = 60 }   # faste pejlemærker: 1000 point i alt
+function Bench-Total($r) {
+  $parts = @(); foreach ($k in 'Cpu1', 'CpuN', 'Ram', 'DiskR', 'Gpu') { if ($r.$k -and [double]$r.$k -gt 0) { $parts += [math]::Log([double]$r.$k / $BenchRef[$k]) } }
+  if (-not $parts.Count) { return 0 }
+  return [int][math]::Round(1000 * [math]::Exp(($parts | Measure-Object -Average).Average))
+}
+function Norm-Hw($n) { (([string]$n).ToLower() -replace '\((r|tm)\)', '' -replace '\b(processor|cpu|with radeon graphics|w/ radeon.*|graphics|gpu)\b', '' -replace '[^a-z0-9]+', ' ').Trim() }
+function Bench-Remain($p) {
+  if (-not $script:BenchStart -or $p -lt 4) { return '' }
+  $el = ((Get-Date) - $script:BenchStart).TotalSeconds; $rem = [int]($el * (100 - $p) / $p)
+  return " · ⏱ ca. $([math]::Floor($rem / 60)):$('{0:00}' -f ($rem % 60)) tilbage"
+}
+function Get-RepoInfo {
+  if ($UpdateUrl -match 'raw\.githubusercontent\.com/([^/]+)/([^/]+)/') { return @{ Owner = $matches[1]; Repo = $matches[2]; Results = "https://raw.githubusercontent.com/$($matches[1])/$($matches[2])/results/results.json" } }
+  return $null
+}
+function Get-BenchHist { if (Test-Path $BenchHistFile) { try { return @(Get-Content $BenchHistFile -Raw -Encoding UTF8 | ConvertFrom-Json | ForEach-Object { $_ }) } catch {} }; return @() }
+function Load-Bench {
+  $h = @(Get-BenchHist)
+  if ($h.Count -and -not $script:BenchLast) { $script:BenchLast = $h[-1]; Show-Bench $script:BenchLast; Load-BenchCompare }
+  Show-BenchHist
+}
+function Show-BenchHist {
+  $h = @(Get-BenchHist)
+  [array]::Reverse($h)
+  $rows = @(foreach ($x in $h) { $r = New-Object PcTjek.Row; $r.Navn = ([datetime]$x.Date).ToString('dd-MM-yyyy HH:mm'); $r.Info = [string]$x.Score; $r.Note = "$($x.Cpu1) / $($x.CpuN)"; $r.Status = $(if ($x.Gpu) { "$($x.Gpu) fps" } else { '–' }); $r.Gruppe = "$($x.DiskR) MB/s"; $r.Sti = "$($x.Hw.Cpu)$(if ($x.Hw.Laptop) { ' · bærbar' })$(if ($x.Hw.OnBattery) { ' · på batteri' })"; $r })
+  $ui.GridBenchHist.ItemsSource = $rows
+  $ui.GridBenchHist.Visibility = $(if ($rows.Count) { 'Visible' } else { 'Collapsed' }); $ui.BenchHistEmpty.Visibility = $(if ($rows.Count) { 'Collapsed' } else { 'Visible' })
+}
+function Show-Bench($r) {
+  $hw = $r.Hw
+  $ui.BenchScore.Text = [string]$r.Score
+  $ui.BenchScoreSub.Text = "Testet $(([datetime]$r.Date).ToString('dd-MM HH:mm')). 1000 er et fast pejlemærke. Højere er bedre."
+  $ui.BenchHw.Text = "$($hw.Cpu) ($($hw.Cores) kerner / $($hw.Threads) tråde) · $($hw.Gpu) · $($hw.RamGB) GB RAM$(if ($hw.RamMHz) { " ($($hw.RamMHz) MHz)" }) · $($hw.Disk) · $(if ($hw.Laptop) { 'bærbar' } else { 'stationær' })$(if ($hw.OnBattery) { ' · ⚠ testet på batteri' })"
+  $ui.BCpu1.Text = [string]$r.Cpu1; $ui.BCpu1Sub.Text = 'point · vigtigt for spil og hvor kvik pc''en føles'
+  $ui.BCpuN.Text = [string]$r.CpuN; $ui.BCpuNSub.Text = "point · vigtigt for fx video og udpakning"
+  $ui.BSus.Text = "$($r.Sustain) %"
+  $ui.BSusSub.Text = $(if ($r.Sustain -ge 95) { 'Holder farten fint, når den bliver varm' } elseif ($r.Sustain -ge 85) { 'Taber lidt fart, når den bliver varm' } else { 'Taber mærkbart fart, når den bliver varm. Tjek køling og støv.' })
+  $ui.BRam.Text = "$($r.Ram) GB/s"; $ui.BRamSub.Text = 'kopierer data i hukommelsen'
+  $ui.BDisk.Text = "$($r.DiskR) MB/s"; $ui.BDiskSub.Text = "læs · skriv $($r.DiskW) MB/s · $($r.Iops) små læsninger/sek"
+  $ui.BGpu.Text = $(if ($r.Gpu) { "$($r.Gpu) fps" } else { '–' }); $ui.BGpuSub.Text = $(if ($r.Gpu) { 'Opticons testscene i 1080p' } else { 'grafikdelen blev ikke målt' })
+  $ui.BtnBenchShare.IsEnabled = $true
+}
+function Start-Bench {
+  if ($script:GpuMeasuring) { Msg 'En anden GPU-test kører allerede.' 'Benchmark' | Out-Null; return }
+  if (-not (Confirm-ModeFree 'Den store test')) { return }
+  $batt = $null; try { $batt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1 } catch {}
+  $bTxt = if ($batt -and -not $batt.PowerOnline) { "`n`n🔌 Sæt laderen i først. På batteri kører de fleste bærbare langsommere, og så kan tallene ikke sammenlignes med andre." } else { '' }
+  if ((Msg "Den store test tager ca. 3 minutter:`n`n•  Processor: én kerne, alle kerner og om den holder farten, når den bliver varm (1 min. fuld belastning)`n•  Hukommelse og disk (en testfil på 512 MB, som slettes bagefter)`n•  Grafik: testscenen i fuld skærm til sidst`n`nLuk spil og tunge programmer, og rør ikke pc'en imens. Blæserne kan godt larme lidt.$bTxt`n`nStart?" 'Den store test' 'YesNo' 'Question') -ne 'Yes') { return }
+  $script:BenchStart = Get-Date
+  $ui.BtnBench.IsEnabled = $false; $ui.BenchBar.Visibility = 'Visible'; $ui.BenchBar.Value = 0; $ui.BenchStatus.Text = 'Starter...'
+  Log 'Benchmark startet'
+  Invoke-Bg $BenchScript $null {
+    param($res, $err, $c)
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [Collections.IDictionary] })[-1] }
+    if ($err -or -not $res) { $ui.BtnBench.IsEnabled = $true; $ui.BenchBar.Visibility = 'Collapsed'; $ui.BenchStatus.Text = "⚠ Testen fejlede: $err"; Log "Benchmark fejl: $err"; return }
+    $script:BenchPart = $res
+    $ui.BenchStatus.Text = 'Grafik · testscenen åbner i fuld skærm om et øjeblik...'
+    Start-GpuBench 'bench'
+  } @{ Bench = $true }
+  $benchTimer.Start()
+}
+$benchTimer = New-Object Windows.Threading.DispatcherTimer
+$benchTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+$benchTimer.Add_Tick({
+  $j = $script:Jobs | Where-Object { $_.Ctx -is [hashtable] -and $_.Ctx.Bench } | Select-Object -First 1
+  if (-not $j) { if (-not $script:GpuMeasuring) { $benchTimer.Stop() }; return }
+  $p = [double]$j.S.Progress
+  if ($p -ge 0) { $ui.BenchBar.Value = $p * 0.75 }
+  if ($j.S.Status) { $ui.BenchStatus.Text = "$($j.S.Status)$(Bench-Remain ([math]::Max(0, $p) * 0.75))" }
+})
+function Finish-Bench($gpuStep, $gpuErr) {
+  $b = $script:BenchPart
+  $ui.BtnBench.IsEnabled = $true; $ui.BenchBar.Visibility = 'Collapsed'
+  try { $win.Activate() | Out-Null } catch {}
+  if (-not $b) { return }
+  $r = [ordered]@{ V = $BenchTestVersion; Date = (Get-Date).ToString('s'); App = $AppVersion; Hw = $b.Hw
+                   Cpu1 = $b.Cpu1; CpuN = $b.CpuN; Sustain = $b.Sustain; Ram = $b.Ram; DiskR = $b.DiskR; DiskW = $b.DiskW; Iops = $b.Iops
+                   Gpu = $(if ($gpuStep -and $gpuStep.Fps) { [math]::Round([double]$gpuStep.Fps) } else { $null }); GpuLow = $(if ($gpuStep -and $gpuStep.P1) { [math]::Round([double]$gpuStep.P1) } else { $null }); Score = 0 }
+  $r.Score = Bench-Total $r
+  $h = @(Get-BenchHist) + @([pscustomobject]$r)
+  try { [IO.File]::WriteAllText($BenchHistFile, (ConvertTo-Json -InputObject @($h | Select-Object -Last 50) -Depth 5), (New-Object Text.UTF8Encoding $false)) } catch {}
+  $script:BenchLast = ([pscustomobject]$r)
+  Show-Bench $script:BenchLast; Show-BenchHist
+  $prev = if ($h.Count -ge 2) { $h[-2] } else { $null }
+  $ui.BenchStatus.Text = "✓ Færdig: $($r.Score) point$(if ($prev -and $prev.Score) { " (sidst: $($prev.Score), $('{0:+0;-0;0}' -f (100 * ($r.Score - $prev.Score) / [math]::Max(1, $prev.Score))) %)" })$(if ($gpuErr) { " · grafikdelen fejlede: $gpuErr" })"
+  try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
+  Log "Benchmark: $($r.Score) point"
+  Load-BenchCompare
+}
+function Load-BenchCompare {
+  $ri = Get-RepoInfo; $me = $script:BenchLast
+  if (-not $ri -or -not $me) { return }
+  $ui.BenchCmpText.Text = 'Henter resultater fra andre...'
+  Invoke-Bg { param($sync, $arg) [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { return @(Invoke-RestMethod -Uri ("{0}?t={1}" -f $arg.Url, [DateTime]::UtcNow.Ticks) -UseBasicParsing -TimeoutSec 15) } catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return @() }; throw } } @{ Url = $ri.Results } {
+    param($res, $err, $c)
+    $me = $script:BenchLast
+    $all = @($res | ForEach-Object { $_ } | Where-Object { $_ -and $_.v -eq $BenchTestVersion -and -not $_.battery })
+    $myCpu = Norm-Hw $me.Hw.Cpu; $myGpu = Norm-Hw $me.Hw.Gpu; $myLap = [bool]$me.Hw.Laptop
+    $sameCpu = @($all | Where-Object { (Norm-Hw $_.cpu) -eq $myCpu -and [bool]$_.laptop -eq $myLap })
+    $sameGpu = @($all | Where-Object { (Norm-Hw $_.gpu) -eq $myGpu -and [bool]$_.laptop -eq $myLap })
+    $med = { param($list, $prop) $x = @($list | ForEach-Object { $_.scores.$prop } | Where-Object { $_ -and [double]$_ -gt 0 } | ForEach-Object { [double]$_ } | Sort-Object); if (-not $x.Count) { return $null }; if ($x.Count % 2) { $x[[int][math]::Floor($x.Count / 2)] } else { ($x[$x.Count / 2 - 1] + $x[$x.Count / 2]) / 2 } }
+    $kind = if ($myLap) { 'bærbare' } else { 'stationære' }
+    $defs = @(
+      @{ N = 'CPU · én kerne'; Mine = $me.Cpu1; P = 'cpu1'; L = $sameCpu; W = "$($sameCpu.Count) $kind med $($me.Hw.Cpu)"; U = '' }
+      @{ N = 'CPU · alle kerner'; Mine = $me.CpuN; P = 'cpuN'; L = $sameCpu; W = "$($sameCpu.Count) $kind med $($me.Hw.Cpu)"; U = '' }
+      @{ N = 'Holder farten'; Mine = $me.Sustain; P = 'sustain'; L = $sameCpu; W = "$($sameCpu.Count) $kind med $($me.Hw.Cpu)"; U = ' %' }
+      @{ N = 'Hukommelse'; Mine = $me.Ram; P = 'ram'; L = $sameCpu; W = "$($sameCpu.Count) $kind med $($me.Hw.Cpu)"; U = ' GB/s' }
+      @{ N = 'Grafik (1080p)'; Mine = $me.Gpu; P = 'gpu'; L = $sameGpu; W = "$($sameGpu.Count) $kind med $($me.Hw.Gpu)"; U = ' fps' }
+    )
+    $rows = @(); $cpuDiff = $null; $gpuDiff = $null
+    foreach ($d in $defs) {
+      $m = & $med $d.L $d.P
+      if ($null -eq $m -or -not $d.Mine) { continue }
+      $diff = 100 * ([double]$d.Mine - $m) / [math]::Max(0.001, $m)
+      if ($d.P -eq 'cpuN') { $cpuDiff = $diff }; if ($d.P -eq 'gpu') { $gpuDiff = $diff }
+      $r = New-Object PcTjek.Row; $r.Navn = $d.N; $r.Info = "$($d.Mine)$($d.U)"; $r.Note = "$([math]::Round($m, 1))$($d.U)"
+      $r.Status = "$('{0:+0;-0;0}' -f $diff) %$(if ($diff -le -10) { ' ⚠' } elseif ($diff -ge 5) { ' 👍' })"; $r.Gruppe = $d.W
+      $rows += $r
+    }
+    $ui.GridBenchCmp.ItemsSource = $rows; $ui.GridBenchCmp.Visibility = $(if ($rows.Count) { 'Visible' } else { 'Collapsed' })
+    $txt = @()
+    if ($err) { $txt += "Kunne ikke hente andres resultater lige nu." }
+    elseif (-not $rows.Count) { $txt += "Ingen har delt resultater med din processor eller dit grafikkort endnu (Opticon har $($all.Count) resultater i alt). Del dit, så er du den første. Indtil da kan du se, hvad tusindvis af andre med samme hardware får i Geekbench." }
+    else {
+      if ($null -ne $cpuDiff) { $txt += $(if ($cpuDiff -le -10) { "⚠ Din processor er $([math]::Round(-$cpuDiff)) % langsommere end andre med samme model. Tjek strømtilstand, køling og baggrundsprogrammer." } elseif ($cpuDiff -ge 5) { "👍 Din processor er $([math]::Round($cpuDiff)) % hurtigere end medianen for samme model." } else { "✓ Din processor yder som forventet for modellen." }) }
+      if ($null -ne $gpuDiff) { $txt += $(if ($gpuDiff -le -10) { "⚠ Dit grafikkort er $([math]::Round(-$gpuDiff)) % langsommere end andre med samme kort. Tjek driver, strømtilstand og temperatur." } elseif ($gpuDiff -ge 5) { "👍 Dit grafikkort er $([math]::Round($gpuDiff)) % hurtigere end medianen for samme kort." } else { "✓ Dit grafikkort yder som forventet for modellen." }) }
+      $txt += "Kun resultater fra samme testversion og samme type pc ($kind, tilsluttet strøm) tæller med."
+    }
+    $ui.BenchCmpText.Text = $txt -join "`n"
+  } $null
+}
+$ui.BtnBench.Add_Click({ Start-Bench })
+$ui.BtnBenchGb.Add_Click({
+  $me = $script:BenchLast
+  $cpu = if ($me) { [string]$me.Hw.Cpu } else { ((Get-CimInstance Win32_Processor | Select-Object -First 1).Name -replace '\((R|TM)\)', '' -replace '\s+CPU\s*@.*$', '').Trim() }
+  if ((Msg "Geekbench Browser har millioner af resultater. Søg på din processor ($cpu), og se, hvad andre med samme model typisk får.`n`nBemærk: Geekbench er en anden test end Opticons, så tallene kan ikke sammenlignes direkte med dine Opticon-tal. Vil du sammenligne direkte, kan du selv køre den gratis Geekbench og se din plads blandt de andre.`n`nÅbn Geekbench Browser?" 'Andre i Geekbench' 'YesNo' 'Information') -eq 'Yes') {
+    Start-Process ('https://browser.geekbench.com/search?q=' + [Uri]::EscapeDataString($cpu))
+  }
+})
+$ui.BtnBenchShare.Add_Click({
+  $me = $script:BenchLast; $ri = Get-RepoInfo
+  if (-not $me -or -not $ri) { return }
+  if ($me.Hw.OnBattery) { Msg "Dette resultat er målt på batteri og kan ikke sammenlignes retfærdigt. Sæt laderen i, kør testen igen, og del det." 'Del resultat' 'OK' 'Warning' | Out-Null; return }
+  $a = Msg "Dit resultat deles offentligt i Opticons GitHub-projekt, så andre med samme hardware kan sammenligne.`n`nDet indeholder kun: processor, grafikkort, RAM, diskmodel, bærbar/stationær og testtallene. Ingen navne, filer eller andet.`n`nGitHub åbner med et færdigt opslag. Du skal være logget ind og trykke 'Create' / 'Submit new issue'. Opslaget vises under din GitHub-konto. Resultatet kommer med i Opticon få minutter efter.`n`nFortsæt?" 'Del mit resultat' 'YesNo' 'Question'
+  if ($a -ne 'Yes') { return }
+  $data = [ordered]@{ v = $BenchTestVersion; app = $AppVersion; cpu = $me.Hw.Cpu; gpu = $me.Hw.Gpu; cores = $me.Hw.Cores; threads = $me.Hw.Threads; ramGB = $me.Hw.RamGB; ramMHz = $me.Hw.RamMHz; disk = $me.Hw.Disk; laptop = [bool]$me.Hw.Laptop; battery = [bool]$me.Hw.OnBattery
+                      scores = [ordered]@{ cpu1 = $me.Cpu1; cpuN = $me.CpuN; sustain = $me.Sustain; ram = $me.Ram; diskR = $me.DiskR; diskW = $me.DiskW; iops = $me.Iops; gpu = $me.Gpu; total = $me.Score } }
+  $json = $data | ConvertTo-Json -Depth 4 -Compress
+  $title = "[Opticon-resultat] $($me.Hw.Cpu) / $($me.Hw.Gpu)"
+  $body = "Opticon-resultat. Det bliver tilføjet automatisk, og opslaget lukkes af sig selv.`n`n" + '```json' + "`n$json`n" + '```'
+  Start-Process ("https://github.com/$($ri.Owner)/$($ri.Repo)/issues/new?title=" + [Uri]::EscapeDataString($title) + '&body=' + [Uri]::EscapeDataString($body))
+  Log 'Benchmark-resultat sendt til deling'
+})
+
 # =====================================================================
 #  Eksport
 # =====================================================================
@@ -4937,9 +5425,36 @@ $ui.BtnUpdateApp.Add_Click({
     if ($err) { $ui.BtnUpdateApp.IsEnabled = $true; Log "Opdatering fejlede: $err"; Msg "Opdateringen blev ikke installeret:`n`n$err" 'Opdatering' 'OK' 'Error' | Out-Null; return }
     Log "Opdateret til $($c.Version)"
     Msg "Opticon er opdateret til $($c.Version). Appen genstarter nu." 'Opdatering' | Out-Null
-    # Genstart: en lille hjælper venter, til dette vindue er lukket, og starter så den nye version (allerede med admin-rettigheder)
-    $app = Join-Path $PSScriptRoot 'PC-Tjek-App.ps1'
-    $cmd = "Wait-Process -Id $PID -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; Start-Process '$env:SystemRoot\System32\conhost.exe' -ArgumentList '--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""$app""'"
+    # Genstart med sikkerhedsnet: en lille hjælper (egen proces) venter, til dette vindue er lukket, og starter den nye version.
+    # Når den nye version ikke når frem til vinduet ('UI klar' i loggen) inden for 45 sek., sættes den forrige version tilbage og startes.
+    $bk = Join-Path $PSScriptRoot ("backup-v" + $AppVersion)
+    $tpl = @'
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id __PID__ -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500
+$log = '__LOG__'; $dest = '__DEST__'; $bk = '__BK__'; $ver = '__NEW__'; $old = '__OLD__'
+function Go {
+  try { Start-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop }
+  catch {
+    $f = Join-Path $dest 'PC-Tjek-Start.ps1'; if (-not (Test-Path $f)) { $f = Join-Path $dest 'PC-Tjek-App.ps1' }
+    Start-Process "$env:SystemRoot\System32\conhost.exe" -ArgumentList ('--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "' + $f + '"')
+  }
+}
+$t0 = (Get-Date).AddSeconds(-2); Go
+$ok = $false
+for ($i = 0; $i -lt 45 -and -not $ok; $i++) {
+  Start-Sleep -Seconds 1
+  try { $ok = [bool](Get-Content -LiteralPath $log -Tail 60 -Encoding UTF8 | Where-Object { $_ -like '*UI klar*' -and $_.Length -ge 19 -and [datetime]$_.Substring(0, 19) -ge $t0 }) } catch {}
+}
+if (-not $ok -and (Test-Path -LiteralPath $bk)) {
+  Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*PC-Tjek-App.ps1*' -or $_.CommandLine -like '*PC-Tjek-Start.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  Start-Sleep -Milliseconds 800
+  Get-ChildItem -LiteralPath $bk -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dest $_.Name) -Force }
+  $msg = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '  Version ' + $ver + ' startede ikke. Den forrige version (' + $old + ') er sat tilbage automatisk.'
+  [IO.File]::AppendAllText($log, $msg + "`r`n", [Text.Encoding]::UTF8)
+  Go
+}
+'@
+    $cmd = $tpl.Replace('__PID__', [string]$PID).Replace('__LOG__', $LogFile.Replace("'", "''")).Replace('__DEST__', $PSScriptRoot.Replace("'", "''")).Replace('__BK__', $bk.Replace("'", "''")).Replace('__NEW__', [string]$c.Version).Replace('__OLD__', $AppVersion)
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $enc"
     $win.Close()
@@ -4969,6 +5484,22 @@ function Refresh-VagtVersion {
   } catch {}
 }
 
+
+# Ikonet skal starte den lille starter (som kan reparere appen), ikke appen direkte
+function Ensure-Launcher {
+  $launcher = Join-Path $PSScriptRoot 'PC-Tjek-Start.ps1'
+  if (-not (Test-Path $launcher) -or $PSScriptRoot -notlike "$env:ProgramFiles\*") { return }
+  try {
+    $t = Get-ScheduledTask -TaskName 'PC-Tjek' -ErrorAction Stop
+    $a = @($t.Actions)[0]
+    if ($a.Arguments -like '*PC-Tjek-Start.ps1*') { return }
+    $sys = Join-Path $env:SystemRoot 'System32'
+    $args2 = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$launcher`""
+    $na = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $args2 -WorkingDirectory $PSScriptRoot
+    Set-ScheduledTask -TaskName 'PC-Tjek' -TaskPath '\' -Action $na -ErrorAction Stop | Out-Null
+    Log 'Ikonet starter nu via starteren (selvreparation)'
+  } catch { Log "Kunne ikke sætte starteren op: $_" }
+}
 # Navneskift: omdøb gamle genveje til det nye navn (én gang)
 function Update-Shortcuts {
   $old = 'PC' + '-Tjek'   # det gamle navn (skrevet sådan, så det ikke bliver omdøbt)
@@ -4990,6 +5521,7 @@ function Update-Shortcuts {
 $win.Add_ContentRendered({
   Load-SysInfo; Refresh-VagtVersion; Check-AppUpdate $false
   Update-Shortcuts
+  Ensure-Launcher
   try { $r = Repair-Modes; if ($r) { Log "Tilstand ryddet op ved start: $($r.Mode) ($($r.Reason))" } } catch { Log "Tilstand-oprydning fejlede: $_" }
   try { Update-ModeUi } catch {}; $modeTimer.Start()
 })

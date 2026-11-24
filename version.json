@@ -1,7 +1,11 @@
 {
-  "version": "2.29",
+  "version": "2.31",
   "date": "2026-11-24",
   "notes": [
+    "Ny: 🏁 Benchmark – én stor test af CPU, hukommelse, disk og grafik med Opticon-score og historik",
+    "Sammenlign med andre med samme processor og grafikkort (bærbar og stationær hver for sig), og del dit resultat",
+    "Selvreparation: ikonet starter via en lille starter, der sætter den forrige version tilbage, hvis appen har en skrivefejl",
+    "Automatisk tilbagerulning: starter en ny version ikke, sættes den forrige tilbage",
     "Rettet: 2.28 kunne ikke starte (et forkert anførselstegn)",
     "Sikring: opdateringer bliver tjekket for skrivefejl, før de installeres",
     "GPU-funktionerne virker nu også på AMD og Intel (fx Radeon 860M)",
@@ -33,11 +37,15 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "5F24C08AFBE96FACFCD81BFC3E50256F3B91B898EDD7C89631E63D2058015330"
+      "sha256": "856A18B29A04C583E31F620FF9CDF4FE03F76DAC5806B48D6584B93A68882797"
+    },
+    {
+      "name": "PC-Tjek-Start.ps1",
+      "sha256": "878AC1DE6564DA586D9161265AE77CD892DB193F6A55036C018E3D1CFE53FE21"
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "F21CE90330CD7A3B4BC28A757C2810ED43FAACA928AF8826D293AFBA0E33B7C8"
+      "sha256": "3539BFFA4320B545E272E67104B0F6342225BC2CC857654AAC6CAF60BD53CDD2"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

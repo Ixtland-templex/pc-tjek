@@ -24,7 +24,7 @@ try {
 
   Write-Host "  • Kopierer filer til $dest"
   New-Item -ItemType Directory -Force $dest | Out-Null
-  foreach ($f in 'PC-Tjek-App.ps1', 'PC-Tjek-Vagt.ps1', 'PC-Tjek.ico', 'Uninstall-PCTjek.ps1') {
+  foreach ($f in 'PC-Tjek-App.ps1', 'PC-Tjek-Start.ps1', 'PC-Tjek-Vagt.ps1', 'PC-Tjek.ico', 'Uninstall-PCTjek.ps1') {
     if (-not (Test-Path (Join-Path $src $f))) { throw "Mangler filen $f ved siden af installeren." }
     Copy-Item -Force (Join-Path $src $f) $dest
     Unblock-File (Join-Path $dest $f) -ErrorAction SilentlyContinue
@@ -37,7 +37,7 @@ try {
     Start-ScheduledTask -TaskName 'PC-Tjek Vagt' -ErrorAction SilentlyContinue
   }
   Write-Host "  • Opretter den planlagte opgave 'PC-Tjek' (kører som $user, kun når du starter den)"
-  $appArgs = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$dest\PC-Tjek-App.ps1`""
+  $appArgs = "--headless `"$sys\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$dest\PC-Tjek-Start.ps1`""
   $action    = New-ScheduledTaskAction -Execute "$sys\conhost.exe" -Argument $appArgs -WorkingDirectory $dest
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
   $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable:$false
