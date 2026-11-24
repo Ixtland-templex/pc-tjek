@@ -993,20 +993,27 @@ $GpuBenchScript = {
   $pmType = 'PcTjek.PowerMode' -as [type]
   if (-not $pmType) { if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }; $pmType = 'PcTjek.PowerModeB' -as [type] }
   function Get-PM { try { $g = [guid]::Empty; if ($pmType::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-  # Skift af strømtilstand sker i en separat tråd med tidsgrænse, så et Windows-kald, der hænger, ikke låser testen
+  function JLog($m) { if ($arg.LogFile) { try { [IO.File]::AppendAllText([string]$arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  GPU-test: {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} } }
+  # Skift af strømtilstand sker via Windows' eget powercfg i en separat proces: hænger eller går det ned, rammer det ikke Opticon
   function Set-PM($g) {
-    Beat "strømtilstand $g"
+    $want = ([guid]$g).ToString()
+    Beat "strømtilstand $($modeNames[$want])"; JLog "skifter til $($modeNames[$want])"
     $ok = $false
     try {
-      $prs = [runspacefactory]::CreateRunspace(); $prs.Open()
-      $pp = [powershell]::Create(); $pp.Runspace = $prs
-      [void]$pp.AddScript({ param($t, $g) [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 300; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0) { $x.ToString() } }.ToString()).AddArgument($pmType).AddArgument($g)
-      $ph = $pp.BeginInvoke()
+      $psi = New-Object Diagnostics.ProcessStartInfo "$env:SystemRoot\System32\powercfg.exe", "/overlaysetactive $want"
+      $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+      $pr = [Diagnostics.Process]::Start($psi)
       $end = (Get-Date).AddSeconds(6)
-      while (-not $ph.IsCompleted -and (Get-Date) -lt $end) { Pump; Beat; Start-Sleep -Milliseconds 80 }
-      if ($ph.IsCompleted) { $ok = ([string](@($pp.EndInvoke($ph))[-1]) -eq ([guid]$g).ToString()); try { $pp.Dispose(); $prs.Dispose() } catch {} }
-      else { [void]$script:BDiag.Add("skift af strømtilstand svarede ikke inden 6 sek ($($modeNames[[string]$g]))"); try { [void]$pp.BeginStop($null, $null) } catch {} }
-    } catch { [void]$script:BDiag.Add("strømtilstand: $($_.Exception.Message)") }
+      while (-not $pr.HasExited -and (Get-Date) -lt $end) { Pump; Beat; Start-Sleep -Milliseconds 80 }
+      if (-not $pr.HasExited) { try { $pr.Kill() } catch {}; [void]$script:BDiag.Add("powercfg svarede ikke inden 6 sek") }
+      for ($k = 0; $k -lt 6 -and -not $ok; $k++) { Pump; Start-Sleep -Milliseconds 150; $ok = ((Get-PM) -eq $want) }
+    } catch { [void]$script:BDiag.Add("powercfg: $($_.Exception.Message)") }
+    if (-not $ok) {
+      JLog 'powercfg virkede ikke, prøver direkte kald'
+      try { [void]$pmType::PowerSetActiveOverlayScheme([guid]$g) } catch {}
+      Start-Sleep -Milliseconds 300; $ok = ((Get-PM) -eq $want)
+    }
+    JLog "$($modeNames[$want]): $(if ($ok) { 'bekræftet' } else { 'kunne ikke bekræftes' })"
     Beat 'måler'
     return $ok
   }

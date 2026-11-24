@@ -1877,10 +1877,7 @@ function Stop-HungGpuTest($j, $why) {
     try {
       $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
       if ($g.Overlay) {
-        # Sættes tilbage i en separat tråd: var det netop skiftet af strømtilstand, der hang, må appen ikke også hænge
-        $rrs = [runspacefactory]::CreateRunspace(); $rrs.Open(); $rp = [powershell]::Create(); $rp.Runspace = $rrs
-        [void]$rp.AddScript({ param($t, $g, $f) for ($k = 0; $k -lt 3; $k++) { [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 500; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0 -and $x.ToString() -eq ([guid]$g).ToString()) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; return } } }.ToString()).AddArgument([PcTjek.PowerMode]).AddArgument([string]$g.Overlay).AddArgument($GpuRestoreFile)
-        [void]$rp.BeginInvoke()
+        if (Set-PowerMode $g.Overlay) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue }
         $restored = " Strømtilstanden sættes tilbage til $(PowerMode-Name $g.Overlay)."
       } elseif ($g.Watts) {
         if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue; $restored = ' Strømgrænsen er sat tilbage.' } else { $restored = ' Opticon prøver at sætte strømgrænsen tilbage næste gang, appen starter.' }
@@ -1900,7 +1897,7 @@ function Start-GpuBench($mode) {
     $battTxt = if ($bt -and $bt.PowerOnline) { "`n`n🔌 Tip: Tag laderen ud før testen. Så kan PC-Tjek også måle, hvor mange watt pc'en bruger i hver tilstand. Med laderen i måles kun FPS." } elseif ($bt) { "`n`n🔋 Du kører på batteri, så PC-Tjek måler også, hvor mange watt pc'en bruger." } else { '' }
     if ((Msg "Testen tager ca. 3 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  PC-Tjek prøver Windows' 3 strømtilstande: Bedste energieffektivitet, Balanceret og Bedste ydeevne.`n•  Rør ikke musen, og luk tunge programmer først.`n•  Tryk Esc for at stoppe.$battTxt`n`nDin nuværende tilstand ($(PowerMode-Name $cur)) sættes tilbage bagefter.`n`nStart testen?" 'Find den bedste strømtilstand' 'YesNo' 'Question') -ne 'Yes') { return }
     # Samme robuste måling som Benchmark (fast opløsning, tid pr. billede): den gamle måde kunne gå i stå på nogle pc'er
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Res = @('1920x1080', '1920x1080', '1920x1080'); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Res = @('1920x1080', '1920x1080', '1920x1080'); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); LogFile = $LogFile; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'auto') {
     $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'

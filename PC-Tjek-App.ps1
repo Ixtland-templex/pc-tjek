@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.57'
+$AppVersion = '2.58'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -258,7 +258,22 @@ $PowerModeList = @(
   [pscustomobject]@{ Key = 'perf'; Guid = 'ded574b5-45a0-4f42-8737-46345c09c238'; Name = 'Bedste ydeevne' }
 )
 function Get-PowerMode { try { $g = [guid]::Empty; if ([PcTjek.PowerMode]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-function Set-PowerMode($guid) { try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PowerMode) -eq ([guid]$guid).ToString()) }
+# Skift strømtilstand via Windows' eget powercfg i en separat proces. Går det galt dér, kan det ikke tage Opticon med sig
+# (det direkte Windows-kald fik appen til at gå ned på nogle Snapdragon-pc'er). Det direkte kald bruges kun som reserve.
+function Set-PowerMode($guid) {
+  $want = ([guid]$guid).ToString()
+  try {
+    $psi = New-Object Diagnostics.ProcessStartInfo "$env:SystemRoot\System32\powercfg.exe", "/overlaysetactive $want"
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $pr = [Diagnostics.Process]::Start($psi)
+    if (-not $pr.WaitForExit(6000)) { try { $pr.Kill() } catch {} }
+    for ($k = 0; $k -lt 5; $k++) { Start-Sleep -Milliseconds 200; if ((Get-PowerMode) -eq $want) { return $true } }
+  } catch {}
+  if (Get-Command Log -ErrorAction SilentlyContinue) { Log "Strømtilstand: powercfg virkede ikke, prøver direkte kald" }
+  try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}
+  Start-Sleep -Milliseconds 300
+  return ((Get-PowerMode) -eq $want)
+}
 function PowerMode-Name($guid) { $m = $PowerModeList | Where-Object { $_.Guid -eq ([string]$guid) } | Select-Object -First 1; if ($m) { $m.Name } else { 'ukendt' } }
 
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
@@ -1924,20 +1939,27 @@ $GpuBenchScript = {
   $pmType = 'PcTjek.PowerMode' -as [type]
   if (-not $pmType) { if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }; $pmType = 'PcTjek.PowerModeB' -as [type] }
   function Get-PM { try { $g = [guid]::Empty; if ($pmType::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-  # Skift af strømtilstand sker i en separat tråd med tidsgrænse, så et Windows-kald, der hænger, ikke låser testen
+  function JLog($m) { if ($arg.LogFile) { try { [IO.File]::AppendAllText([string]$arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  GPU-test: {1}`r`n" -f (Get-Date), $m), [Text.Encoding]::UTF8) } catch {} } }
+  # Skift af strømtilstand sker via Windows' eget powercfg i en separat proces: hænger eller går det ned, rammer det ikke Opticon
   function Set-PM($g) {
-    Beat "strømtilstand $g"
+    $want = ([guid]$g).ToString()
+    Beat "strømtilstand $($modeNames[$want])"; JLog "skifter til $($modeNames[$want])"
     $ok = $false
     try {
-      $prs = [runspacefactory]::CreateRunspace(); $prs.Open()
-      $pp = [powershell]::Create(); $pp.Runspace = $prs
-      [void]$pp.AddScript({ param($t, $g) [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 300; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0) { $x.ToString() } }.ToString()).AddArgument($pmType).AddArgument($g)
-      $ph = $pp.BeginInvoke()
+      $psi = New-Object Diagnostics.ProcessStartInfo "$env:SystemRoot\System32\powercfg.exe", "/overlaysetactive $want"
+      $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+      $pr = [Diagnostics.Process]::Start($psi)
       $end = (Get-Date).AddSeconds(6)
-      while (-not $ph.IsCompleted -and (Get-Date) -lt $end) { Pump; Beat; Start-Sleep -Milliseconds 80 }
-      if ($ph.IsCompleted) { $ok = ([string](@($pp.EndInvoke($ph))[-1]) -eq ([guid]$g).ToString()); try { $pp.Dispose(); $prs.Dispose() } catch {} }
-      else { [void]$script:BDiag.Add("skift af strømtilstand svarede ikke inden 6 sek ($($modeNames[[string]$g]))"); try { [void]$pp.BeginStop($null, $null) } catch {} }
-    } catch { [void]$script:BDiag.Add("strømtilstand: $($_.Exception.Message)") }
+      while (-not $pr.HasExited -and (Get-Date) -lt $end) { Pump; Beat; Start-Sleep -Milliseconds 80 }
+      if (-not $pr.HasExited) { try { $pr.Kill() } catch {}; [void]$script:BDiag.Add("powercfg svarede ikke inden 6 sek") }
+      for ($k = 0; $k -lt 6 -and -not $ok; $k++) { Pump; Start-Sleep -Milliseconds 150; $ok = ((Get-PM) -eq $want) }
+    } catch { [void]$script:BDiag.Add("powercfg: $($_.Exception.Message)") }
+    if (-not $ok) {
+      JLog 'powercfg virkede ikke, prøver direkte kald'
+      try { [void]$pmType::PowerSetActiveOverlayScheme([guid]$g) } catch {}
+      Start-Sleep -Milliseconds 300; $ok = ((Get-PM) -eq $want)
+    }
+    JLog "$($modeNames[$want]): $(if ($ok) { 'bekræftet' } else { 'kunne ikke bekræftes' })"
     Beat 'måler'
     return $ok
   }
@@ -5575,10 +5597,7 @@ function Stop-HungGpuTest($j, $why) {
     try {
       $g = Get-Content $GpuRestoreFile -Raw -ErrorAction Stop | ConvertFrom-Json
       if ($g.Overlay) {
-        # Sættes tilbage i en separat tråd: var det netop skiftet af strømtilstand, der hang, må appen ikke også hænge
-        $rrs = [runspacefactory]::CreateRunspace(); $rrs.Open(); $rp = [powershell]::Create(); $rp.Runspace = $rrs
-        [void]$rp.AddScript({ param($t, $g, $f) for ($k = 0; $k -lt 3; $k++) { [void]$t::PowerSetActiveOverlayScheme([guid]$g); Start-Sleep -Milliseconds 500; $x = [guid]::Empty; if ($t::PowerGetEffectiveOverlayScheme([ref]$x) -eq 0 -and $x.ToString() -eq ([guid]$g).ToString()) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; return } } }.ToString()).AddArgument([PcTjek.PowerMode]).AddArgument([string]$g.Overlay).AddArgument($GpuRestoreFile)
-        [void]$rp.BeginInvoke()
+        if (Set-PowerMode $g.Overlay) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue }
         $restored = " Strømtilstanden sættes tilbage til $(PowerMode-Name $g.Overlay)."
       } elseif ($g.Watts) {
         if (Restore-GpuPl $g.Watts) { Remove-Item $GpuRestoreFile -Force -ErrorAction SilentlyContinue; $restored = ' Strømgrænsen er sat tilbage.' } else { $restored = ' Opticon prøver at sætte strømgrænsen tilbage næste gang, appen starter.' }
@@ -5598,7 +5617,7 @@ function Start-GpuBench($mode) {
     $battTxt = if ($bt -and $bt.PowerOnline) { "`n`n🔌 Tip: Tag laderen ud før testen. Så kan Opticon også måle, hvor mange watt pc'en bruger i hver tilstand. Med laderen i måles kun FPS." } elseif ($bt) { "`n`n🔋 Du kører på batteri, så Opticon måler også, hvor mange watt pc'en bruger." } else { '' }
     if ((Msg "Testen tager ca. 3 minutter:`n`n•  En 3D-testscene vises i fuld skærm.`n•  Opticon prøver Windows' 3 strømtilstande: Bedste energieffektivitet, Balanceret og Bedste ydeevne.`n•  Rør ikke musen, og luk tunge programmer først.`n•  Tryk Esc for at stoppe.$battTxt`n`nDin nuværende tilstand ($(PowerMode-Name $cur)) sættes tilbage bagefter.`n`nStart testen?" 'Find den bedste strømtilstand' 'YesNo' 'Question') -ne 'Yes') { return }
     # Samme robuste måling som Benchmark (fast opløsning, tid pr. billede): den gamle måde kunne gå i stå på nogle pc'er
-    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Res = @('1920x1080', '1920x1080', '1920x1080'); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
+    $arg = @{ Html = $GpuBenchHtml; Steps = @($null, $null, $null); Res = @('1920x1080', '1920x1080', '1920x1080'); Modes = @($PowerModeList | ForEach-Object { $_.Guid }); LogFile = $LogFile; Work = 0; StepSec = 40; Dir = (Join-Path $JobRoot ('bench-' + [guid]::NewGuid().ToString('N'))); RestoreFile = $GpuRestoreFile; GpuId = (Get-GpuId) }
     $ui.GridGpuAuto.Visibility = 'Collapsed'; $ui.GpuRecBox.Visibility = 'Collapsed'; $ui.GpuAutoBar.Visibility = 'Visible'; $ui.GpuAutoBar.Value = 0
   } elseif ($mode -eq 'auto') {
     $l = Smi-Q 'power.default_limit,power.min_limit,power.max_limit'

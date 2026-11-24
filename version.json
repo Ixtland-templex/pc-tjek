@@ -1,16 +1,14 @@
 {
-  "version": "2.57",
+  "version": "2.58",
   "date": "2026-11-24",
   "notes": [
-    "Strømtesten kan ikke længere hænge: Opticon holder selv øje med testen og lukker den, hvis den går i stå, og sætter strømtilstanden tilbage",
-    "Målinger af batteri og GPU-belastning og skift af strømtilstand kører nu ved siden af testen, så et langsomt Windows-kald ikke kan låse den",
-    "Testvinduet siger til, hvis Opticon ikke svarer (luk med Alt+F4)",
-    "Rettet: Hardware-accelereret GPU-planlægning vises nu korrekt"
+    "Strømtesten: strømtilstanden skiftes nu med Windows' eget værktøj (powercfg) i en separat proces, så Opticon ikke kan gå ned eller hænge undervejs (set på Snapdragon-pc'er)",
+    "Testen skriver hvert skift af strømtilstand i loggen"
   ],
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "0790AA416E6763A162BC8806F864CEB013B7F607B7C8CCF3B2A697ABF54F7275"
+      "sha256": "22FDEEB31145C975665AB04436E5F310E4EF60A46B726C370DE0876335CD7F6D"
     },
     {
       "name": "PC-Tjek-Start.ps1",
@@ -18,7 +16,7 @@
     },
     {
       "name": "PC-Tjek-Vagt.ps1",
-      "sha256": "C6EEBA3527FF6AA3AE374BB56CB51089C801096A9943E963365AC1C919C9BA1E"
+      "sha256": "6B6C78EE64CF3607CB2CA6AEA2B8F1E24CA4CE3E9ACFDD4FCC36FE24CFBBBB1B"
     },
     {
       "name": "Uninstall-PCTjek.ps1",

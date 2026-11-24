@@ -146,7 +146,22 @@ $PowerModeList = @(
   [pscustomobject]@{ Key = 'perf'; Guid = 'ded574b5-45a0-4f42-8737-46345c09c238'; Name = 'Bedste ydeevne' }
 )
 function Get-PowerMode { try { $g = [guid]::Empty; if ([PcTjek.PowerMode]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
-function Set-PowerMode($guid) { try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PowerMode) -eq ([guid]$guid).ToString()) }
+# Skift strømtilstand via Windows' eget powercfg i en separat proces. Går det galt dér, kan det ikke tage Opticon med sig
+# (det direkte Windows-kald fik appen til at gå ned på nogle Snapdragon-pc'er). Det direkte kald bruges kun som reserve.
+function Set-PowerMode($guid) {
+  $want = ([guid]$guid).ToString()
+  try {
+    $psi = New-Object Diagnostics.ProcessStartInfo "$env:SystemRoot\System32\powercfg.exe", "/overlaysetactive $want"
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $pr = [Diagnostics.Process]::Start($psi)
+    if (-not $pr.WaitForExit(6000)) { try { $pr.Kill() } catch {} }
+    for ($k = 0; $k -lt 5; $k++) { Start-Sleep -Milliseconds 200; if ((Get-PowerMode) -eq $want) { return $true } }
+  } catch {}
+  if (Get-Command Log -ErrorAction SilentlyContinue) { Log "Strømtilstand: powercfg virkede ikke, prøver direkte kald" }
+  try { [void][PcTjek.PowerMode]::PowerSetActiveOverlayScheme([guid]$guid) } catch {}
+  Start-Sleep -Milliseconds 300
+  return ((Get-PowerMode) -eq $want)
+}
 function PowerMode-Name($guid) { $m = $PowerModeList | Where-Object { $_.Guid -eq ([string]$guid) } | Select-Object -First 1; if ($m) { $m.Name } else { 'ukendt' } }
 
 # Windows-beskeder (samme kontakt som Indstillinger > System > Meddelelser)
