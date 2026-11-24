@@ -21,7 +21,7 @@ if (-not $RestoreOnly -and [Threading.Thread]::CurrentThread.ApartmentState -ne 
 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Microsoft.VisualBasic
 
-$AppVersion = '2.35'
+$AppVersion = '2.36'
 $AppName = 'Opticon'   # visningsnavn (sættes af build-scriptet)
 $OutDir   = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads\PC-Tjek-rapport'
 $SnapDir  = Join-Path $OutDir 'snapshots'
@@ -475,6 +475,22 @@ $ScanScript = {
     Add-Time $ev.TimeCreated 'Defender' $what $msg.Trim()
     if ($ev.Id -eq 5007 -and $ev.Message -match 'Exclusion') { Add-Find $(if ($exCount) { 3 } else { 1 }) 'Defender' 'En Defender-undtagelse blev ændret' "$($ev.TimeCreated) · $($msg.Trim())" 'Nogen har ændret Defenders undtagelser. Tjek at det var dig.' '' 'info' $null $(if ($exCount) { 'Se om undtagelsen herunder er din egen. Kender du den ikke, så fjern den i Windows Sikkerhed → Virus- og trusselsbeskyttelse → Undtagelser.' } else { 'Der er ingen undtagelser lige nu, så der er ikke noget at gøre. Typisk var det en installer, der midlertidigt tilføjede en.' }) }
   }
+
+  # ---------- Diskens helbred (advar i god tid) ----------
+  try {
+    foreach ($pd in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+      $rc = $pd | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
+      $dn = "$($pd.FriendlyName)"
+      $errs = 0; if ($rc) { $errs = [int64]$rc.ReadErrorsUncorrected + [int64]$rc.WriteErrorsUncorrected }
+      if ($pd.HealthStatus -and $pd.HealthStatus -ne 'Healthy') {
+        Add-Find 4 'Disk' "Disken melder fejl: $dn" "Status: $($pd.HealthStatus) · $($pd.OperationalStatus)" 'Disken selv melder, at den har problemer. Den kan gå i stykker når som helst.' '' 'info' $null 'Tag backup af dine vigtige filer NU (fx til OneDrive eller et USB-drev), og udskift disken.'
+      } elseif ($rc -and $null -ne $rc.Wear -and [int]$rc.Wear -ge 80) {
+        Add-Find 3 'Disk' "SSD'en er næsten slidt op: $dn" "Slid: $([int]$rc.Wear) %" 'En SSD kan kun skrives et vist antal gange. Over 80 % slid stiger risikoen for at den pludselig dør.' '' 'info' $null 'Tag backup, og planlæg at skifte disken. Se detaljer under Ydelse og helbred.'
+      } elseif ($errs -gt 0) {
+        Add-Find 3 'Disk' "Disken har læse-/skrivefejl: $dn" "$errs fejl, der ikke kunne rettes" 'Data er gået tabt ved læsning eller skrivning. Det er ofte et tidligt tegn på, at disken er ved at dø.' '' 'info' $null 'Tag backup, og hold øje under Ydelse og helbred. Stiger tallet, så udskift disken.'
+      }
+    }
+  } catch {}
 
   # ---------- 2. Installerede programmer + MSI-historik ----------
   Phase 2 'Læser programmer og installationshistorik'
@@ -962,6 +978,290 @@ $RestorePointScript = {
   return 'ok'
 }
 
+
+# =====================================================================
+#  Sikkerhedstjek: Windows' egne beskyttelser (kører i baggrunden)
+# =====================================================================
+$SecScript = {
+  param($sync, $arg)
+  $sync.Status = 'Tjekker Windows-beskyttelse...'
+  $out = New-Object System.Collections.ArrayList
+  function Add-Sec($id, $ok, $name, $val, $note, $how, $fix, $uri) {
+    [void]$out.Add([pscustomobject]@{ Id = $id; Ok = $ok; Navn = $name; Info = [string]$val; Note = $note; How = $how; Fix = $fix; Uri = $uri })
+  }
+  $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+  $laptop = $cs -and ($cs.PCSystemType -eq 2)
+  $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+  $build = 0; [void][int]::TryParse([string]$cv.CurrentBuild, [ref]$build)
+  $disp = [string]$cv.DisplayVersion; $ed = [string]$cv.EditionID
+
+  # 1. Windows-version
+  try {
+    if ($build -gt 0 -and $build -lt 22000) {
+      Add-Sec 'winver' 0 'Windows-version' "Windows 10 $disp" 'Windows 10 fik sin sidste almindelige sikkerhedsopdatering i oktober 2025. Nye huller bliver kun lukket, hvis pc''en er tilmeldt ESU.' 'Opgradér til Windows 11, hvis pc''en kan. Ellers: Windows Update → tilmeld "Udvidede sikkerhedsopdateringer" (ESU).' '' 'ms-settings:windowsupdate'
+    } elseif ($build -gt 0 -and $build -lt 26200 -and $ed -notmatch 'Enterprise|Education|IoT|Server') {
+      Add-Sec 'winver' 0 'Windows-version' "Windows 11 $disp" "Version $disp af Home/Pro får ikke længere sikkerhedsopdateringer." 'Windows Update → installér den nyeste version af Windows 11 (25H2 eller nyere). Det er gratis og beholder dine filer og programmer.' '' 'ms-settings:windowsupdate'
+    } else {
+      Add-Sec 'winver' 2 'Windows-version' "Windows $(if ($build -ge 22000) { '11' } else { '' }) $disp" 'Får stadig sikkerhedsopdateringer' '' '' ''
+    }
+  } catch {}
+
+  # 2. Opdateringer sat på pause?
+  try {
+    $pz = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name PauseUpdatesExpiryTime -ErrorAction SilentlyContinue).PauseUpdatesExpiryTime
+    $pd = $null
+    if ($pz) { try { $pd = [datetime]::Parse([string]$pz, [Globalization.CultureInfo]::InvariantCulture).ToLocalTime() } catch {} }
+    if ($pd -and $pd -gt (Get-Date)) {
+      Add-Sec 'wupause' 1 'Windows Update' "På pause til $($pd.ToString('d. MMM'))" 'Mens opdateringer er sat på pause, bliver nye sikkerhedshuller ikke lukket.' 'Windows Update → "Genoptag opdateringer".' '' 'ms-settings:windowsupdate'
+    } else { Add-Sec 'wupause' 2 'Windows Update' 'Kører' 'Ikke sat på pause' '' '' '' }
+  } catch {}
+
+  # 3. Antivirus + Defender
+  $defActive = $true
+  try {
+    $st = Get-MpComputerStatus -ErrorAction Stop
+    $other = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction SilentlyContinue |
+      Where-Object { $_.displayName -notmatch 'Defender' -and ((([int]$_.productState) -shr 12) -band 0xF) -eq 1 })
+    if ($other.Count -and -not $st.RealTimeProtectionEnabled) {
+      $defActive = $false
+      Add-Sec 'av' 2 'Antivirus' $other[0].displayName 'Et andet antivirusprogram passer på pc''en' '' '' ''
+    } elseif (-not $st.RealTimeProtectionEnabled) {
+      Add-Sec 'av' 0 'Antivirus' 'Realtidsbeskyttelse er FRA' 'Pc''en er ubeskyttet mod nye virus. Malware slår den ofte selv fra.' 'Windows Sikkerhed → Virus- og trusselsbeskyttelse → slå Realtidsbeskyttelse til. Kør derefter en fuld scanning.' '' 'windowsdefender://threatsettings'
+    } else {
+      $age = [int]$st.AntivirusSignatureAge
+      if ($age -gt 3) { Add-Sec 'av' 1 'Antivirus' "Defender · virusdefinitioner $age dage gamle" 'Defender kender ikke de nyeste virus.' 'Opticon kan hente de nyeste definitioner nu.' 'sigs' 'windowsdefender://threat' }
+      else { Add-Sec 'av' 2 'Antivirus' 'Microsoft Defender · opdateret' 'Realtidsbeskyttelse er til' '' '' '' }
+    }
+    if ($defActive) {
+      if ($st.IsTamperProtected) { Add-Sec 'tamper' 2 'Manipulationsbeskyttelse' 'Til' 'Programmer kan ikke slå Defender fra bag din ryg' '' '' '' }
+      else { Add-Sec 'tamper' 1 'Manipulationsbeskyttelse' 'Fra' 'Uden den kan malware slå Defender fra.' 'Windows Sikkerhed → Virus- og trusselsbeskyttelse → Administrer indstillinger → Manipulationsbeskyttelse: Til. (Kan kun slås til af dig selv, så malware ikke kan gøre det.)' '' 'windowsdefender://threatsettings' }
+      $pua = (Get-MpPreference -ErrorAction SilentlyContinue).PUAProtection
+      if ($pua -eq 1) { Add-Sec 'pua' 2 'Bloker uønskede programmer' 'Til' 'Stopper adware og skjulte cryptominere i installere' '' '' '' }
+      else { Add-Sec 'pua' 1 'Bloker uønskede programmer' 'Fra' 'Gratis programmer har ofte adware, værktøjslinjer eller cryptominere med i installeren. Defender kan stoppe dem.' 'Opticon kan slå det til for dig. Det ændrer ikke dine programmer.' 'pua' 'windowsdefender://appbrowser' }
+    }
+  } catch { Add-Sec 'av' 3 'Antivirus' 'Kunne ikke læses' '' '' '' 'windowsdefender://threat' }
+
+  # 4. Firewall
+  try {
+    $off = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { -not $_.Enabled } | ForEach-Object { switch ($_.Name) { 'Domain' { 'domæne' } 'Private' { 'privat' } 'Public' { 'offentlig' } default { $_.Name } } })
+    $fwOther = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName FirewallProduct -ErrorAction SilentlyContinue | Where-Object { ((([int]$_.productState) -shr 12) -band 0xF) -eq 1 })
+    if (-not $off.Count) { Add-Sec 'fw' 2 'Firewall' 'Til på alle netværk' 'Blokerer ubudne forbindelser udefra' '' '' '' }
+    elseif ($fwOther.Count) { Add-Sec 'fw' 2 'Firewall' $fwOther[0].displayName 'Et andet program styrer firewallen' '' '' '' }
+    else { Add-Sec 'fw' 0 'Firewall' ("Fra på " + ($off -join ', ') + ' netværk') 'Andre på samme netværk (fx på en café eller skole) kan nå tjenester på din pc.' 'Opticon kan slå Windows Firewall til igen på alle netværk.' 'fw' 'windowsdefender://network' }
+  } catch {}
+
+  # 5. SmartScreen
+  try {
+    $ss = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name SmartScreenEnabled -ErrorAction SilentlyContinue).SmartScreenEnabled
+    $ssPol = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -ErrorAction SilentlyContinue).EnableSmartScreen
+    if ($ss -eq 'Off' -or $ssPol -eq 0) { Add-Sec 'smartscreen' 1 'SmartScreen' 'Fra' 'SmartScreen advarer, før du åbner kendte falske installere og phishing-sider.' 'Windows Sikkerhed → App- og browserkontrol → Omdømmebaseret beskyttelse → slå det hele til.' '' 'windowsdefender://appbrowser' }
+    else { Add-Sec 'smartscreen' 2 'SmartScreen' 'Til' 'Advarer mod kendte falske programmer og sider' '' '' '' }
+  } catch {}
+
+  # 6. Brugerkontokontrol (UAC)
+  try {
+    $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue
+    if ($pol.EnableLUA -eq 0) { Add-Sec 'uac' 0 'Brugerkontokontrol (UAC)' 'Slået helt fra' 'Alle programmer får fuld adgang til pc''en uden at spørge. Det gør det meget let for malware.' 'Opticon kan slå den til igen. Kræver genstart.' 'uac' '' }
+    elseif ($pol.ConsentPromptBehaviorAdmin -eq 0 -or $pol.PromptOnSecureDesktop -eq 0) { Add-Sec 'uac' 1 'Brugerkontokontrol (UAC)' 'Til, men spørger ikke ordentligt' 'Programmer kan få administrator-rettigheder uden at du bliver spurgt, eller uden den mørke sikre skærm.' 'Opticon kan sætte den tilbage til Windows-standard.' 'uac' '' }
+    else { Add-Sec 'uac' 2 'Brugerkontokontrol (UAC)' 'Til' 'Programmer skal spørge, før de ændrer pc''en' '' '' '' }
+  } catch {}
+
+  # 7. Hukommelsesintegritet (HVCI)
+  $hvciOn = $false
+  try {
+    $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
+    $hvciOn = $dg -and (@($dg.SecurityServicesRunning) -contains 2)
+    $hvReg = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -Name Enabled -ErrorAction SilentlyContinue).Enabled
+    if ($hvciOn) { Add-Sec 'hvci' 2 'Hukommelsesintegritet' 'Til' 'Forhindrer, at ondsindede drivere får adgang til Windows'' kerne' '' '' '' }
+    elseif ($hvReg -eq 1) { Add-Sec 'hvci' 1 'Hukommelsesintegritet' 'Slået til, venter på genstart' 'Træder i kraft efter næste genstart' 'Genstart pc''en.' '' 'windowsdefender://coreisolation' }
+    else { Add-Sec 'hvci' 1 'Hukommelsesintegritet' 'Fra' 'Stopper drivere med kendte huller og malware i kernen. Koster typisk 0-5 % FPS i nogle spil.' 'Windows Sikkerhed → Enhedssikkerhed → Kerneisolering → Hukommelsesintegritet: Til. Kræver genstart. Står der "inkompatible drivere", så opdatér eller fjern de programmer først.' '' 'windowsdefender://coreisolation' }
+  } catch {}
+
+  # 8. Microsofts blokeringsliste over sårbare drivere
+  try {
+    $bl = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config' -Name VulnerableDriverBlocklistEnable -ErrorAction SilentlyContinue).VulnerableDriverBlocklistEnable
+    $blOn = $hvciOn -or ($bl -eq 1) -or ($null -eq $bl -and $build -ge 22621)
+    if ($blOn) { Add-Sec 'blocklist' 2 'Blokér sårbare drivere' 'Til' 'Windows nægter at indlæse drivere med kendte huller' '' '' '' }
+    else { Add-Sec 'blocklist' 1 'Blokér sårbare drivere' 'Fra' 'Angribere bruger gamle drivere med kendte huller til at slå antivirus fra. Windows har en liste, den kan blokere.' 'Opticon kan slå den til. Kræver genstart. Et meget gammelt RGB-, blæser- eller overclock-værktøj kan holde op med at virke, indtil du opdaterer det.' 'blocklist' 'windowsdefender://coreisolation' }
+  } catch {}
+
+  # 9. Secure Boot
+  try {
+    $sb = $null
+    try { $sb = Confirm-SecureBootUEFI -ErrorAction Stop } catch { $sb = $null }
+    if ($sb -eq $true) { Add-Sec 'secureboot' 2 'Secure Boot' 'Til' 'Stopper skadelig kode, der vil starte før Windows' '' '' '' }
+    elseif ($sb -eq $false) { Add-Sec 'secureboot' 1 'Secure Boot' 'Fra' 'Uden Secure Boot kan "bootkits" starte før Windows og gemme sig for antivirus. Nogle spil med anti-cheat kræver det også.' 'Slås til i BIOS/UEFI: genstart, tryk Del/F2, find Boot → Secure Boot → Enabled. Rør ikke ved andet, hvis du er i tvivl.' '' '' }
+    else { Add-Sec 'secureboot' 3 'Secure Boot' 'Ikke tilgængelig' 'Pc''en starter i gammel BIOS-tilstand' 'Kræver at Windows er installeret i UEFI-tilstand. Ikke noget, du skal ændre uden hjælp.' '' '' }
+  } catch {}
+
+  # 10. TPM
+  try {
+    $tpm = Get-Tpm -ErrorAction Stop
+    $tv = ''
+    try { $tv = ((Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction SilentlyContinue).SpecVersion -split ',')[0].Trim() } catch {}
+    if ($tpm.TpmPresent -and $tpm.TpmReady) { Add-Sec 'tpm' 2 'TPM-sikkerhedschip' "Klar$(if ($tv) { " (version $tv)" })" 'Beskytter krypteringsnøgler og Windows Hello' '' '' '' }
+    elseif ($tpm.TpmPresent) { Add-Sec 'tpm' 1 'TPM-sikkerhedschip' 'Fundet, men ikke klar' 'Kryptering og Windows Hello virker ikke optimalt' 'Åbn tpm.msc og vælg "Forbered TPM", eller nulstil den i BIOS.' '' '' }
+    else { Add-Sec 'tpm' 1 'TPM-sikkerhedschip' 'Ikke fundet' 'Uden TPM kan disken ikke krypteres automatisk' 'Slå fTPM (AMD) eller PTT (Intel) til i BIOS/UEFI under Security eller Advanced.' '' '' }
+  } catch {}
+
+  # 11. Diskkryptering (BitLocker / Enhedskryptering)
+  try {
+    $ev = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='C:'" -ErrorAction Stop
+    if ($ev.ProtectionStatus -eq 1) { Add-Sec 'crypt' 2 'Diskkryptering (C:)' 'Til' 'Hvis pc''en bliver stjålet, kan ingen læse dine filer' 'Sørg for at have gendannelsesnøglen: den ligger på account.microsoft.com/devices/recoverykey. Uden den kan du miste alt, hvis noget går galt.' '' '' }
+    else { Add-Sec 'crypt' $(if ($laptop) { 1 } else { 3 }) 'Diskkryptering (C:)' 'Fra' $(if ($laptop) { 'En stjålen bærbar kan læses af hvem som helst, også uden din adgangskode.' } else { 'Mindre vigtigt på en stationær, men beskytter dine filer ved tyveri.' }) 'Indstillinger → Beskyttelse af personlige oplysninger og sikkerhed → Enhedskryptering (eller BitLocker på Pro). Gem gendannelsesnøglen på din Microsoft-konto.' '' 'ms-settings:deviceencryption' }
+  } catch { Add-Sec 'crypt' 3 'Diskkryptering (C:)' 'Ikke tilgængelig' 'Denne udgave af Windows har ikke kryptering' '' '' '' }
+
+  # 12. SMBv1 (gammel fildeling, brugt af WannaCry)
+  try {
+    $smb1 = $false
+    try { $smb1 = [bool](Get-SmbServerConfiguration -ErrorAction Stop).EnableSMB1Protocol } catch {}
+    try { if ((Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction Stop).State -eq 'Enabled') { $smb1 = $true } } catch {}
+    if ($smb1) { Add-Sec 'smb1' 0 'Gammel fildeling (SMBv1)' 'Til' 'En 30 år gammel protokol med kendte huller. Det var den, WannaCry spredte sig med.' 'Opticon kan slå den fra. Kun meget gamle NAS-drev og printere bruger den.' 'smb1' '' }
+    else { Add-Sec 'smb1' 2 'Gammel fildeling (SMBv1)' 'Fra' 'Godt: den gamle, usikre protokol er slået fra' '' '' '' }
+  } catch {}
+
+  # 13. Fjernskrivebord
+  try {
+    $ts = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -ErrorAction SilentlyContinue
+    if ($ts -and $ts.fDenyTSConnections -eq 0) {
+      $nla = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction SilentlyContinue).UserAuthentication
+      if ($nla -eq 0) { Add-Sec 'rdp' 0 'Fjernskrivebord' 'Åben uden ekstra login-tjek' 'Andre kan forsøge at logge på din pc over netværket, og det tjek, der skulle bremse dem, er slået fra.' 'Bruger du det ikke selv, så lad Opticon lukke det.' 'rdp' 'ms-settings:remotedesktop' }
+      else { Add-Sec 'rdp' 1 'Fjernskrivebord' 'Åben' 'Andre kan forsøge at logge på din pc over netværket. Et yndet mål for angreb.' 'Bruger du det ikke selv, så lad Opticon lukke det.' 'rdp' 'ms-settings:remotedesktop' }
+    } else { Add-Sec 'rdp' 2 'Fjernskrivebord' 'Lukket' 'Ingen kan logge på pc''en udefra' '' '' '' }
+  } catch {}
+
+  # 14. Gæstekonto
+  try {
+    $g = Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value -like '*-501' }
+    if ($g -and $g.Enabled) { Add-Sec 'guest' 1 'Gæstekonto' 'Til' 'Alle kan logge på pc''en uden adgangskode' 'Opticon kan slå gæstekontoen fra.' 'guest' '' }
+    else { Add-Sec 'guest' 2 'Gæstekonto' 'Fra' 'Man skal have en konto for at logge på' '' '' '' }
+  } catch {}
+
+  # 15. Automatisk login med gemt adgangskode i klartekst
+  try {
+    $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+    if ([string]$wl.AutoAdminLogon -eq '1' -and $wl.DefaultPassword) { Add-Sec 'autologon' 0 'Automatisk login' 'Adgangskode gemt i klartekst' 'Din Windows-adgangskode ligger ukrypteret i registreringsdatabasen, hvor ethvert program kan læse den.' 'Opticon kan fjerne den gemte adgangskode og slå automatisk login fra. Skift derefter adgangskoden, hvis den også bruges andre steder.' 'autologon' '' }
+    elseif ([string]$wl.AutoAdminLogon -eq '1') { Add-Sec 'autologon' 1 'Automatisk login' 'Til' 'Pc''en logger selv på, så alle med adgang til den kan bruge den' 'netplwiz → sæt flueben i "Brugerne skal angive brugernavn og adgangskode".' '' '' }
+  } catch {}
+
+  return [pscustomobject]@{ Rows = @($out); Laptop = $laptop; Build = $build }
+}
+
+$SecFixScript = {
+  param($sync, $arg)
+  $id = [string]$arg.Id
+  $sync.Status = 'Retter: ' + $arg.Name + '...'
+  switch ($id) {
+    'sigs'      { Update-MpSignature -ErrorAction Stop; return 'Virusdefinitioner opdateret.' }
+    'pua'       { Set-MpPreference -PUAProtection Enabled -ErrorAction Stop; return 'Blokering af uønskede programmer er slået til.' }
+    'fw'        { Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True -ErrorAction Stop; return 'Firewall er slået til på alle netværk.' }
+    'uac'       {
+      $k = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+      $was = (Get-ItemProperty $k -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+      Set-ItemProperty $k -Name EnableLUA -Value 1 -Type DWord -ErrorAction Stop
+      Set-ItemProperty $k -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord -ErrorAction Stop
+      Set-ItemProperty $k -Name PromptOnSecureDesktop -Value 1 -Type DWord -ErrorAction Stop
+      return $(if ($was -eq 0) { 'Brugerkontokontrol er slået til. Genstart pc''en, så den træder i kraft.' } else { 'Brugerkontokontrol er sat til Windows-standard.' })
+    }
+    'blocklist' {
+      $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'
+      if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }
+      Set-ItemProperty $k -Name VulnerableDriverBlocklistEnable -Value 1 -Type DWord -ErrorAction Stop
+      return 'Blokering af sårbare drivere er slået til. Træder i kraft efter genstart.'
+    }
+    'smb1'      {
+      try { Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop } catch {}
+      try { Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction Stop | Out-Null } catch {}
+      return 'SMBv1 er slået fra. Genstart for at fjerne den helt.'
+    }
+    'rdp'       {
+      Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 1 -Type DWord -ErrorAction Stop
+      try { Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue } catch {}
+      try { Disable-NetFirewallRule -DisplayGroup 'Fjernskrivebord' -ErrorAction SilentlyContinue } catch {}
+      return 'Fjernskrivebord er lukket.'
+    }
+    'guest'     { Get-LocalUser | Where-Object { $_.SID.Value -like '*-501' } | Disable-LocalUser -ErrorAction Stop; return 'Gæstekontoen er slået fra.' }
+    'autologon' {
+      $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+      Remove-ItemProperty $k -Name DefaultPassword -ErrorAction SilentlyContinue
+      Set-ItemProperty $k -Name AutoAdminLogon -Value '0' -ErrorAction Stop
+      return 'Den gemte adgangskode er fjernet, og automatisk login er slået fra.'
+    }
+    default     { throw "Ukendt rettelse: $id" }
+  }
+}
+
+# =====================================================================
+#  Farlige drivere: sammenlign med LOLDrivers (github.com/magicsword-io/LOLDrivers)
+# =====================================================================
+$DrvScanScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $cache = [string]$arg.Cache
+  if (-not (Test-Path $cache)) { New-Item -ItemType Directory -Force $cache | Out-Null }
+  $base = 'https://raw.githubusercontent.com/magicsword-io/LOLDrivers/main/detections/hashes/'
+  $sets = @{}; $listAge = 0
+  foreach ($k in 'malicious', 'vulnerable') {
+    $f = Join-Path $cache "loldrivers-$k.sha256"
+    $fresh = (Test-Path $f) -and (((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays -lt 3)
+    if (-not $fresh) {
+      $sync.Status = 'Henter den nyeste liste over farlige drivere...'
+      try {
+        $wc = New-Object Net.WebClient; $wc.Headers['User-Agent'] = 'Opticon'
+        $t = $wc.DownloadString($base + "samples_$k.sha256")
+        if ($t -match '(?m)^[0-9a-fA-F]{64}\s*$') { [IO.File]::WriteAllText($f, $t) }
+      } catch {}
+    }
+    if (-not (Test-Path $f)) { throw 'Kunne ikke hente listen over farlige drivere. Tjek internetforbindelsen, og prøv igen.' }
+    $listAge = [math]::Max($listAge, [int]((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($l in [IO.File]::ReadAllLines($f)) { $h = $l.Trim(); if ($h.Length -eq 64) { [void]$set.Add($h) } }
+    $sets[$k] = $set
+  }
+
+  # Hvilke drivere er installeret (og kører)?
+  $sync.Status = 'Finder dine drivere...'
+  $sysRoot = $env:SystemRoot
+  $svc = @{}
+  foreach ($d in @(Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue)) {
+    $p = [string]$d.PathName
+    if (-not $p) { continue }
+    $p = $p.Trim('"') -replace '^\\\?\?\\', '' -replace '(?i)^\\SystemRoot\\', "$sysRoot\" -replace '(?i)^system32\\', "$sysRoot\System32\"
+    if ($p -notmatch '^[A-Za-z]:\\') { $p = Join-Path $sysRoot $p }
+    $svc[$p.ToLowerInvariant()] = $d
+  }
+  $files = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($p in $svc.Keys) { [void]$files.Add($p) }
+  foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\drivers", '*.sys')) { [void]$files.Add($f) }
+  try { foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\DriverStore\FileRepository", '*.sys', 'AllDirectories')) { [void]$files.Add($f) } } catch {}
+
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $hits = New-Object System.Collections.ArrayList
+  $n = 0; $total = $files.Count; $checked = 0
+  foreach ($f in $files) {
+    $n++
+    if ($n % 40 -eq 0) { $sync.Progress = [double]($n / [math]::Max(1, $total)); $sync.Status = "Tjekker drivere ($n af $total)..." }
+    try {
+      $fi = New-Object IO.FileInfo $f
+      if (-not $fi.Exists -or $fi.Length -gt 40MB) { continue }
+      $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
+      try { $h = [BitConverter]::ToString($sha.ComputeHash($fs)).Replace('-', '') } finally { $fs.Dispose() }
+      $checked++
+      $kind = if ($sets['malicious'].Contains($h)) { 'malicious' } elseif ($sets['vulnerable'].Contains($h)) { 'vulnerable' } else { $null }
+      if (-not $kind) { continue }
+      $vi = $null; try { $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($f) } catch {}
+      $d = $svc[$f.ToLowerInvariant()]
+      [void]$hits.Add([pscustomobject]@{
+        Kind = $kind; Path = $f; File = $fi.Name; Sha256 = $h
+        Company = $(if ($vi) { [string]$vi.CompanyName } else { '' }); Product = $(if ($vi) { [string]$vi.ProductName } else { '' })
+        Service = $(if ($d) { [string]$d.Name } else { '' }); Running = [bool]($d -and $d.State -eq 'Running')
+        InStore = ($f -match '(?i)\\DriverStore\\FileRepository\\')
+      })
+    } catch {}
+  }
+  $sync.Progress = 1.0
+  return [pscustomobject]@{ Hits = @($hits); Checked = $checked; ListAge = $listAge; Lists = ($sets['malicious'].Count + $sets['vulnerable'].Count) }
+}
 
 $UpdateCheckScript = {
   param($sync, $arg)
@@ -1816,6 +2116,7 @@ namespace OptiBench
           <RadioButton Name="NavHelped"  Style="{StaticResource Nav}" GroupName="nav" Content="✅   Hjalp det?"/>
           <RadioButton Name="NavModes"   Style="{StaticResource Nav}" GroupName="nav" Content="🎮   Tilstande"/>
           <RadioButton Name="NavVagt"    Style="{StaticResource Nav}" GroupName="nav" Content="🛡   Vagt"/>
+          <RadioButton Name="NavSecure"  Style="{StaticResource Nav}" GroupName="nav" Content="🔐   Sikkerhedstjek"/>
           <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
           <RadioButton Name="NavTime"    Style="{StaticResource Nav}" GroupName="nav" Content="🕒   Hændelsesforløb"/>
           <RadioButton Name="NavStart"   Style="{StaticResource Nav}" GroupName="nav" Content="🚀   Opstart"/>
@@ -2214,6 +2515,66 @@ namespace OptiBench
           </Border>
           <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="2,0,0,8" Text="På vej: Mødetilstand (test mikrofon og kamera) og 'Hvorfor hakkede mit spil?' med en 60-sekunders måling."/>
         </StackPanel>
+        </ScrollViewer>
+      </Grid>
+      <Grid Name="PageSecure" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+          <TextBlock Style="{StaticResource H1}" Text="Sikkerhedstjek"/>
+          <TextBlock Style="{StaticResource Sub}" Text="Er Windows' egne beskyttelser slået til? Og har pc'en drivere, som angribere kan misbruge? Vælg en linje for at se, hvad du skal gøre."/>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,12">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="WinSecBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center" Text="–"/>
+                  <StackPanel><TextBlock Text="🔐  Windows-beskyttelse" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="WinSecSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Tjekker..."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridSecure" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="420" SelectionMode="Single">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                    <DataGridTextColumn Header="BESKYTTELSE" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="NU" Binding="{Binding Info}" Width="2*"/>
+                    <DataGridTextColumn Header="HVAD BETYDER DET" Binding="{Binding Note}" Width="4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <Border Name="SecHintBox" Visibility="Collapsed" CornerRadius="10" Background="#1B1630" BorderBrush="#3B3366" BorderThickness="1" Padding="14,10" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="SecHintTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="SecHint" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+                  </StackPanel>
+                </Border>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnSecFix" Content="🔧  Ret det for mig" Style="{StaticResource Primary}" IsEnabled="False"/>
+                  <Button Name="BtnSecOpen" Content="⚙  Åbn indstillingen" IsEnabled="False"/>
+                  <Button Name="BtnSecRefresh" Content="⟳  Tjek igen"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="DrvBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center" Text="–"/>
+                  <StackPanel><TextBlock Text="🧩  Farlige drivere" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="DrvSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Sammenligner dine drivere med LOLDrivers, en åben liste over drivere, som angribere misbruger. Tager typisk under et minut."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridDrv" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="300" SelectionMode="Single" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                    <DataGridTextColumn Header="DRIVER" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="FRA" Binding="{Binding Info}" Width="2*"/>
+                    <DataGridTextColumn Header="HVAD SKAL JEG GØRE" Binding="{Binding Note}" Width="4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnDrvScan" Content="🔎  Scan drivere" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnDrvShow" Content="📂  Vis filen" IsEnabled="False"/>
+                  <Button Name="BtnDrvApps" Content="🗑  Afinstallér programmer"/>
+                  <Button Name="BtnDrvInfo" Content="ℹ  Om LOLDrivers"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
         </ScrollViewer>
       </Grid>
       <Grid Name="PageVagt" Visibility="Collapsed">
@@ -3013,7 +3374,7 @@ function With-RestorePoint($why, $ctx, [scriptblock]$then) {
 # =====================================================================
 #  Navigation
 # =====================================================================
-$pages = @{ NavHelped = 'PageHelped'; NavBench = 'PageBench'; NavModes = 'PageModes'; NavVagt = 'PageVagt'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
+$pages = @{ NavHelped = 'PageHelped'; NavBench = 'PageBench'; NavModes = 'PageModes'; NavVagt = 'PageVagt'; NavSecure = 'PageSecure'; NavTweaks = 'PageTweaks'; NavHome = 'PageHome'; NavFind = 'PageFind'; NavTime = 'PageTime'; NavStart = 'PageStart'; NavClean = 'PageClean'; NavFiles = 'PageFiles'; NavUpdates = 'PageUpdates'; NavHealth = 'PageHealth' }
 foreach ($nav in $pages.Keys) {
   $ui[$nav].Add_Checked({
     param($sender, $e)
@@ -3021,6 +3382,7 @@ foreach ($nav in $pages.Keys) {
     if ($sender.Name -eq 'NavHealth' -and -not $script:HealthLoaded) { Load-Health; try { Show-Reboot; Show-Boot } catch { Log "Boot-fejl: $_" }; Show-Crashes }
     if ($sender.Name -eq 'NavUpdates') { try { Show-Reboot } catch {}; try { Show-VendorCard } catch { Log "Producent-fejl: $_" } }
     if ($sender.Name -eq 'NavVagt') { try { Load-Vagt } catch { Log "Vagt-fejl: $_" } }
+    if ($sender.Name -eq 'NavSecure') { try { Load-DriversCache; if (-not $script:SecLoaded) { Load-Secure } } catch { Log "Sikkerhed-fejl: $_" } }
     if ($sender.Name -eq 'NavHelped') { try { Update-Changes; Show-Changes } catch { Log "Hjalp det-fejl: $_" } }
     if ($sender.Name -eq 'NavBench') { try { Load-Bench } catch { Log "Benchmark-fejl: $_" } }
     if ($sender.Name -eq 'NavModes') { try { Load-Games; Update-ModeUi } catch { Log "Tilstand-fejl: $_" } }
@@ -3664,9 +4026,15 @@ function Load-Health {
     $ok = if ($d.HealthStatus -eq 'Healthy') { 2 } elseif ($d.HealthStatus -eq 'Warning') { 1 } else { 0 }
     [void]$rows.Add((HRow $ok "Disk: $($d.FriendlyName)" "$($d.MediaType) · $([math]::Round($d.Size / 1GB)) GB · $($d.HealthStatus)" $(if ($ok -eq 2) { 'Disken melder sund' } else { 'Tag backup snarest, og overvej at udskifte disken' })))
     if ($rc) {
-      if ($rc.Temperature) { $t = [int]$rc.Temperature; [void]$rows.Add((HRow $(if ($t -lt 55) { 2 } elseif ($t -lt 70) { 1 } else { 0 }) '   Temperatur' "$t °C" $(if ($t -lt 55) { 'Fin' } elseif ($t -lt 70) { 'Varm. Tjek luftgennemstrømning' } else { 'For varm!' }))) }
-      if ($null -ne $rc.Wear) { $w = [int]$rc.Wear; [void]$rows.Add((HRow $(if ($w -lt 50) { 2 } elseif ($w -lt 85) { 1 } else { 0 }) '   Slid (SSD)' "$w %" $(if ($w -lt 50) { 'Masser af levetid tilbage' } elseif ($w -lt 85) { 'Halvvejs. Hold øje' } else { 'Tæt på slidt op: tag backup' }))) }
-      if ($rc.PowerOnHours) { [void]$rows.Add((HRow 3 '   Driftstimer' "$($rc.PowerOnHours) t" '')) }
+      if ($rc.Temperature) {
+        $t = [int]$rc.Temperature; $tm = [int]$rc.TemperatureMax
+        $hot = if ($tm -gt 40) { $tm - 8 } else { 70 }
+        [void]$rows.Add((HRow $(if ($t -lt 55) { 2 } elseif ($t -lt $hot) { 1 } else { 0 }) '   Temperatur' "$t °C$(if ($tm -gt 40) { " (maks. $tm °C)" })" $(if ($t -lt 55) { 'Fin' } elseif ($t -lt $hot) { 'Varm. Tjek at der kommer luft til disken (NVMe: overvej en køleplade)' } else { 'For varm! Disken sænker farten for at beskytte sig selv' })))
+      }
+      if ($null -ne $rc.Wear) { $w = [int]$rc.Wear; [void]$rows.Add((HRow $(if ($w -lt 50) { 2 } elseif ($w -lt 80) { 1 } else { 0 }) '   Slid (SSD)' "$w % brugt" $(if ($w -lt 50) { 'Masser af levetid tilbage' } elseif ($w -lt 80) { 'Over halvvejs. Hold øje, og hav backup' } else { 'Tæt på slidt op: tag backup, og planlæg en ny disk' }))) }
+      $ue = [int64]$rc.ReadErrorsUncorrected + [int64]$rc.WriteErrorsUncorrected
+      if ($null -ne $rc.ReadErrorsUncorrected -or $null -ne $rc.WriteErrorsUncorrected) { [void]$rows.Add((HRow $(if ($ue -eq 0) { 2 } else { 0 }) '   Fejl der ikke kunne rettes' "$ue" $(if ($ue -eq 0) { 'Ingen. Godt' } else { 'Tidligt tegn på, at disken er ved at dø. Tag backup nu' }))) }
+      if ($rc.PowerOnHours) { $h = [int64]$rc.PowerOnHours; [void]$rows.Add((HRow 3 '   Tændt i alt' ("{0:N0} timer" -f $h) $(if ($h -ge 8760) { "Ca. $([math]::Round($h / 8760, 1)) år i drift" } else { "Ca. $([math]::Round($h / 730)) måneder i drift" }))) }
     }
   }
   $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
@@ -3710,6 +4078,126 @@ $ui.BtnGameMode.Add_Click({
   Log 'Spiltilstand til'; Load-Health
 })
 $ui.BtnOfflineScan.Add_Click({ Start-Process 'windowsdefender://threatsettings' })
+
+# =====================================================================
+#  Sikkerhedstjek
+# =====================================================================
+$script:SecLoaded = $false
+$DrvCache = Join-Path $JobBase 'loldrivers'
+$DrvLast  = Join-Path $JobBase 'drivers-last.xml'
+function Load-Secure {
+  $ui.WinSecSub.Text = 'Tjekker Windows-beskyttelse...'; $ui.WinSecBig.Text = '…'
+  $ui.BtnSecRefresh.IsEnabled = $false
+  Invoke-Bg $SecScript @{} {
+    param($res, $err, $c)
+    $ui.BtnSecRefresh.IsEnabled = $true
+    if ($res -is [array]) { $res = @($res | Where-Object { $_.Rows })[-1] }
+    if ($err -or -not $res) { $ui.WinSecSub.Text = "Kunne ikke tjekke: $err"; $ui.WinSecBig.Text = '–'; return }
+    $rows = foreach ($x in @($res.Rows | Sort-Object @{ e = { @{ 0 = 0; 1 = 1; 3 = 2; 2 = 3 }[[int]$_.Ok] } })) {
+      $r = HRow ([int]$x.Ok) $x.Navn $x.Info $x.Note
+      $r.Id = $x.Id; $r.Tag = $x; $r
+    }
+    $ui.GridSecure.ItemsSource = @($rows)
+    $counted = @($res.Rows | Where-Object { [int]$_.Ok -ne 3 })
+    $good = @($counted | Where-Object { [int]$_.Ok -eq 2 }).Count
+    $bad = @($counted | Where-Object { [int]$_.Ok -eq 0 }).Count
+    $warn = @($counted | Where-Object { [int]$_.Ok -eq 1 }).Count
+    $ui.WinSecBig.Text = "$good/$($counted.Count)"
+    $ui.WinSecBig.Foreground = $Brush.ConvertFromString($(if ($bad) { '#F87171' } elseif ($warn) { '#F6C344' } else { '#34D399' }))
+    $ui.WinSecSub.Text = if ($bad) { "$bad vigtig$(if ($bad -ne 1) { 'e' }) ting at rette og $warn at overveje. Start med de røde." }
+                      elseif ($warn) { "Ingen alvorlige huller. $warn ting kan gøre pc'en endnu sikrere." }
+                      else { 'Alle Windows'' beskyttelser er slået til. Flot!' }
+    $script:SecLoaded = $true
+    Log "Sikkerhedstjek: $good/$($counted.Count) ok, $bad røde, $warn gule"
+    Update-SecButtons
+  } $null
+}
+function Update-SecButtons {
+  $sel = $ui.GridSecure.SelectedItem
+  $x = if ($sel) { $sel.Tag } else { $null }
+  $needs = $x -and ([int]$x.Ok -ne 2)
+  $ui.BtnSecFix.IsEnabled = [bool]($needs -and $x.Fix)
+  $ui.BtnSecOpen.IsEnabled = [bool]($x -and $x.Uri)
+  if ($x -and ($x.How -or $x.Note)) {
+    $ui.SecHintBox.Visibility = 'Visible'
+    $ui.SecHintTitle.Text = "$($sel.Status)  $($x.Navn): $($x.Info)"
+    $ui.SecHint.Text = $(if ($x.How) { "Gør sådan: $($x.How)" } else { $x.Note })
+  } else { $ui.SecHintBox.Visibility = 'Collapsed' }
+}
+$ui.GridSecure.Add_SelectionChanged({ Update-SecButtons })
+$ui.BtnSecRefresh.Add_Click({ Load-Secure })
+$ui.BtnSecOpen.Add_Click({
+  $x = $ui.GridSecure.SelectedItem.Tag
+  if ($x -and $x.Uri) { try { Start-Process $x.Uri } catch { Msg "Kunne ikke åbne indstillingen: $($_.Exception.Message)" | Out-Null } }
+})
+$ui.BtnSecFix.Add_Click({
+  $x = $ui.GridSecure.SelectedItem.Tag
+  if (-not $x -or -not $x.Fix) { return }
+  $ask = "$($x.Navn): $($x.Info)`n`n$($x.Note)`n`n$($x.How)`n`nVil du have Opticon til at rette det nu?"
+  if ((Msg $ask 'Ret sikkerhedsindstilling' 'YesNo' 'Question') -ne 'Yes') { return }
+  $ui.BtnSecFix.IsEnabled = $false
+  Invoke-Bg $SecFixScript @{ Id = $x.Fix; Name = $x.Navn } {
+    param($res, $err, $c)
+    if ($res -is [array]) { $res = @($res | Where-Object { $_ -is [string] })[-1] }
+    if ($err) { Log "Sikkerhed-ret $($c.Fix) FEJL: $err"; Msg "Det lykkedes ikke:`n$err`n`nDu kan i stedet gøre det selv: $($c.How)" 'Ret sikkerhedsindstilling' 'OK' 'Warning' | Out-Null }
+    else { Log "Sikkerhed-ret $($c.Fix): $res"; $ui.StatusText.Text = [string]$res; if ($res -match 'genstart|Genstart') { Msg ([string]$res) 'Klaret' 'OK' 'Information' | Out-Null } }
+    Load-Secure
+  } @{ Fix = $x.Fix; How = $x.How }
+})
+
+# ---------- Farlige drivere ----------
+function Show-Drivers($res, [bool]$fromCache) {
+  $hits = @($res.Hits)
+  $mal = @($hits | Where-Object Kind -eq 'malicious')
+  $vulnOn = @($hits | Where-Object { $_.Kind -eq 'vulnerable' -and ($_.Running -or -not $_.InStore) })
+  $rows = foreach ($h in @($hits | Sort-Object @{ e = { if ($_.Kind -eq 'malicious') { 0 } elseif ($_.Running) { 1 } elseif (-not $_.InStore) { 2 } else { 3 } } }, File)) {
+    $from = (@($h.Product, $h.Company) | Where-Object { $_ } | Select-Object -First 2) -join ' · '
+    if (-not $from) { $from = '(ukendt program)' }
+    $what = if ($h.Kind -eq 'malicious') { 'KENDT ONDSINDET. Kør en Defender Offline-scanning (under Ydelse og helbred), og afinstallér det program, den kom med.' }
+            elseif ($h.Running) { 'Kører nu og har et kendt sikkerhedshul. Opdatér eller afinstallér programmet. Slå "Blokér sårbare drivere" til ovenfor.' }
+            elseif (-not $h.InStore) { 'Installeret, men kører ikke lige nu. Opdatér eller afinstallér programmet, hvis du ikke bruger det.' }
+            else { 'Kun en gammel kopi i Windows'' driverlager. Lav risiko: den kører ikke.' }
+    $lvl = if ($h.Kind -eq 'malicious') { 0 } elseif ($h.Running -or -not $h.InStore) { 1 } else { 3 }
+    $r = HRow $lvl $h.File $from $what
+    $r.Sti = $h.Path; $r.Tag = $h; $r
+  }
+  $ui.GridDrv.ItemsSource = @($rows)
+  $ui.GridDrv.Visibility = $(if ($hits.Count) { 'Visible' } else { 'Collapsed' })
+  $when = if ($fromCache) { try { ' Sidst tjekket ' + (Get-Item $DrvLast).LastWriteTime.ToString('d. MMM HH:mm') + '.' } catch { '' } } else { '' }
+  if ($mal.Count) {
+    $ui.DrvBig.Text = "⚠ $($mal.Count)"; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F87171')
+    $ui.DrvSub.Text = "Fandt $($mal.Count) kendt ondsindet driver. Tag det alvorligt: se hvad du skal gøre herunder.$when"
+  } elseif ($vulnOn.Count) {
+    $ui.DrvBig.Text = "$($vulnOn.Count)"; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#F6C344')
+    $ui.DrvSub.Text = "Ingen ondsindede drivere. $($vulnOn.Count) driver$(if ($vulnOn.Count -ne 1) { 'e' }) har et kendt sikkerhedshul. Typisk fra RGB-, blæser- eller overclock-værktøjer, ikke virus. Opdatér eller afinstallér dem.$when"
+  } else {
+    $ui.DrvBig.Text = '✓'; $ui.DrvBig.Foreground = $Brush.ConvertFromString('#34D399')
+    $extra = if ($hits.Count) { " ($($hits.Count) gammel kopi i driverlageret, men den kører ikke)" } else { '' }
+    $ui.DrvSub.Text = "Ingen farlige drivere i brug$extra. Tjekkede $($res.Checked) drivere mod $($res.Lists) kendte.$when"
+  }
+}
+$ui.BtnDrvScan.Add_Click({
+  $ui.BtnDrvScan.IsEnabled = $false; $ui.DrvBig.Text = '…'
+  $ui.DrvSub.Text = 'Scanner dine drivere. Tager typisk under et minut...'
+  Invoke-Bg $DrvScanScript @{ Cache = $DrvCache } {
+    param($res, $err, $c)
+    $ui.BtnDrvScan.IsEnabled = $true
+    if ($res -is [array]) { $res = @($res | Where-Object { $null -ne $_.Checked })[-1] }
+    if ($err -or -not $res) { $ui.DrvBig.Text = '–'; $ui.DrvSub.Text = "Scanningen lykkedes ikke: $err"; Log "Driver-scan FEJL: $err"; return }
+    try { Export-Clixml -InputObject $res -Path $DrvLast -Depth 4 } catch {}
+    Log "Driver-scan: $($res.Checked) tjekket, $(@($res.Hits).Count) fund"
+    Show-Drivers $res $false
+  } $null
+})
+$ui.GridDrv.Add_SelectionChanged({ $ui.BtnDrvShow.IsEnabled = [bool]$ui.GridDrv.SelectedItem })
+$ui.BtnDrvShow.Add_Click({ $p = $ui.GridDrv.SelectedItem.Sti; if ($p) { Start-Process explorer.exe "/select,`"$p`"" } })
+$ui.BtnDrvApps.Add_Click({ Start-Process 'ms-settings:appsfeatures' })
+$ui.BtnDrvInfo.Add_Click({ Start-Process 'https://www.loldrivers.io/' })
+function Load-DriversCache {
+  if ($script:DrvShown) { return }
+  $script:DrvShown = $true
+  if (Test-Path $DrvLast) { try { Show-Drivers (Import-Clixml $DrvLast) $true } catch {} }
+}
 
 # =====================================================================
 #  DIN PLAN: få, simple trin med én knap hver

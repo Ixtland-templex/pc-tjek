@@ -1,7 +1,10 @@
 {
-  "version": "2.35",
+  "version": "2.36",
   "date": "2026-11-24",
   "notes": [
+    "Ny: 🔐 Sikkerhedstjek – er Windows' beskyttelser slået til? Røde og gule punkter med en forklaring, og knappen Ret det for mig, hvor det er sikkert",
+    "Ny: 🧩 Farlige drivere – sammenligner dine drivere med LOLDrivers' liste over drivere, som angribere misbruger",
+    "Disk-helbred: fejl der ikke kunne rettes, temperatur mod diskens maks., og hvor længe den har været tændt. Overblik advarer, hvis disken er ved at gå i stykker",
     "Grafiktest giver nu rigtige FPS uden skærmens Hz-loft (testversion 3)",
     "Rettet: grafikdelen af benchmark og opløsningstest gav ingen målinger",
     "Ny: Hvad betyder dine tal? – advarer om varmetab, RAM uden XMP, langsom disk, forkert grafikkort m.m. og siger hvad du kan gøre",
@@ -9,7 +12,6 @@
     "Ny: ✅ Hjalp det? – én historik over dine ændringer med måling før og efter",
     "Opstart måles ved de næste opstarter, oprydning som ledig plads, GPU-profiler i samme test",
     "Knap: Jeg har ændret noget – kører den store test og sammenligner med testen før",
-    "Grafiktal i opløsningstest, OC-tjek og benchmark hedder nu tegninger/s (ikke FPS), og testversionen er hævet",
     "Delvise benchmarks får ingen samlet score",
     "Kun bekræftede GPU-indstillinger indgår i anbefalinger",
     "Opdateringer skifter og ruller hele pakken samlet",
@@ -51,7 +53,7 @@
   "files": [
     {
       "name": "PC-Tjek-App.ps1",
-      "sha256": "AA528413A44AC40D817364D6ECFDC9C5C960B77C2A639B114709BB4BA2CDF633"
+      "sha256": "8B8D0E4B49D9D49221A9F176E36F7E9DD13862E6E409D86BA9CB0A39F8A15560"
     },
     {
       "name": "PC-Tjek-Start.ps1",

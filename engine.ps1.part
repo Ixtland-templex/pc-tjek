@@ -1,0 +1,449 @@
+# Afinstallation: sæt aktive tilstande, grafikkort og blokeringer tilbage, og stop her (ingen vindue)
+if ($RestoreOnly) {
+  try { $r = Restore-Everything 'Opticon blev afinstalleret'; Log "Gendannet før afinstallation$(if ($r) { ": $(@($r.Done) -join ' · ')" })" } catch { Log "Gendannelse før afinstallation fejlede: $_" }
+  $left = @()
+  if (Test-Path $ModeFile) { $left += 'en aktiv Spil-/Fokus-tilstand' }
+  if (Test-Path $GpuRestoreFile) { $left += 'grafikkortets indstilling' }
+  if (Test-Path $ModePending) { try { $left += @(Get-Content $ModePending -Raw | ConvertFrom-Json | ForEach-Object { $_.Text }) } catch { $left += 'noget, der ikke kunne sættes tilbage' } }
+  if ($left.Count) { [Console]::Out.WriteLine('MANGLER: ' + ($left -join '; ')); exit 1 }
+  exit 0
+}
+$ScanScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  # En enkelt fejl må aldrig stoppe hele scanningen: log den, og fortsæt med næste linje
+  trap { if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan-advarsel (fortsætter): {1}`r`n" -f (Get-Date), $_.Exception.Message), [Text.Encoding]::UTF8) } catch {} }; continue }
+  if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan-motor startet`r`n" -f (Get-Date)), [Text.Encoding]::UTF8) } catch {} }
+  $since = (Get-Date).AddDays(-45)
+  function Status($t) { $sync.Status = $t }
+  # Faser med vægt (summer til 100) – bruges til procent og tidsestimat
+  $Phases = @(4, 4, 8, 10, 5, 22, 32, 4, 9, 2)
+  $sync.PhaseCount = $Phases.Count
+  $sync.PhaseTimes = @{}
+  function Phase([int]$i, $text) {
+    $start = 0; for ($k = 0; $k -lt $i - 1; $k++) { $start += $Phases[$k] }
+    $sync.Phase = $i; $sync.PhaseStart = $start; $sync.PhaseWeight = $Phases[$i - 1]
+    $sync.Progress = [double]$start; $sync.Status = $text; $sync.Detail = ''
+    $sync.PhaseTimes[$i] = Get-Date
+    if ($arg -and $arg.LogFile) { try { [IO.File]::AppendAllText($arg.LogFile, ("{0:yyyy-MM-dd HH:mm:ss}  Scan fase {1}: {2}`r`n" -f (Get-Date), $i, $text), [Text.Encoding]::UTF8) } catch {} }
+  }
+  function Sub([double]$frac, $detail) {
+    $sync.Progress = $sync.PhaseStart + $sync.PhaseWeight * [math]::Min(1, [math]::Max(0, $frac))
+    if ($detail) { $sync.Detail = $detail }
+  }
+
+  # Windows-fejl 225 (ERROR_VIRUS_INFECTED) / 226: Defender nægter adgang til filen, fordi den er inficeret
+  function IsVirusErr($e) { $m = [string]$e.Exception.Message; $h = 0; try { $h = $e.Exception.HResult -band 0xFFFF } catch {}; return ($h -eq 225 -or $h -eq 226 -or $m -match '(?i)virus|uønsket software|unwanted software') }
+  function Sig($path) {
+    if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'Ikke fundet' }
+    # Store-apps og Windows' systemapps er signeret via pakken/kataloget, ikke i selve filen. Mapperne kan kun ændres af Windows.
+    if ($path -like "$env:ProgramFiles\WindowsApps\*" -or $path -like "$env:SystemRoot\SystemApps\*") { return 'Signeret: Microsoft Store-pakke' }
+    try { $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop }
+    catch { if (IsVirusErr $_) { return 'BLOKERET AF DEFENDER' }; return 'Kunne ikke læses' }
+    if ($s.Status -eq 'Valid') { return 'Signeret: ' + ($s.SignerCertificate.Subject -replace '^CN="?([^,"]+).*', '$1') }
+    return 'USIGNERET (' + [string]$s.Status + ')'
+  }
+  function ExePath($cmd) {
+    if (-not $cmd) { return $null }
+    $c = [Environment]::ExpandEnvironmentVariables([string]$cmd).Trim()
+    if ($c -match '^"([^"]+)"') { return $matches[1] }
+    if ($c -match '^(.+?\.(exe|dll|bat|cmd|ps1|vbs|js|com|scr))(\s|$)') { return $matches[1] }
+    return ($c -split ' ')[0]
+  }
+  $UserWritable = '\\(AppData|Temp|ProgramData|Users\\Public|Downloads)\\'
+  $LolBins      = '(?i)\\(powershell|pwsh|cmd|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin)\.exe'
+  $BadArgs      = '(?i)(-enc|-encodedcommand|frombase64string|-w(indowstyle)?\s+hidden|iex|invoke-expression|downloadstring|http[s]?://)'
+
+  $AllFinds = New-Object System.Collections.ArrayList   # fund
+  $AllTimes = New-Object System.Collections.ArrayList   # tidslinje
+  function Add-Find($risk, $cat, $title, $detail, $why, $path, $kind, $data, $raad = '') {
+    $label = @('Info', 'Lav', 'Mellem', 'Høj', 'Kritisk')[$risk]
+    [void]$AllFinds.Add([pscustomobject]@{ Risiko = $label; Niveau = $risk; Kategori = $cat; Titel = $title; Detalje = $detail
+                                     Hvorfor = $why; Sti = $path; Type = $kind; Data = $data; SHA256 = $null; Raad = $raad })
+  }
+  function Add-Time($time, $type, $event, $detail) {
+    if ($time) { [void]$AllTimes.Add([pscustomobject]@{ Tid = [datetime]$time; Type = $type; Hændelse = $event; Detalje = $detail; Fokus = '' }) }
+  }
+
+  # ---------- 1. Defender ----------
+  Phase 1 'Læser Microsoft Defender'
+  $threats = @(Get-MpThreat)
+  $dets    = @(Get-MpThreatDetection)
+  foreach ($th in $threats) {
+    $d = $dets | Where-Object ThreatID -eq $th.ThreatID | Sort-Object InitialDetectionTime | Select-Object -First 1
+    $paths = @($th.Resources | ForEach-Object { (([string]$_) -replace '^[a-zA-Z]+:_', '') -replace '->.*$', '' } | Where-Object { $_ -match '^[a-zA-Z]:\\' })
+    $res = $paths -join '; '
+    $still = @($paths | Where-Object { Test-Path -LiteralPath $_ })
+    $ran = if ($th.DidThreatExecute) { 'JA – den nåede at køre' } else { 'nej' }
+    if ($th.IsActive -or $still.Count) {
+      # Stadig til stede: kræver handling
+      Add-Find 4 'Trussel' $th.ThreatName "Stadig til stede · Kørte: $ran · Fundet: $($d.InitialDetectionTime)" `
+        ("Fundet af Defender og stadig på pc'en{0}. Kør en dybdescanning (Defender Offline) for at fjerne den." -f $(if ($still.Count) { " ($($still.Count) fil(er))" } else { '' })) $res 'threat' $null
+    } else {
+      # Allerede fjernet: kun til orientering
+      Add-Find 1 'Trussel (fjernet)' "$($th.ThreatName) (fjernet)" "Fjernet af Defender · Kørte: $ran · Fundet: $($d.InitialDetectionTime)" `
+        ("Defender har fjernet den. Ingen handling nødvendig.{0}" -f $(if ($th.DidThreatExecute) { ' Den nåede dog at køre, så skift dine vigtigste adgangskoder for en sikkerheds skyld.' } else { '' })) $res 'threat' $null
+    }
+    Add-Time $d.InitialDetectionTime 'Defender' "Trussel fundet: $($th.ThreatName)" $res
+  }
+  $pref = Get-MpPreference
+  $exCount = 0
+  foreach ($x in @($pref.ExclusionPath) + @($pref.ExclusionProcess) + @($pref.ExclusionExtension)) {
+    if ($x -and $x -notmatch '^N/A') {
+      $exCount++
+      Add-Find 3 'Defender' "Undtagelse i Defender: $x" 'Defender scanner ikke dette sted/program' `
+        'Malware tilføjer ofte sig selv som undtagelse, så Defender ikke kan se den. Har du ikke selv tilføjet den, er den meget mistænkelig.' $x 'exclusion' $null
+    }
+  }
+  $st = Get-MpComputerStatus
+  if ($st -and -not $st.RealTimeProtectionEnabled) { Add-Find 4 'Defender' 'Realtidsbeskyttelse er SLÅET FRA' '' 'Malware forsøger ofte at slå Defender fra.' '' 'info' $null }
+  if ($st -and -not $st.IsTamperProtected)        { Add-Find 2 'Defender' 'Manipulationsbeskyttelse er slået fra' '' 'Uden den kan programmer ændre Defenders indstillinger.' '' 'info' $null }
+  Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 1116, 1117, 5001, 5007; StartTime = $since } -MaxEvents 300 | ForEach-Object {
+    $ev = $_
+    $what = switch ($ev.Id) { 1116 { 'Defender: trussel opdaget' } 1117 { 'Defender: handling udført' } 5001 { 'Defender: realtid SLÅET FRA' } 5007 { 'Defender: indstilling ændret' } }
+    $msg = ($ev.Message -split "`n" | Where-Object { $_ -match '(Navn|Name|Sti|Path|Ny værdi|New value|Exclusion)' } | Select-Object -First 3) -join ' | '
+    Add-Time $ev.TimeCreated 'Defender' $what $msg.Trim()
+    if ($ev.Id -eq 5007 -and $ev.Message -match 'Exclusion') { Add-Find $(if ($exCount) { 3 } else { 1 }) 'Defender' 'En Defender-undtagelse blev ændret' "$($ev.TimeCreated) · $($msg.Trim())" 'Nogen har ændret Defenders undtagelser. Tjek at det var dig.' '' 'info' $null $(if ($exCount) { 'Se om undtagelsen herunder er din egen. Kender du den ikke, så fjern den i Windows Sikkerhed → Virus- og trusselsbeskyttelse → Undtagelser.' } else { 'Der er ingen undtagelser lige nu, så der er ikke noget at gøre. Typisk var det en installer, der midlertidigt tilføjede en.' }) }
+  }
+
+  # ---------- Diskens helbred (advar i god tid) ----------
+  try {
+    foreach ($pd in @(Get-PhysicalDisk -ErrorAction SilentlyContinue)) {
+      $rc = $pd | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
+      $dn = "$($pd.FriendlyName)"
+      $errs = 0; if ($rc) { $errs = [int64]$rc.ReadErrorsUncorrected + [int64]$rc.WriteErrorsUncorrected }
+      if ($pd.HealthStatus -and $pd.HealthStatus -ne 'Healthy') {
+        Add-Find 4 'Disk' "Disken melder fejl: $dn" "Status: $($pd.HealthStatus) · $($pd.OperationalStatus)" 'Disken selv melder, at den har problemer. Den kan gå i stykker når som helst.' '' 'info' $null 'Tag backup af dine vigtige filer NU (fx til OneDrive eller et USB-drev), og udskift disken.'
+      } elseif ($rc -and $null -ne $rc.Wear -and [int]$rc.Wear -ge 80) {
+        Add-Find 3 'Disk' "SSD'en er næsten slidt op: $dn" "Slid: $([int]$rc.Wear) %" 'En SSD kan kun skrives et vist antal gange. Over 80 % slid stiger risikoen for at den pludselig dør.' '' 'info' $null 'Tag backup, og planlæg at skifte disken. Se detaljer under Ydelse og helbred.'
+      } elseif ($errs -gt 0) {
+        Add-Find 3 'Disk' "Disken har læse-/skrivefejl: $dn" "$errs fejl, der ikke kunne rettes" 'Data er gået tabt ved læsning eller skrivning. Det er ofte et tidligt tegn på, at disken er ved at dø.' '' 'info' $null 'Tag backup, og hold øje under Ydelse og helbred. Stiger tallet, så udskift disken.'
+      }
+    }
+  } catch {}
+
+  # ---------- 2. Installerede programmer + MSI-historik ----------
+  Phase 2 'Læser programmer og installationshistorik'
+  $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+  $progs = @(Get-ItemProperty $keys | Where-Object DisplayName)
+  $progNames = $progs.DisplayName
+  $msi = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; Id = 1033, 1034; StartTime = $since } -MaxEvents 500
+  $suspectWindows = New-Object System.Collections.ArrayList
+  foreach ($e in $msi) {
+    $p = $e.Properties
+    $name = [string]$p[0].Value; $ver = [string]$p[1].Value
+    $maker = if ($p.Count -ge 5) { [string]$p[4].Value } else { '' }
+    $what = if ($e.Id -eq 1033) { 'Installeret' } else { 'Afinstalleret' }
+    Add-Time $e.TimeCreated 'Installation' "$what`: $name $ver" "Producent: $(if ($maker) { $maker } else { '(ingen)' })"
+    if ($e.Id -eq 1033) {
+      $hidden = -not ($progNames -contains $name)
+      $noMaker = [string]::IsNullOrWhiteSpace($maker)
+      $kidsGame = $name -match '(?i)paw.?patrol|crack|keygen|free.?download|repack|torrent'
+      if ($hidden -or $noMaker -or $kidsGame) {
+        $why = @()
+        if ($hidden)   { $why += 'produktet står ikke længere på listen over installerede programmer (skjult eller fjernet)' }
+        if ($noMaker)  { $why += 'den har ingen producent' }
+        if ($kidsGame) { $why += 'navnet ligner en typisk falsk installer' }
+        $mrisk = if ($kidsGame -or ($hidden -and $noMaker)) { 3 } else { 2 }
+        Add-Find $mrisk 'Installation' "MSI-installation: $name" "$($e.TimeCreated) · producent: $(if ($maker) { $maker } else { '(ingen)' })" `
+          ('Bør gennemgås, fordi ' + ($why -join ', ') + '. Under Hændelsesforløb kan du se, hvad der ellers skete omkring samme tid.') '' 'msi' $null
+        [void]$suspectWindows.Add([pscustomobject]@{ Start = $e.TimeCreated.AddMinutes(-30); End = $e.TimeCreated.AddHours(6); Name = $name })
+      }
+    }
+  }
+
+  # ---------- 3. Autostart ----------
+  Phase 3 'Tjekker autostart og planlagte opgaver'
+  foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+                 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+                 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce') {
+    $i = Get-ItemProperty $k
+    if (-not $i) { continue }
+    foreach ($pr in ($i.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+      $exe = ExePath $pr.Value; $sg = Sig $exe
+      $risk = 0; $why = 'Starter automatisk, når du logger ind. Signeret af en kendt udgiver.'
+      if ($sg -notlike 'Signeret*') { $risk = 2; $why = 'Starter automatisk og er IKKE signeret.' }
+      if ($exe -match $UserWritable -and $sg -notlike 'Signeret*') { $risk = 3; $why = 'Usigneret program i en brugermappe, der starter automatisk. Det er et klassisk tegn på malware.' }
+      if ([string]$pr.Value -match $LolBins -and [string]$pr.Value -match $BadArgs) { $risk = 4; $why = 'Starter et skjult/kodet script automatisk. Det er et stærkt tegn på malware.' }
+      Add-Find $risk 'Autostart' "Run: $($pr.Name)" "$sg" $why ([string]$pr.Value) 'run' ([pscustomobject]@{ Key = $k; Name = $pr.Name; Value = [string]$pr.Value })
+    }
+  }
+  foreach ($sf in "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup", "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp") {
+    Get-ChildItem $sf -Force -File | Where-Object Name -ne 'desktop.ini' | ForEach-Object {
+      $r = if ($_.Extension -match '\.(vbs|js|bat|cmd|ps1|hta)$') { 3 } else { 1 }
+      Add-Find $r 'Autostart' "Startmappe: $($_.Name)" "Oprettet $($_.CreationTime)" 'Filer i Startup-mappen kører ved login. Scripts her er mistænkelige.' $_.FullName 'file' $null
+      Add-Time $_.CreationTime 'Fil' "Ny fil i Startup: $($_.Name)" $_.FullName
+    }
+  }
+  $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+  if ($wl.Shell -and $wl.Shell -ne 'explorer.exe') { Add-Find 4 'Autostart' 'Winlogon Shell er ændret' $wl.Shell 'Windows starter et andet program end Stifinder ved login.' $wl.Shell 'info' $null }
+  if ($wl.Userinit -and $wl.Userinit -notmatch '^C:\\Windows\\system32\\userinit\.exe,?$') { Add-Find 4 'Autostart' 'Winlogon Userinit er ændret' $wl.Userinit 'Et ekstra program startes ved hvert login.' $wl.Userinit 'info' $null }
+  Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' | ForEach-Object {
+    $dbg = (Get-ItemProperty $_.PSPath).Debugger
+    if ($dbg) { Add-Find 3 'Autostart' "IFEO-kapring: $($_.PSChildName)" $dbg 'Når programmet startes, kører Windows i stedet et andet program.' $dbg 'info' $null }
+  }
+
+  # Planlagte opgaver (ikke-Microsoft)
+  Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } | ForEach-Object {
+    $t = $_
+    foreach ($a in $t.Actions) {
+      if (-not $a.Execute) { continue }
+      $exe = ExePath $a.Execute; $sg = Sig $exe; $full = "$($a.Execute) $($a.Arguments)".Trim()
+      # PC-Tjeks egen opgave (fra installeren): kendt sti + kendt handling -> ikke et fund
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek Vagt' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Vagt.ps1*") {
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek Vagt (denne app)' 'Starter vagten, når du logger ind' 'Oprettet af PC-Tjek.' $full 'self' $null
+        continue
+      }
+      if ($t.TaskPath -eq '\' -and $t.TaskName -eq 'PC-Tjek' -and $exe -ieq "$env:SystemRoot\System32\conhost.exe" -and ($a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-App.ps1*" -or $a.Arguments -like "*$env:ProgramFiles\PC-Tjek\PC-Tjek-Start.ps1*")) {
+        Add-Find 0 'Planlagt opgave' 'PC-Tjek (denne app)' 'Starter PC-Tjek, når du klikker på ikonet' 'Oprettet af PC-Tjeks installer.' $full 'self' $null
+        continue
+      }
+      $risk = 0; $why = 'Planlagt opgave fra en signeret udgiver.'
+      if ($sg -notlike 'Signeret*') { $risk = 2; $why = 'Planlagt opgave, der kører et usigneret program.' }
+      if ($exe -match $UserWritable -and $sg -notlike 'Signeret*') { $risk = 3; $why = 'Usigneret program i en brugermappe, kørt af en planlagt opgave. Det er et typisk mønster for malware.' }
+      if ($full -match $LolBins -and $full -match $BadArgs) { $risk = 4; $why = 'Opgaven kører et skjult/kodet script eller henter noget fra nettet. Det er et stærkt tegn på malware.' }
+      if ($t.Settings.Hidden -and $risk -ge 2) { $risk = [math]::Min(4, $risk + 1); $why += ' Opgaven er desuden skjult.' }
+      Add-Find $risk 'Planlagt opgave' "$($t.TaskPath)$($t.TaskName)" "$sg · kører som $($t.Principal.UserId) · $([string]$t.State)" $why $full 'task' ([pscustomobject]@{ TaskPath = $t.TaskPath; TaskName = $t.TaskName })
+      if ($t.Date) { Add-Time $t.Date 'Opgave' "Planlagt opgave oprettet: $($t.TaskName)" $full }
+    }
+  }
+  Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 106; StartTime = $since } -MaxEvents 300 | ForEach-Object {
+    Add-Time $_.TimeCreated 'Opgave' "Opgave registreret: $($_.Properties[0].Value)" "af $($_.Properties[1].Value)"
+  }
+
+  # Tjenester (ikke Windows-signerede)
+  Phase 4 'Tjekker tjenester'
+  $svcs = @(Get-CimInstance Win32_Service); $si = 0
+  $svcs | ForEach-Object {
+    $si++; if ($si % 5 -eq 0) { Sub ($si / $svcs.Count) "$si af $($svcs.Count) tjenester tjekket" }
+    $exe = ExePath $_.PathName; $sg = Sig $exe
+    if ($sg -match 'Microsoft Windows') { return }
+    $risk = 0; $why = 'Tredjepartstjeneste fra en signeret udgiver.'
+    if ($sg -notlike 'Signeret*') { $risk = 2; $why = 'Tjeneste med et usigneret program.' }
+    if ($exe -match $UserWritable -and $sg -notlike 'Signeret*') { $risk = 4; $why = 'Usigneret tjeneste i en brugermappe. Tjenester kører som SYSTEM, så det er meget farligt.' }
+    if ($risk -ge 1 -or $_.StartMode -eq 'Auto') {
+      Add-Find $risk 'Tjeneste' "$($_.DisplayName) ($($_.Name))" "$sg · $($_.State) · start: $($_.StartMode)" $why $_.PathName 'service' $null
+    }
+  }
+  Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7045; StartTime = $since } -MaxEvents 200 | ForEach-Object {
+    Add-Time $_.TimeCreated 'Tjeneste' "Ny tjeneste installeret: $($_.Properties[0].Value)" ([string]$_.Properties[1].Value)
+  }
+
+  # WMI-persistens
+  foreach ($c in @(Get-CimInstance -Namespace root\subscription -ClassName CommandLineEventConsumer) + @(Get-CimInstance -Namespace root\subscription -ClassName ActiveScriptEventConsumer)) {
+    if ($c.Name -eq 'SCM Event Log Consumer') { continue }
+    Add-Find 4 'Autostart' "WMI-abonnement: $($c.Name)" "$($c.CommandLineTemplate)$($c.ScriptText)" 'WMI-abonnementer er en skjult måde at starte kode på, som næsten kun malware bruger.' '' 'info' $null
+  }
+
+  # ---------- 4. Processer + netværk ----------
+  Phase 5 'Tjekker kørende programmer og netværk'
+  $procs = @{}
+  Get-CimInstance Win32_Process | ForEach-Object { $procs[[int]$_.ProcessId] = $_ }
+  $sigCache = @{}
+  Get-NetTCPConnection -State Established | Where-Object { $_.RemoteAddress -notmatch '^(127\.|::1|0\.0\.0\.0)' } | Group-Object OwningProcess | ForEach-Object {
+    $pp = $procs[[int]$_.Name]; if (-not $pp) { return }
+    if ([int]$_.Name -le 4 -or -not $pp.ExecutablePath) { return }   # Windows-kernen (System/Idle) har ingen programfil
+    $path = $pp.ExecutablePath
+    if (-not $sigCache.ContainsKey("$path")) { $sigCache["$path"] = Sig $path }
+    $sg = $sigCache["$path"]
+    if ($sg -notlike 'Signeret*') {
+      $remotes = ($_.Group | Select-Object -First 5 | ForEach-Object { "$($_.RemoteAddress):$($_.RemotePort)" }) -join ', '
+      $lanOnly = -not @($_.Group | Where-Object { $_.RemoteAddress -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|fe80:|fd|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)' }).Count
+      if ($lanOnly) {
+        Add-Find 1 'Netværk' "Program på dit eget netværk: $($pp.Name)" "$($_.Count) forbindelser → $remotes" 'Forbindelsen går kun til enheder på dit eget netværk (fx din server, NAS eller printer).' $path 'file' $null 'Normalt ufarligt. Kender du programmet, kan du markere det som OK.'
+      } else {
+        $r = if ($path -match $UserWritable) { 4 } else { 3 }
+        Add-Find $r 'Netværk' "Usigneret program på nettet: $($pp.Name)" "$($_.Count) forbindelser → $remotes" 'Et program uden verificeret udgiver har forbindelse til internettet. Det er tit helt normale programmer, men en backdoor ville også se sådan ud.' $path 'file' $null 'Tryk på VirusTotal. Er filen ren, og kender du programmet, så markér det som OK. Kender du det ikke, så åbn placeringen og se, hvilket program mappen hører til.'
+      }
+    }
+  }
+  foreach ($pp in $procs.Values) {
+    if ($pp.CommandLine -and $pp.CommandLine -match $LolBins -and $pp.CommandLine -match $BadArgs -and $pp.ProcessId -ne $PID -and $pp.CommandLine -notmatch '(?i)\\PC-Tjek\\(PC-Tjek-App\.ps1|PC-Tjek-Start\.ps1|PC-Tjek-Vagt\.ps1|jobs\\)') {
+      Add-Find 4 'Proces' "Mistænkelig kommando kører: $($pp.Name)" $pp.CommandLine 'Et skjult/kodet script kører lige nu.' $pp.ExecutablePath 'file' $null
+    }
+  }
+  $hosts = Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" | Where-Object { $_ -and $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*(127\.0\.0\.1|::1)\s+localhost' }
+  if ($hosts) { Add-Find 2 'Netværk' 'Hosts-filen er ændret' (($hosts | Select-Object -First 5) -join ' | ') 'Hosts-filen kan omdirigere hjemmesider. Det kan være legitimt (fx adblock) eller kapring.' "$env:SystemRoot\System32\drivers\etc\hosts" 'file' $null }
+  $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+  if ($ie.ProxyEnable -eq 1 -or $ie.AutoConfigURL) { Add-Find 3 'Netværk' 'Proxy er slået til' "$($ie.ProxyServer) $($ie.AutoConfigURL)" 'Al din trafik kan blive sendt gennem en fremmed server. Det er typisk for adware og bankmalware.' '' 'info' $null }
+
+  # ---------- 5. Nye filer i typiske gemmesteder ----------
+  Phase 6 'Leder efter nye programfiler'
+  $ext = '.exe', '.dll', '.ps1', '.vbs', '.js', '.bat', '.cmd', '.msi', '.scr', '.jar', '.hta'
+  $skip = '(?i)\\(Packages|WinGet|Microsoft\\Edge|Microsoft\\Teams|Google\\Chrome\\Application|Google\\Chrome\\User Data\\[^\\]+\\(Cache|Code Cache|Extensions)|npm-cache|pip\\cache|Discord\\app-|Spotify|NVIDIA|Steam|squirrel|\\Programs\\(Microsoft VS Code|Obsidian|GitHub Desktop|claude|chatgpt))\\'
+  $roots = "$env:ProgramData", "$env:LOCALAPPDATA", "$env:APPDATA", "$env:TEMP", "$env:PUBLIC", 'C:\Windows\Temp'
+  # Egen mappegennemgang: følger IKKE genveje/junctions (undgår løkker) og springer store caches over
+  $skipDir = '(?i)^(node_modules|\.git|Packages|WindowsApps|WinGet|Package Cache|Cache|Code Cache|GPUCache|cache2|CacheStorage|Service Worker|IndexedDB|INetCache|npm-cache|\.cache|DXCache|GLCache|D3DSCache|Crashpad)$'
+  $found = New-Object System.Collections.ArrayList
+  $seen = 0; $ri = 0
+  foreach ($r in $roots) {
+    $ri++; $leaf = Split-Path $r -Leaf
+    Sub (($ri - 1) / $roots.Count) "Gennemgår $leaf..."
+    if (-not (Test-Path -LiteralPath $r)) { continue }
+    $stack = New-Object System.Collections.Stack
+    $stack.Push((New-Object IO.DirectoryInfo $r))
+    while ($stack.Count -gt 0) {
+      $d = $stack.Pop()
+      try {
+        foreach ($e in $d.EnumerateFileSystemInfos()) {
+          if ($e -is [IO.DirectoryInfo]) {
+            if (($e.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $e.Name -match $skipDir) { continue }
+            $stack.Push($e)
+          } else {
+            $seen++
+            if ($seen % 1000 -eq 0) { Sub (($ri - 1 + [math]::Min(0.95, $seen / 80000.0)) / $roots.Count) ('{0:N0} filer gennemgået · {1}' -f $seen, $leaf) }
+            if ($e.CreationTime -gt $since -and $ext -contains $e.Extension.ToLower() -and $e.FullName -notmatch $skip) { [void]$found.Add($e) }
+          }
+        }
+      } catch { }   # ingen adgang / mappe forsvundet
+    }
+  }
+  $files = @($found | Sort-Object CreationTime -Descending | Select-Object -First 1500)
+  Phase 7 "Tjekker signaturer på $($files.Count) nye filer"
+  $n = 0
+  foreach ($f in $files) {
+    $n++; if ($n % 10 -eq 0) { Sub (0.7 * $n / [math]::Max(1, $files.Count)) "$n af $($files.Count) filer tjekket" }
+    $isBin = $f.Extension.ToLower() -in '.exe', '.dll', '.msi', '.scr'
+    $sg = if ($isBin) { Sig $f.FullName } else { 'script' }
+    if ($sg -like 'Signeret*') { continue }
+    $sha = $null; $blocked = $sg -eq 'BLOKERET AF DEFENDER'
+    if (-not $blocked -and $f.Length -lt 100MB) {
+      try { $sha = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { if (IsVirusErr $_) { $blocked = $true } }
+    }
+    if ($blocked) {
+      Add-Time $f.CreationTime 'Defender' "INFICERET FIL: $($f.Name)" $f.FullName
+      Add-Find 4 'Trussel' "Inficeret fil: $($f.Name)" "Windows nægter at åbne den · oprettet $($f.CreationTime) · $([math]::Round($f.Length / 1KB)) KB" `
+        'Defender blokerer filen, fordi den indeholder malware, men den ligger stadig på disken. Kør en Microsoft Defender Offline-scanning (Ydelse og helbred → Defender Offline-scan), som kan fjerne den, før Windows starter.' $f.FullName 'file' $null
+      continue
+    }
+    # Kun "Bør gennemgås" (2) for de klassiske gemmesteder; resten er info (1)
+    $rel = $f.FullName
+    $hideout = $rel -match '(?i)\\(Temp|Users\\Public|Start Menu\\Programs\\Startup)\\' -or $rel -match '(?i)\\AppData\\(Roaming|Local)\\[^\\]+$' -or $rel -match '(?i)^C:\\ProgramData\\[^\\]+$'
+    $risky = ($f.Extension.ToLower() -in '.hta', '.scr') -or
+             ($f.Extension.ToLower() -in '.vbs', '.js', '.jar', '.ps1', '.bat', '.cmd' -and $hideout) -or
+             ($rel -match '(?i)\\Users\\Public\\') -or
+             ($rel -match '(?i)\\AppData\\(Roaming|Local)\\[^\\]+\.(exe|dll|scr)$') -or
+             ($rel -match '(?i)^C:\\ProgramData\\[^\\]+\.(exe|dll|scr)$') -or
+             ($rel -match '(?i)\\Start Menu\\Programs\\Startup\\')
+    $risk = if ($risky) { 2 } else { 1 }
+    Add-Time $f.CreationTime 'Fil' "Ny usigneret fil: $($f.Name)" $f.FullName
+    Add-Find $risk 'Ny fil' $f.Name "$([math]::Round($f.Length / 1KB)) KB · oprettet $($f.CreationTime) · $sg" `
+      'Usigneret programfil oprettet for nylig et sted, hvor malware ofte lægger sig. Mange er ufarlige (spil, værktøjer). Brug "Tjek på VirusTotal" ved tvivl.' $f.FullName 'file' $null
+    $AllFinds[$AllFinds.Count - 1].SHA256 = $sha
+  }
+
+  # Lad Defender tjekke de markerede filer, KUN læsning (-DisableRemediation: Defender ændrer intet).
+  # Resultatet læses fra Defenders egen tekst: "found no threats" / "found N threats". Alt andet = kunne ikke verificeres.
+  $mpcmd = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+  $toCheck = @($AllFinds | Where-Object { $_.Kategori -eq 'Ny fil' -and $_.Niveau -ge 2 -and $_.Sti } | Select-Object -First 80)
+  if ($toCheck.Count -and (Test-Path $mpcmd)) {
+    Status "Defender tjekker $($toCheck.Count) markerede filer"
+    $ci = 0
+    foreach ($x in $toCheck) {
+      $ci++; Sub (0.7 + 0.3 * $ci / $toCheck.Count) "Defender tjekker fil $ci af $($toCheck.Count)"
+      if (-not (Test-Path -LiteralPath $x.Sti)) { continue }
+      $out = (& $mpcmd -Scan -ScanType 3 -File $x.Sti -DisableRemediation 2>&1 | ForEach-Object { [string]$_ }) -join "`n"
+      $code = $LASTEXITCODE
+      $nThreat = if ($out -match '(?i)found (\d+) threat') { [int]$matches[1] } else { -1 }
+      if ($nThreat -gt 0) {
+        $x.Niveau = 4; $x.Risiko = 'Kritisk'; $x.Kategori = 'Trussel'; $x.Titel = "Defender fandt malware: $(Split-Path $x.Sti -Leaf)"
+        $x.Hvorfor = 'Fundet af Defender under tjekket. Scanningen har ikke ændret noget, så filen ligger der stadig.'
+        $x.Raad = 'Brug trinnet "Fjern virus" på Overblik. Så fjerner Defender den.'
+        Add-Time (Get-Date) 'Defender' "Malware fundet ved tjek: $(Split-Path $x.Sti -Leaf)" $x.Sti
+      } elseif ($code -eq 0 -and $out -match '(?i)found no threats') {
+        $x.Niveau = 1; $x.Risiko = 'Lav'; $x.Detalje = '✓ Tjekket af Defender: intet fundet · ' + $x.Detalje
+        $x.Raad = 'Defender har tjekket filen og fandt intet. Du behøver ikke gøre noget.'
+      } else {
+        $x.Detalje = '? Kunne ikke verificeres af Defender · ' + $x.Detalje
+      }
+    }
+  }
+
+  # ---------- 6. Browser ----------
+  Phase 8 'Tjekker browserudvidelser'
+  $browsers = @{ Chrome = "$env:LOCALAPPDATA\Google\Chrome\User Data"; Edge = "$env:LOCALAPPDATA\Microsoft\Edge\User Data" }
+  foreach ($b in $browsers.Keys) {
+    Get-ChildItem $browsers[$b] -Directory | Where-Object { $_.Name -match '^(Default|Profile \d+)$' } | ForEach-Object {
+      $prof = $_.Name
+      Get-ChildItem (Join-Path $_.FullName 'Extensions') -Directory | ForEach-Object {
+        $m = Get-ChildItem $_.FullName -Recurse -Filter manifest.json | Select-Object -First 1
+        if (-not $m) { return }
+        $j = Get-Content $m.FullName -Raw | ConvertFrom-Json
+        $name = [string]$j.name
+        if ($name -match '^__MSG_') { $name = "(id $($_.Name))" }
+        $perms = (@($j.permissions) + @($j.host_permissions)) -join ' '
+        $broad = $perms -match '<all_urls>|\*://\*/\*|http://\*/\*|https://\*/\*'
+        $risk = if ($broad -and $perms -match 'webRequest|cookies|scripting|tabs') { 2 } elseif ($broad) { 1 } else { 0 }
+        Add-Find $risk 'Browser' "$b-udvidelse: $name" "$prof · v$($j.version) · installeret $($m.Directory.CreationTime)" `
+          $(if ($risk -ge 2) { 'Udvidelsen kan læse og ændre ALLE sider, du besøger (inkl. cookies). Kender du den ikke, så fjern den.' } else { 'Browserudvidelse.' }) $m.Directory.FullName 'file' $null
+        Add-Time $m.Directory.CreationTime 'Browser' "$b-udvidelse installeret: $name" $prof
+      }
+    }
+  }
+  foreach ($pk in 'HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist', 'HKCU:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist') {
+    $v = Get-ItemProperty $pk
+    if ($v) { Add-Find 4 'Browser' 'Tvangsinstallerede browserudvidelser (politik)' (($v.PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object Value) -join ' | ') 'En politik tvinger udvidelser ind i browseren, så du ikke kan fjerne dem. Det er klassisk adware/hijacker-adfærd på en privat pc.' $pk 'info' $null }
+  }
+
+  # ---------- 7. Bloat + plads ----------
+  Phase 9 'Beregner plads og bloat'
+  $AllSpace = New-Object System.Collections.ArrayList
+  $pi = 0
+  function DirSize($p) { (Get-ChildItem -LiteralPath $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum }
+  foreach ($x in @(
+      @{ N = 'Midlertidige filer (din bruger)'; P = $env:TEMP; Note = 'Sikkert at rydde (lukkede programmers rester)' },
+      @{ N = 'Midlertidige filer (Windows)'; P = 'C:\Windows\Temp'; Note = 'Sikkert at rydde' },
+      @{ N = 'Windows Update-downloads'; P = 'C:\Windows\SoftwareDistribution\Download'; Note = 'Ryd via Diskoprydning' },
+      @{ N = 'Papirkurv'; P = 'C:\$Recycle.Bin'; Note = 'Tøm, når du har tjekket den' },
+      @{ N = 'Overførsler'; P = (Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'); Note = 'Gennemgå manuelt (gamle installere!)' },
+      @{ N = 'Crash dumps'; P = "$env:LOCALAPPDATA\CrashDumps"; Note = 'Sikkert at slette' })) {
+    $pi++; Sub ($pi / 6) "Måler $($x.N)..."
+    $sz = DirSize $x.P
+    [void]$AllSpace.Add([pscustomobject]@{ Hvad = $x.N; GB = [math]::Round($sz / 1GB, 2); Note = $x.Note; Sti = $x.P })
+  }
+  $bloatRx = '(?i)^(GIGABYTE|GBT_|PowerISO|Futuremark|McAfee|Norton|WildTangent|IObit|Driver Booster|ByteFence|Segurazo|OneLaunch|Wave Browser|Web Companion|Avast|AVG |CCleaner|Advanced SystemCare|PC App Store|Shift Browser)'
+  foreach ($p in ($progs | Where-Object { $_.DisplayName -match $bloatRx })) {
+    Add-Find 1 'Bloat' $p.DisplayName "$($p.Publisher) · $([math]::Round(($p.EstimatedSize / 1KB), 0)) MB" 'Typisk bloat: kører ofte i baggrunden og giver kun lidt værdi. Kan afinstalleres med knappen nedenfor.' '' 'uninstall' ([pscustomobject]@{ Cmd = [string]$p.UninstallString })
+  }
+  $appxBloat = 'Microsoft.BingNews', 'Microsoft.BingWeather', 'Microsoft.BingSearch', 'Microsoft.MicrosoftSolitaireCollection', 'Clipchamp.Clipchamp',
+               'Microsoft.Todos', 'Microsoft.PowerAutomateDesktop', 'MicrosoftCorporationII.MicrosoftFamily', 'Microsoft.People', 'Microsoft.Getstarted',
+               'Microsoft.WindowsFeedbackHub', 'Microsoft.Copilot', 'MicrosoftTeams', 'Microsoft.MicrosoftOfficeHub'
+  foreach ($a in (Get-AppxPackage | Where-Object { $appxBloat -contains $_.Name })) {
+    Add-Find 1 'Bloat' "Windows-app: $($a.Name -replace '^(Microsoft|MicrosoftCorporationII|Clipchamp)\.', '')" "v$($a.Version)" 'Forudinstalleret Microsoft-app. Harmløs, men unødvendig, hvis du ikke bruger den.' '' 'appx' ([pscustomobject]@{ Package = $a.PackageFullName })
+  }
+
+  # ---------- 8. Analyse: fokusvindue + fortælling ----------
+  Phase 10 'Analyserer hændelsesforløbet'
+  foreach ($ev in $AllTimes) {
+    foreach ($w in $suspectWindows) { if ($ev.Tid -ge $w.Start -and $ev.Tid -le $w.End) { $ev.Fokus = "⚠ efter $($w.Name)" } }
+  }
+  $boot = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 |
+    ForEach-Object { (([xml]$_.ToXml()).Event.EventData.Data | Where-Object Name -eq 'BootTime').'#text' }
+  $os = Get-CimInstance Win32_OperatingSystem
+  $top = $procs.Values | Group-Object Name | ForEach-Object { [pscustomobject]@{ Navn = $_.Name; MB = [math]::Round((($_.Group | Measure-Object WorkingSetSize -Sum).Sum) / 1MB) } } | Sort-Object MB -Descending | Select-Object -First 8
+
+  $snap = [ordered]@{
+    Autostart   = @($AllFinds | Where-Object { $_.Kategori -eq 'Autostart' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
+    Opgaver     = @($AllFinds | Where-Object { $_.Kategori -eq 'Planlagt opgave' } | ForEach-Object { "$($_.Titel) = $($_.Sti)" } | Sort-Object -Unique)
+    Tjenester   = @($AllFinds | Where-Object { $_.Kategori -eq 'Tjeneste' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
+    Browser     = @($AllFinds | Where-Object { $_.Kategori -eq 'Browser' -and $_.Titel -like '*-udvidelse:*' } | ForEach-Object { $_.Titel } | Sort-Object -Unique)
+    Programmer  = @($progs | ForEach-Object { $_.DisplayName } | Sort-Object -Unique)
+    Undtagelser = @($AllFinds | Where-Object { $_.Type -eq 'exclusion' } | ForEach-Object { $_.Sti } | Sort-Object -Unique)
+  }
+  $phaseSec = @{}
+  for ($i = 1; $i -le $Phases.Count; $i++) {
+    $next = if ($i -lt $Phases.Count -and $sync.PhaseTimes[$i + 1]) { $sync.PhaseTimes[$i + 1] } else { Get-Date }
+    if ($sync.PhaseTimes[$i]) { $phaseSec["$i"] = [math]::Round(($next - $sync.PhaseTimes[$i]).TotalSeconds, 1) }
+  }
+  $sync.Progress = 100.0
+  Status 'Færdig.'
+  return @{
+    PhaseSec = $phaseSec
+    Findings = @($AllFinds | Sort-Object Niveau -Descending)
+    Timeline = @($AllTimes | Sort-Object Tid -Descending)
+    Space    = @($AllSpace)
+    Perf     = [pscustomobject]@{ BootSek = $(if ($boot) { [math]::Round([int]$boot / 1000) } else { $null }); RamBrugtPct = [math]::Round(100 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize * 100)); Top = $top; SidsteStart = $os.LastBootUpTime }
+    Suspect  = @($suspectWindows)
+    Snapshot = $snap
+  }
+}

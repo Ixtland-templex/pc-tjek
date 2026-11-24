@@ -1,0 +1,2400 @@
+
+# =====================================================================
+#  ARBEJDE I BAGGRUNDEN (oprydning, filer, opdateringer)
+# =====================================================================
+$CleanMeasureScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $res = @{}
+  foreach ($c in $arg.Cats) {
+    $sync.Status = "Måler: $($c.Navn)..."
+    $cut = (Get-Date).AddHours(-[double]$c.MinAgeHours)
+    $sum = 0
+    if ($c.Special -eq 'recycle') {
+      $sum = (Get-ChildItem 'C:\$Recycle.Bin' -Recurse -Force -File | Measure-Object Length -Sum).Sum
+    } else {
+      foreach ($p in $c.Paths) {
+        foreach ($root in @(Get-Item -Path $p -Force)) {
+          if ($root.PSIsContainer) { $sum += (Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -File | Where-Object { $_.LastWriteTime -lt $cut } | Measure-Object Length -Sum).Sum }
+          else { if ($root.LastWriteTime -lt $cut) { $sum += $root.Length } }
+        }
+      }
+    }
+    $res[$c.Id] = [double]$sum
+  }
+  return $res
+}
+$CleanRunScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $freed = @{}; $skipped = 0
+  foreach ($c in $arg.Cats) {
+    $sync.Status = "Rydder op: $($c.Navn)..."
+    $cut = (Get-Date).AddHours(-[double]$c.MinAgeHours)
+    $n = 0
+    if ($c.Special -eq 'recycle') {
+      $n = (Get-ChildItem 'C:\$Recycle.Bin' -Recurse -Force -File | Measure-Object Length -Sum).Sum
+      Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+    } elseif ($c.Special -eq 'do' -and (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) {
+      Delete-DeliveryOptimizationCache -Force -ErrorAction SilentlyContinue | Out-Null
+    } else {
+      foreach ($p in $c.Paths) {
+        foreach ($root in @(Get-Item -Path $p -Force)) {
+          $files = if ($root.PSIsContainer) { Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -File } else { @($root) }
+          foreach ($f in $files) {
+            if ($f.LastWriteTime -ge $cut) { continue }
+            $len = $f.Length
+            try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $n += $len } catch { $skipped++ }   # filer i brug springes over
+          }
+          if ($root.PSIsContainer) {   # tomme undermapper
+            Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -Directory | Sort-Object { $_.FullName.Length } -Descending |
+              ForEach-Object { if (-not (Get-ChildItem -LiteralPath $_.FullName -Force)) { Remove-Item -LiteralPath $_.FullName -Force } }
+          }
+        }
+      }
+    }
+    $freed[$c.Id] = [double]$n
+  }
+  $freed['_skipped'] = [double]$skipped
+  return $freed
+}
+
+$FilesScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $rows = New-Object System.Collections.ArrayList
+  $prof = [Environment]::GetFolderPath('UserProfile')
+  $dl = Join-Path $prof 'Downloads'
+  $scanRoots = @($dl, [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'), (Join-Path $prof 'Videos'), (Join-Path $prof 'Music'), (Join-Path $prof 'Pictures')) | Where-Object { Test-Path $_ }
+  $sync.Status = 'Gennemgår dine mapper...'
+  $all = foreach ($r in $scanRoots) { Get-ChildItem -LiteralPath $r -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(PC-Tjek-rapport|\.git|node_modules)\\' -and -not ($_.Attributes -band [IO.FileAttributes]::Offline) } }
+  $all = @($all)
+
+  # Dubletter: samme størrelse -> samme SHA256
+  $sync.Status = 'Leder efter dubletter...'
+  $cand = $all | Where-Object { $_.Length -ge 50KB } | Group-Object Length | Where-Object Count -gt 1
+  $hashed = 0; $budget = 30GB
+  foreach ($g in $cand) {
+    if ($hashed -gt $budget) { break }
+    $byHash = $g.Group | ForEach-Object { $hashed += $_.Length; [pscustomobject]@{ F = $_; H = $(try { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash } catch { $null }) } } | Where-Object H | Group-Object H | Where-Object Count -gt 1
+    foreach ($h in $byHash) {
+      # behold den med "pæneste" navn (uden (1)), ellers den nyeste
+      $sorted = $h.Group | Sort-Object @{ e = { $_.F.Name -match '\(\d+\)|kopi|copy' } }, @{ e = { $_.F.LastWriteTime }; Descending = $true }
+      $keep = $sorted[0].F
+      foreach ($x in $sorted) {
+        $isKeep = $x.F.FullName -eq $keep.FullName
+        [void]$rows.Add([pscustomobject]@{ Gruppe = 'Dublet'; Navn = $x.F.Name; Mappe = $x.F.DirectoryName; MB = [math]::Round($x.F.Length / 1MB, 1)
+          Dato = $x.F.LastWriteTime; Forslag = -not $isKeep; Note = $(if ($isKeep) { "Behold (original) · $($h.Count) ens kopier" } else { "Kopi af $($keep.Name)" }); Sti = $x.F.FullName; Hash = $h.Name.Substring(0, 8) })
+      }
+    }
+  }
+
+  # Gamle installere i Overførsler
+  $sync.Status = 'Finder gamle installere...'
+  $progs = @($arg.Programs | ForEach-Object { ($_ -replace '[^a-z0-9]', '').ToLower() })
+  Get-ChildItem -LiteralPath $dl -File -Force | Where-Object { $_.Extension -match '^\.(exe|msi|msix|msixbundle|appx)$' } | ForEach-Object {
+    $base = (($_.BaseName -split '[-_ .(]')[0] -replace '[^a-z0-9]', '').ToLower()
+    $installed = $base.Length -ge 4 -and ($progs | Where-Object { $_ -like "$base*" } | Select-Object -First 1)
+    $old = $_.LastWriteTime -lt (Get-Date).AddDays(-14)
+    $note = if ($installed) { 'Programmet er installeret, så installeren skal ikke bruges igen' } elseif ($old) { 'Gammel installer (over 14 dage)' } else { 'Ny installer. Behold, hvis du ikke har kørt den endnu' }
+    [void]$rows.Add([pscustomobject]@{ Gruppe = 'Installer'; Navn = $_.Name; Mappe = $_.DirectoryName; MB = [math]::Round($_.Length / 1MB, 1); Dato = $_.LastWriteTime
+      Forslag = [bool]($installed -or $old); Note = $note; Sti = $_.FullName; Hash = '' })
+  }
+
+  # Store filer
+  $sync.Status = 'Finder de største filer...'
+  $all | Where-Object { $_.Length -ge 300MB } | Sort-Object Length -Descending | Select-Object -First 30 | ForEach-Object {
+    $fi = $_
+    $note = switch -Regex ($fi.Extension) { '\.iso$' { 'Diskbillede. Kan slettes, hvis programmet er installeret' } '\.(zip|7z|rar)$' { 'Arkiv. Slet, hvis det allerede er pakket ud' } '\.(mp4|mkv|mov)$' { 'Video' } default { 'Stor fil' } }
+    [void]$rows.Add([pscustomobject]@{ Gruppe = 'Stor fil'; Navn = $fi.Name; Mappe = $fi.DirectoryName; MB = [math]::Round($fi.Length / 1MB, 0); Dato = $fi.LastWriteTime
+      Forslag = $false; Note = $note; Sti = $fi.FullName; Hash = '' })
+  }
+  return @($rows)
+}
+
+$WingetListScript = {
+  param($sync, $arg)
+  $sync.Status = 'Spørger winget om opdateringer (kan tage et minut)...'
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'winget blev ikke fundet. Installér "App Installer" fra Microsoft Store.' }
+  [Console]::OutputEncoding = [Text.Encoding]::UTF8
+  $lines = @(& winget upgrade --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { ([string]$_ -split "`r")[-1] })
+  $sep = -1
+  for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^-{10,}') { $sep = $i; break } }
+  if ($sep -lt 1) {
+    if (($lines -join ' ') -match '(?i)no installed package|no applicable|ingen installerede|ingen tilgængelige|no available upgrade') { return @() }
+    throw 'Kunne ikke læse svaret fra winget. Prøv igen senere.'
+  }
+  $starts = @(); $m = [regex]::Matches($lines[$sep - 1], '\S+')
+  foreach ($x in $m) { $starts += $x.Index }
+  if ($starts.Count -lt 4) { return @() }
+  $out = @()
+  for ($i = $sep + 1; $i -lt $lines.Count; $i++) {
+    $l = $lines[$i]
+    if ([string]::IsNullOrWhiteSpace($l) -or $l -match '^-{5,}') { if ($out.Count) { break } else { continue } }
+    if ($l.Length -lt $starts[3] -or $l -match '^\d+ (opgraderinger|upgrades|pakke|package)' ) { continue }
+    $cut = { param($a, $b) if ($l.Length -le $a) { '' } elseif ($b -lt 0 -or $b -gt $l.Length) { $l.Substring($a).Trim() } else { $l.Substring($a, $b - $a).Trim() } }
+    $name = & $cut $starts[0] $starts[1]; $id = & $cut $starts[1] $starts[2]; $ver = & $cut $starts[2] $starts[3]
+    $avail = & $cut $starts[3] $(if ($starts.Count -gt 4) { $starts[4] } else { -1 })
+    if ($id -and $id -notmatch '\s' -and $avail) { $out += [pscustomobject]@{ Navn = $name; Id = $id; Version = $ver; Ny = $avail } }
+  }
+  return $out
+}
+$WingetUpgradeScript = {
+  param($sync, $arg)
+  [Console]::OutputEncoding = [Text.Encoding]::UTF8
+  $res = @{}
+  $i = 0
+  foreach ($id in $arg.Ids) {
+    $i++
+    $sync.Status = "Opdaterer $id ($i af $($arg.Ids.Count))..."
+    $o = & winget upgrade --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { [string]$_ }
+    $res[$id] = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Fejl ($LASTEXITCODE)" }
+  }
+  return $res
+}
+$RestorePointScript = {
+  param($sync, $arg)
+  $sync.Status = 'Opretter gendannelsespunkt (kan tage op til et minut)...'
+  Checkpoint-Computer -Description "PC-Tjek $($arg.Why)" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop -WarningAction SilentlyContinue
+  return 'ok'
+}
+
+
+# =====================================================================
+#  Sikkerhedstjek: Windows' egne beskyttelser (kører i baggrunden)
+# =====================================================================
+$SecScript = {
+  param($sync, $arg)
+  $sync.Status = 'Tjekker Windows-beskyttelse...'
+  $out = New-Object System.Collections.ArrayList
+  function Add-Sec($id, $ok, $name, $val, $note, $how, $fix, $uri) {
+    [void]$out.Add([pscustomobject]@{ Id = $id; Ok = $ok; Navn = $name; Info = [string]$val; Note = $note; How = $how; Fix = $fix; Uri = $uri })
+  }
+  $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+  $laptop = $cs -and ($cs.PCSystemType -eq 2)
+  $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+  $build = 0; [void][int]::TryParse([string]$cv.CurrentBuild, [ref]$build)
+  $disp = [string]$cv.DisplayVersion; $ed = [string]$cv.EditionID
+
+  # 1. Windows-version
+  try {
+    if ($build -gt 0 -and $build -lt 22000) {
+      Add-Sec 'winver' 0 'Windows-version' "Windows 10 $disp" 'Windows 10 fik sin sidste almindelige sikkerhedsopdatering i oktober 2025. Nye huller bliver kun lukket, hvis pc''en er tilmeldt ESU.' 'Opgradér til Windows 11, hvis pc''en kan. Ellers: Windows Update → tilmeld "Udvidede sikkerhedsopdateringer" (ESU).' '' 'ms-settings:windowsupdate'
+    } elseif ($build -gt 0 -and $build -lt 26200 -and $ed -notmatch 'Enterprise|Education|IoT|Server') {
+      Add-Sec 'winver' 0 'Windows-version' "Windows 11 $disp" "Version $disp af Home/Pro får ikke længere sikkerhedsopdateringer." 'Windows Update → installér den nyeste version af Windows 11 (25H2 eller nyere). Det er gratis og beholder dine filer og programmer.' '' 'ms-settings:windowsupdate'
+    } else {
+      Add-Sec 'winver' 2 'Windows-version' "Windows $(if ($build -ge 22000) { '11' } else { '' }) $disp" 'Får stadig sikkerhedsopdateringer' '' '' ''
+    }
+  } catch {}
+
+  # 2. Opdateringer sat på pause?
+  try {
+    $pz = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name PauseUpdatesExpiryTime -ErrorAction SilentlyContinue).PauseUpdatesExpiryTime
+    $pd = $null
+    if ($pz) { try { $pd = [datetime]::Parse([string]$pz, [Globalization.CultureInfo]::InvariantCulture).ToLocalTime() } catch {} }
+    if ($pd -and $pd -gt (Get-Date)) {
+      Add-Sec 'wupause' 1 'Windows Update' "På pause til $($pd.ToString('d. MMM'))" 'Mens opdateringer er sat på pause, bliver nye sikkerhedshuller ikke lukket.' 'Windows Update → "Genoptag opdateringer".' '' 'ms-settings:windowsupdate'
+    } else { Add-Sec 'wupause' 2 'Windows Update' 'Kører' 'Ikke sat på pause' '' '' '' }
+  } catch {}
+
+  # 3. Antivirus + Defender
+  $defActive = $true
+  try {
+    $st = Get-MpComputerStatus -ErrorAction Stop
+    $other = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction SilentlyContinue |
+      Where-Object { $_.displayName -notmatch 'Defender' -and ((([int]$_.productState) -shr 12) -band 0xF) -eq 1 })
+    if ($other.Count -and -not $st.RealTimeProtectionEnabled) {
+      $defActive = $false
+      Add-Sec 'av' 2 'Antivirus' $other[0].displayName 'Et andet antivirusprogram passer på pc''en' '' '' ''
+    } elseif (-not $st.RealTimeProtectionEnabled) {
+      Add-Sec 'av' 0 'Antivirus' 'Realtidsbeskyttelse er FRA' 'Pc''en er ubeskyttet mod nye virus. Malware slår den ofte selv fra.' 'Windows Sikkerhed → Virus- og trusselsbeskyttelse → slå Realtidsbeskyttelse til. Kør derefter en fuld scanning.' '' 'windowsdefender://threatsettings'
+    } else {
+      $age = [int]$st.AntivirusSignatureAge
+      if ($age -gt 3) { Add-Sec 'av' 1 'Antivirus' "Defender · virusdefinitioner $age dage gamle" 'Defender kender ikke de nyeste virus.' 'Opticon kan hente de nyeste definitioner nu.' 'sigs' 'windowsdefender://threat' }
+      else { Add-Sec 'av' 2 'Antivirus' 'Microsoft Defender · opdateret' 'Realtidsbeskyttelse er til' '' '' '' }
+    }
+    if ($defActive) {
+      if ($st.IsTamperProtected) { Add-Sec 'tamper' 2 'Manipulationsbeskyttelse' 'Til' 'Programmer kan ikke slå Defender fra bag din ryg' '' '' '' }
+      else { Add-Sec 'tamper' 1 'Manipulationsbeskyttelse' 'Fra' 'Uden den kan malware slå Defender fra.' 'Windows Sikkerhed → Virus- og trusselsbeskyttelse → Administrer indstillinger → Manipulationsbeskyttelse: Til. (Kan kun slås til af dig selv, så malware ikke kan gøre det.)' '' 'windowsdefender://threatsettings' }
+      $pua = (Get-MpPreference -ErrorAction SilentlyContinue).PUAProtection
+      if ($pua -eq 1) { Add-Sec 'pua' 2 'Bloker uønskede programmer' 'Til' 'Stopper adware og skjulte cryptominere i installere' '' '' '' }
+      else { Add-Sec 'pua' 1 'Bloker uønskede programmer' 'Fra' 'Gratis programmer har ofte adware, værktøjslinjer eller cryptominere med i installeren. Defender kan stoppe dem.' 'Opticon kan slå det til for dig. Det ændrer ikke dine programmer.' 'pua' 'windowsdefender://appbrowser' }
+    }
+  } catch { Add-Sec 'av' 3 'Antivirus' 'Kunne ikke læses' '' '' '' 'windowsdefender://threat' }
+
+  # 4. Firewall
+  try {
+    $off = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { -not $_.Enabled } | ForEach-Object { switch ($_.Name) { 'Domain' { 'domæne' } 'Private' { 'privat' } 'Public' { 'offentlig' } default { $_.Name } } })
+    $fwOther = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName FirewallProduct -ErrorAction SilentlyContinue | Where-Object { ((([int]$_.productState) -shr 12) -band 0xF) -eq 1 })
+    if (-not $off.Count) { Add-Sec 'fw' 2 'Firewall' 'Til på alle netværk' 'Blokerer ubudne forbindelser udefra' '' '' '' }
+    elseif ($fwOther.Count) { Add-Sec 'fw' 2 'Firewall' $fwOther[0].displayName 'Et andet program styrer firewallen' '' '' '' }
+    else { Add-Sec 'fw' 0 'Firewall' ("Fra på " + ($off -join ', ') + ' netværk') 'Andre på samme netværk (fx på en café eller skole) kan nå tjenester på din pc.' 'Opticon kan slå Windows Firewall til igen på alle netværk.' 'fw' 'windowsdefender://network' }
+  } catch {}
+
+  # 5. SmartScreen
+  try {
+    $ss = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name SmartScreenEnabled -ErrorAction SilentlyContinue).SmartScreenEnabled
+    $ssPol = (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -ErrorAction SilentlyContinue).EnableSmartScreen
+    if ($ss -eq 'Off' -or $ssPol -eq 0) { Add-Sec 'smartscreen' 1 'SmartScreen' 'Fra' 'SmartScreen advarer, før du åbner kendte falske installere og phishing-sider.' 'Windows Sikkerhed → App- og browserkontrol → Omdømmebaseret beskyttelse → slå det hele til.' '' 'windowsdefender://appbrowser' }
+    else { Add-Sec 'smartscreen' 2 'SmartScreen' 'Til' 'Advarer mod kendte falske programmer og sider' '' '' '' }
+  } catch {}
+
+  # 6. Brugerkontokontrol (UAC)
+  try {
+    $pol = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue
+    if ($pol.EnableLUA -eq 0) { Add-Sec 'uac' 0 'Brugerkontokontrol (UAC)' 'Slået helt fra' 'Alle programmer får fuld adgang til pc''en uden at spørge. Det gør det meget let for malware.' 'Opticon kan slå den til igen. Kræver genstart.' 'uac' '' }
+    elseif ($pol.ConsentPromptBehaviorAdmin -eq 0 -or $pol.PromptOnSecureDesktop -eq 0) { Add-Sec 'uac' 1 'Brugerkontokontrol (UAC)' 'Til, men spørger ikke ordentligt' 'Programmer kan få administrator-rettigheder uden at du bliver spurgt, eller uden den mørke sikre skærm.' 'Opticon kan sætte den tilbage til Windows-standard.' 'uac' '' }
+    else { Add-Sec 'uac' 2 'Brugerkontokontrol (UAC)' 'Til' 'Programmer skal spørge, før de ændrer pc''en' '' '' '' }
+  } catch {}
+
+  # 7. Hukommelsesintegritet (HVCI)
+  $hvciOn = $false
+  try {
+    $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName Win32_DeviceGuard -ErrorAction SilentlyContinue
+    $hvciOn = $dg -and (@($dg.SecurityServicesRunning) -contains 2)
+    $hvReg = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -Name Enabled -ErrorAction SilentlyContinue).Enabled
+    if ($hvciOn) { Add-Sec 'hvci' 2 'Hukommelsesintegritet' 'Til' 'Forhindrer, at ondsindede drivere får adgang til Windows'' kerne' '' '' '' }
+    elseif ($hvReg -eq 1) { Add-Sec 'hvci' 1 'Hukommelsesintegritet' 'Slået til, venter på genstart' 'Træder i kraft efter næste genstart' 'Genstart pc''en.' '' 'windowsdefender://coreisolation' }
+    else { Add-Sec 'hvci' 1 'Hukommelsesintegritet' 'Fra' 'Stopper drivere med kendte huller og malware i kernen. Koster typisk 0-5 % FPS i nogle spil.' 'Windows Sikkerhed → Enhedssikkerhed → Kerneisolering → Hukommelsesintegritet: Til. Kræver genstart. Står der "inkompatible drivere", så opdatér eller fjern de programmer først.' '' 'windowsdefender://coreisolation' }
+  } catch {}
+
+  # 8. Microsofts blokeringsliste over sårbare drivere
+  try {
+    $bl = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config' -Name VulnerableDriverBlocklistEnable -ErrorAction SilentlyContinue).VulnerableDriverBlocklistEnable
+    $blOn = $hvciOn -or ($bl -eq 1) -or ($null -eq $bl -and $build -ge 22621)
+    if ($blOn) { Add-Sec 'blocklist' 2 'Blokér sårbare drivere' 'Til' 'Windows nægter at indlæse drivere med kendte huller' '' '' '' }
+    else { Add-Sec 'blocklist' 1 'Blokér sårbare drivere' 'Fra' 'Angribere bruger gamle drivere med kendte huller til at slå antivirus fra. Windows har en liste, den kan blokere.' 'Opticon kan slå den til. Kræver genstart. Et meget gammelt RGB-, blæser- eller overclock-værktøj kan holde op med at virke, indtil du opdaterer det.' 'blocklist' 'windowsdefender://coreisolation' }
+  } catch {}
+
+  # 9. Secure Boot
+  try {
+    $sb = $null
+    try { $sb = Confirm-SecureBootUEFI -ErrorAction Stop } catch { $sb = $null }
+    if ($sb -eq $true) { Add-Sec 'secureboot' 2 'Secure Boot' 'Til' 'Stopper skadelig kode, der vil starte før Windows' '' '' '' }
+    elseif ($sb -eq $false) { Add-Sec 'secureboot' 1 'Secure Boot' 'Fra' 'Uden Secure Boot kan "bootkits" starte før Windows og gemme sig for antivirus. Nogle spil med anti-cheat kræver det også.' 'Slås til i BIOS/UEFI: genstart, tryk Del/F2, find Boot → Secure Boot → Enabled. Rør ikke ved andet, hvis du er i tvivl.' '' '' }
+    else { Add-Sec 'secureboot' 3 'Secure Boot' 'Ikke tilgængelig' 'Pc''en starter i gammel BIOS-tilstand' 'Kræver at Windows er installeret i UEFI-tilstand. Ikke noget, du skal ændre uden hjælp.' '' '' }
+  } catch {}
+
+  # 10. TPM
+  try {
+    $tpm = Get-Tpm -ErrorAction Stop
+    $tv = ''
+    try { $tv = ((Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction SilentlyContinue).SpecVersion -split ',')[0].Trim() } catch {}
+    if ($tpm.TpmPresent -and $tpm.TpmReady) { Add-Sec 'tpm' 2 'TPM-sikkerhedschip' "Klar$(if ($tv) { " (version $tv)" })" 'Beskytter krypteringsnøgler og Windows Hello' '' '' '' }
+    elseif ($tpm.TpmPresent) { Add-Sec 'tpm' 1 'TPM-sikkerhedschip' 'Fundet, men ikke klar' 'Kryptering og Windows Hello virker ikke optimalt' 'Åbn tpm.msc og vælg "Forbered TPM", eller nulstil den i BIOS.' '' '' }
+    else { Add-Sec 'tpm' 1 'TPM-sikkerhedschip' 'Ikke fundet' 'Uden TPM kan disken ikke krypteres automatisk' 'Slå fTPM (AMD) eller PTT (Intel) til i BIOS/UEFI under Security eller Advanced.' '' '' }
+  } catch {}
+
+  # 11. Diskkryptering (BitLocker / Enhedskryptering)
+  try {
+    $ev = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='C:'" -ErrorAction Stop
+    if ($ev.ProtectionStatus -eq 1) { Add-Sec 'crypt' 2 'Diskkryptering (C:)' 'Til' 'Hvis pc''en bliver stjålet, kan ingen læse dine filer' 'Sørg for at have gendannelsesnøglen: den ligger på account.microsoft.com/devices/recoverykey. Uden den kan du miste alt, hvis noget går galt.' '' '' }
+    else { Add-Sec 'crypt' $(if ($laptop) { 1 } else { 3 }) 'Diskkryptering (C:)' 'Fra' $(if ($laptop) { 'En stjålen bærbar kan læses af hvem som helst, også uden din adgangskode.' } else { 'Mindre vigtigt på en stationær, men beskytter dine filer ved tyveri.' }) 'Indstillinger → Beskyttelse af personlige oplysninger og sikkerhed → Enhedskryptering (eller BitLocker på Pro). Gem gendannelsesnøglen på din Microsoft-konto.' '' 'ms-settings:deviceencryption' }
+  } catch { Add-Sec 'crypt' 3 'Diskkryptering (C:)' 'Ikke tilgængelig' 'Denne udgave af Windows har ikke kryptering' '' '' '' }
+
+  # 12. SMBv1 (gammel fildeling, brugt af WannaCry)
+  try {
+    $smb1 = $false
+    try { $smb1 = [bool](Get-SmbServerConfiguration -ErrorAction Stop).EnableSMB1Protocol } catch {}
+    try { if ((Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -ErrorAction Stop).State -eq 'Enabled') { $smb1 = $true } } catch {}
+    if ($smb1) { Add-Sec 'smb1' 0 'Gammel fildeling (SMBv1)' 'Til' 'En 30 år gammel protokol med kendte huller. Det var den, WannaCry spredte sig med.' 'Opticon kan slå den fra. Kun meget gamle NAS-drev og printere bruger den.' 'smb1' '' }
+    else { Add-Sec 'smb1' 2 'Gammel fildeling (SMBv1)' 'Fra' 'Godt: den gamle, usikre protokol er slået fra' '' '' '' }
+  } catch {}
+
+  # 13. Fjernskrivebord
+  try {
+    $ts = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -ErrorAction SilentlyContinue
+    if ($ts -and $ts.fDenyTSConnections -eq 0) {
+      $nla = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction SilentlyContinue).UserAuthentication
+      if ($nla -eq 0) { Add-Sec 'rdp' 0 'Fjernskrivebord' 'Åben uden ekstra login-tjek' 'Andre kan forsøge at logge på din pc over netværket, og det tjek, der skulle bremse dem, er slået fra.' 'Bruger du det ikke selv, så lad Opticon lukke det.' 'rdp' 'ms-settings:remotedesktop' }
+      else { Add-Sec 'rdp' 1 'Fjernskrivebord' 'Åben' 'Andre kan forsøge at logge på din pc over netværket. Et yndet mål for angreb.' 'Bruger du det ikke selv, så lad Opticon lukke det.' 'rdp' 'ms-settings:remotedesktop' }
+    } else { Add-Sec 'rdp' 2 'Fjernskrivebord' 'Lukket' 'Ingen kan logge på pc''en udefra' '' '' '' }
+  } catch {}
+
+  # 14. Gæstekonto
+  try {
+    $g = Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value -like '*-501' }
+    if ($g -and $g.Enabled) { Add-Sec 'guest' 1 'Gæstekonto' 'Til' 'Alle kan logge på pc''en uden adgangskode' 'Opticon kan slå gæstekontoen fra.' 'guest' '' }
+    else { Add-Sec 'guest' 2 'Gæstekonto' 'Fra' 'Man skal have en konto for at logge på' '' '' '' }
+  } catch {}
+
+  # 15. Automatisk login med gemt adgangskode i klartekst
+  try {
+    $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
+    if ([string]$wl.AutoAdminLogon -eq '1' -and $wl.DefaultPassword) { Add-Sec 'autologon' 0 'Automatisk login' 'Adgangskode gemt i klartekst' 'Din Windows-adgangskode ligger ukrypteret i registreringsdatabasen, hvor ethvert program kan læse den.' 'Opticon kan fjerne den gemte adgangskode og slå automatisk login fra. Skift derefter adgangskoden, hvis den også bruges andre steder.' 'autologon' '' }
+    elseif ([string]$wl.AutoAdminLogon -eq '1') { Add-Sec 'autologon' 1 'Automatisk login' 'Til' 'Pc''en logger selv på, så alle med adgang til den kan bruge den' 'netplwiz → sæt flueben i "Brugerne skal angive brugernavn og adgangskode".' '' '' }
+  } catch {}
+
+  return [pscustomobject]@{ Rows = @($out); Laptop = $laptop; Build = $build }
+}
+
+$SecFixScript = {
+  param($sync, $arg)
+  $id = [string]$arg.Id
+  $sync.Status = 'Retter: ' + $arg.Name + '...'
+  switch ($id) {
+    'sigs'      { Update-MpSignature -ErrorAction Stop; return 'Virusdefinitioner opdateret.' }
+    'pua'       { Set-MpPreference -PUAProtection Enabled -ErrorAction Stop; return 'Blokering af uønskede programmer er slået til.' }
+    'fw'        { Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True -ErrorAction Stop; return 'Firewall er slået til på alle netværk.' }
+    'uac'       {
+      $k = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+      $was = (Get-ItemProperty $k -Name EnableLUA -ErrorAction SilentlyContinue).EnableLUA
+      Set-ItemProperty $k -Name EnableLUA -Value 1 -Type DWord -ErrorAction Stop
+      Set-ItemProperty $k -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord -ErrorAction Stop
+      Set-ItemProperty $k -Name PromptOnSecureDesktop -Value 1 -Type DWord -ErrorAction Stop
+      return $(if ($was -eq 0) { 'Brugerkontokontrol er slået til. Genstart pc''en, så den træder i kraft.' } else { 'Brugerkontokontrol er sat til Windows-standard.' })
+    }
+    'blocklist' {
+      $k = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'
+      if (-not (Test-Path $k)) { New-Item $k -Force | Out-Null }
+      Set-ItemProperty $k -Name VulnerableDriverBlocklistEnable -Value 1 -Type DWord -ErrorAction Stop
+      return 'Blokering af sårbare drivere er slået til. Træder i kraft efter genstart.'
+    }
+    'smb1'      {
+      try { Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop } catch {}
+      try { Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction Stop | Out-Null } catch {}
+      return 'SMBv1 er slået fra. Genstart for at fjerne den helt.'
+    }
+    'rdp'       {
+      Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 1 -Type DWord -ErrorAction Stop
+      try { Disable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue } catch {}
+      try { Disable-NetFirewallRule -DisplayGroup 'Fjernskrivebord' -ErrorAction SilentlyContinue } catch {}
+      return 'Fjernskrivebord er lukket.'
+    }
+    'guest'     { Get-LocalUser | Where-Object { $_.SID.Value -like '*-501' } | Disable-LocalUser -ErrorAction Stop; return 'Gæstekontoen er slået fra.' }
+    'autologon' {
+      $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+      Remove-ItemProperty $k -Name DefaultPassword -ErrorAction SilentlyContinue
+      Set-ItemProperty $k -Name AutoAdminLogon -Value '0' -ErrorAction Stop
+      return 'Den gemte adgangskode er fjernet, og automatisk login er slået fra.'
+    }
+    default     { throw "Ukendt rettelse: $id" }
+  }
+}
+
+# =====================================================================
+#  Farlige drivere: sammenlign med LOLDrivers (github.com/magicsword-io/LOLDrivers)
+# =====================================================================
+$DrvScanScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $cache = [string]$arg.Cache
+  if (-not (Test-Path $cache)) { New-Item -ItemType Directory -Force $cache | Out-Null }
+  $base = 'https://raw.githubusercontent.com/magicsword-io/LOLDrivers/main/detections/hashes/'
+  $sets = @{}; $listAge = 0
+  foreach ($k in 'malicious', 'vulnerable') {
+    $f = Join-Path $cache "loldrivers-$k.sha256"
+    $fresh = (Test-Path $f) -and (((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays -lt 3)
+    if (-not $fresh) {
+      $sync.Status = 'Henter den nyeste liste over farlige drivere...'
+      try {
+        $wc = New-Object Net.WebClient; $wc.Headers['User-Agent'] = 'Opticon'
+        $t = $wc.DownloadString($base + "samples_$k.sha256")
+        if ($t -match '(?m)^[0-9a-fA-F]{64}\s*$') { [IO.File]::WriteAllText($f, $t) }
+      } catch {}
+    }
+    if (-not (Test-Path $f)) { throw 'Kunne ikke hente listen over farlige drivere. Tjek internetforbindelsen, og prøv igen.' }
+    $listAge = [math]::Max($listAge, [int]((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($l in [IO.File]::ReadAllLines($f)) { $h = $l.Trim(); if ($h.Length -eq 64) { [void]$set.Add($h) } }
+    $sets[$k] = $set
+  }
+
+  # Hvilke drivere er installeret (og kører)?
+  $sync.Status = 'Finder dine drivere...'
+  $sysRoot = $env:SystemRoot
+  $svc = @{}
+  foreach ($d in @(Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue)) {
+    $p = [string]$d.PathName
+    if (-not $p) { continue }
+    $p = $p.Trim('"') -replace '^\\\?\?\\', '' -replace '(?i)^\\SystemRoot\\', "$sysRoot\" -replace '(?i)^system32\\', "$sysRoot\System32\"
+    if ($p -notmatch '^[A-Za-z]:\\') { $p = Join-Path $sysRoot $p }
+    $svc[$p.ToLowerInvariant()] = $d
+  }
+  $files = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($p in $svc.Keys) { [void]$files.Add($p) }
+  foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\drivers", '*.sys')) { [void]$files.Add($f) }
+  try { foreach ($f in [IO.Directory]::GetFiles("$sysRoot\System32\DriverStore\FileRepository", '*.sys', 'AllDirectories')) { [void]$files.Add($f) } } catch {}
+
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $hits = New-Object System.Collections.ArrayList
+  $n = 0; $total = $files.Count; $checked = 0
+  foreach ($f in $files) {
+    $n++
+    if ($n % 40 -eq 0) { $sync.Progress = [double]($n / [math]::Max(1, $total)); $sync.Status = "Tjekker drivere ($n af $total)..." }
+    try {
+      $fi = New-Object IO.FileInfo $f
+      if (-not $fi.Exists -or $fi.Length -gt 40MB) { continue }
+      $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
+      try { $h = [BitConverter]::ToString($sha.ComputeHash($fs)).Replace('-', '') } finally { $fs.Dispose() }
+      $checked++
+      $kind = if ($sets['malicious'].Contains($h)) { 'malicious' } elseif ($sets['vulnerable'].Contains($h)) { 'vulnerable' } else { $null }
+      if (-not $kind) { continue }
+      $vi = $null; try { $vi = [Diagnostics.FileVersionInfo]::GetVersionInfo($f) } catch {}
+      $d = $svc[$f.ToLowerInvariant()]
+      [void]$hits.Add([pscustomobject]@{
+        Kind = $kind; Path = $f; File = $fi.Name; Sha256 = $h
+        Company = $(if ($vi) { [string]$vi.CompanyName } else { '' }); Product = $(if ($vi) { [string]$vi.ProductName } else { '' })
+        Service = $(if ($d) { [string]$d.Name } else { '' }); Running = [bool]($d -and $d.State -eq 'Running')
+        InStore = ($f -match '(?i)\\DriverStore\\FileRepository\\')
+      })
+    } catch {}
+  }
+  $sync.Progress = 1.0
+  return [pscustomobject]@{ Hits = @($hits); Checked = $checked; ListAge = $listAge; Lists = ($sets['malicious'].Count + $sets['vulnerable'].Count) }
+}
+
+$UpdateCheckScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $sync.Status = 'Søger efter app-opdatering...'
+  # Find den nyeste udgave (commit) via GitHubs API, og hent filerne fra netop den. Så rammer vi aldrig en forældet kopi.
+  $m = [regex]::Match($arg.Url, '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)$')
+  if ($m.Success) {
+    try {
+      $c = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/{1}/commits/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'User-Agent' = 'PC-Tjek'; 'Accept' = 'application/vnd.github+json' }
+      if ($c.sha -match '^[0-9a-f]{40}$') {
+        $base = "https://raw.githubusercontent.com/{0}/{1}/{2}" -f $m.Groups[1].Value, $m.Groups[2].Value, $c.sha
+        $v = Invoke-RestMethod -Uri "$base/version.json" -UseBasicParsing -TimeoutSec 15
+        $v | Add-Member -NotePropertyName BaseUrl -NotePropertyValue $base -Force
+        return $v
+      }
+    } catch { }
+  }
+  return (Invoke-RestMethod -Uri ("{0}/version.json?t={1}" -f $arg.Url, [DateTime]::UtcNow.Ticks) -UseBasicParsing -TimeoutSec 15 -Headers @{ 'Cache-Control' = 'no-cache' })
+}
+$UpdateApplyScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $tmp = Join-Path $arg.JobRoot ("update-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force $tmp | Out-Null
+  $allowed = '^[\w\-. ]+\.(ps1|ico|cmd|md|txt)$'
+  $i = 0
+  $todo = @()
+  foreach ($f in $arg.Files) {
+    if ($f.name -notmatch $allowed -or $f.name -match '\.\.') { throw "Ugyldigt filnavn i opdateringen: $($f.name)" }
+    $cur = Join-Path $arg.Dest $f.name
+    if ((Test-Path $cur) -and (Get-FileHash -LiteralPath $cur -Algorithm SHA256).Hash -eq ([string]$f.sha256).ToUpper()) { continue }   # uændret: spring over
+    $todo += $f
+  }
+  $arg.Files = $todo
+  foreach ($f in $arg.Files) {
+    $i++
+    if ($f.name -notmatch $allowed -or $f.name -match '\.\.') { throw "Ugyldigt filnavn i opdateringen: $($f.name)" }
+    $sync.Status = "Henter $($f.name) ($i af $($arg.Files.Count))..."
+    $out = Join-Path $tmp $f.name
+    Invoke-WebRequest -Uri ("{0}/{1}?t={2}" -f $arg.Url, [Uri]::EscapeDataString($f.name), [DateTime]::UtcNow.Ticks) -OutFile $out -UseBasicParsing -TimeoutSec 60
+    $h = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash
+    if ($h -ne ([string]$f.sha256).ToUpper()) { throw "Fingeraftrykket for $($f.name) passer ikke (forventet $($f.sha256), fik $h). Opdateringen er afbrudt, og intet er ændret." }
+    # Sikring: et script med en skrivefejl kan slet ikke starte. Tjek, at PowerShell kan læse det, FØR det installeres.
+    if ($f.name -like '*.ps1') {
+      $perr = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($out, [ref]$null, [ref]$perr)
+      if ($perr -and $perr.Count) { throw "Den nye version af $($f.name) indeholder en fejl (linje $($perr[0].Extent.StartLineNumber): $($perr[0].Message)). Opdateringen er afbrudt, og intet er ændret." }
+    }
+  }
+  $sync.Status = 'Installerer opdatering...'
+  # Hele pakken er hentet og tjekket. Nu: sikkerhedskopi af ALLE filer først, så skift ALLE. Fejler én, sættes ALLE tilbage.
+  $backup = Join-Path $arg.Dest ("backup-v" + $arg.OldVersion)
+  New-Item -ItemType Directory -Force $backup | Out-Null
+  $existed = @{}
+  foreach ($f in $arg.Files) { $target = Join-Path $arg.Dest $f.name; $existed[$f.name] = Test-Path $target; if ($existed[$f.name]) { Copy-Item -Force $target $backup -ErrorAction Stop } }
+  $done = New-Object System.Collections.ArrayList
+  try {
+    foreach ($f in $arg.Files) {
+      $target = Join-Path $arg.Dest $f.name
+      $ok = $false
+      for ($try = 0; $try -lt 5 -and -not $ok; $try++) {
+        try { Copy-Item -Force (Join-Path $tmp $f.name) $target -ErrorAction Stop; $ok = $true } catch { Start-Sleep -Milliseconds 600 }
+      }
+      if (-not $ok) { throw "Kunne ikke erstatte $($f.name) (filen er i brug). Luk appen, og kør installeren i stedet." }
+      [void]$done.Add($f.name)
+      Unblock-File $target -ErrorAction SilentlyContinue
+    }
+  } catch {
+    foreach ($n in $done) {   # rul hele pakken tilbage
+      $target = Join-Path $arg.Dest $n
+      if ($existed[$n]) { Copy-Item -Force (Join-Path $backup $n) $target -ErrorAction SilentlyContinue } else { Remove-Item -Force $target -ErrorAction SilentlyContinue }
+    }
+    throw "$($_.Exception.Message) Alle filer er sat tilbage til den gamle version."
+  }
+  Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+  return 'ok'
+}
+
+
+$SysInfoScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $sync.Status = 'Læser pc-oplysninger...'
+  $o = [ordered]@{}
+  $os = Get-CimInstance Win32_OperatingSystem
+  $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+  $up = (Get-Date) - $os.LastBootUpTime
+  $o.OS = "$($os.Caption -replace 'Microsoft ', '') $($cv.DisplayVersion)"
+  $o.OSsub = "Build $($cv.CurrentBuild).$($cv.UBR) · oppe i $([int]$up.TotalDays) d $($up.Hours) t"
+  $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+  $o.CPU = ($cpu.Name -replace '\s+', ' ' -replace '\(R\)|\(TM\)', '').Trim()
+  $o.CPUsub = "$($cpu.NumberOfCores) kerner / $($cpu.NumberOfLogicalProcessors) tråde · $([math]::Round($cpu.MaxClockSpeed / 1000, 1)) GHz · belastning $($cpu.LoadPercentage) %"
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  $gpuDone = $false
+  if (Test-Path $smi) {
+    $q = & $smi --query-gpu=name,memory.total,temperature.gpu,utilization.gpu,driver_version --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+    if ($q) { $p = $q -split ',\s*'; $o.GPU = $p[0]; $o.GPUsub = "$([math]::Round([double]$p[1] / 1024)) GB VRAM · $($p[2]) °C · belastning $($p[3]) % · driver $($p[4])"; $gpuDone = $true }
+  }
+  if (-not $gpuDone) {
+    $g = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage' } | Select-Object -First 1
+    $vram = $null
+    Get-ChildItem 'HKLM:\SYSTEM\ControlSet001\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object {
+      $pp = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+      if ($pp.DriverDesc -eq $g.Name -and $pp.'HardwareInformation.qwMemorySize') { $vram = [math]::Round([double]$pp.'HardwareInformation.qwMemorySize' / 1GB) }
+    }
+    $o.GPU = $g.Name; $o.GPUsub = "$(if ($vram) { "$vram GB VRAM · " })driver $($g.DriverVersion)"
+  }
+  $mods = @(Get-CimInstance Win32_PhysicalMemory)
+  $tot = ($mods | Measure-Object Capacity -Sum).Sum
+  $spd = ($mods | Measure-Object ConfiguredClockSpeed -Maximum).Maximum
+  $used = [math]::Round(100 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize * 100)
+  $o.RAM = "$([math]::Round($tot / 1GB)) GB$(if ($spd) { " · $spd MT/s" })"
+  $o.RAMsub = "$($mods.Count) moduler · $used % i brug lige nu"
+  $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS
+  $o.Board = "$($mb.Manufacturer -replace 'Micro-Star International Co., Ltd.', 'MSI' -replace 'ASUSTeK COMPUTER INC.', 'ASUS' -replace 'Gigabyte Technology Co., Ltd.', 'GIGABYTE') $($mb.Product)".Trim()
+  $o.Boardsub = "BIOS $($bios.SMBIOSBIOSVersion) · $(if ($bios.ReleaseDate) { $bios.ReleaseDate.ToString('dd-MM-yyyy') })"
+  $dl = @()
+  foreach ($d in @(Get-PhysicalDisk)) {
+    $rc = $d | Get-StorageReliabilityCounter
+    $t = if ($rc.Temperature) { " · $($rc.Temperature) °C" } else { '' }
+    $h = if ($d.HealthStatus -eq 'Healthy') { 'sund' } else { [string]$d.HealthStatus }
+    $dl += "$($d.FriendlyName) ($([math]::Round($d.Size / 1GB)) GB $($d.MediaType -replace 'Unspecified', '')) · $h$t"
+  }
+  $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+  $o.Disk = "C: $([math]::Round($c.FreeSpace / 1GB)) GB ledig af $([math]::Round($c.Size / 1GB)) GB"
+  $o.Disksub = ($dl -join "`n")
+  return $o
+}
+
+
+$CrashScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'SilentlyContinue'
+  $sync.Status = 'Læser nedbrud fra de seneste 14 dage...'
+  $since = (Get-Date).AddDays(-14)
+  $out = @{ Apps = @(); System = @(); Installs = @() }
+  $apps = @{}
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1002; StartTime = $since } -MaxEvents 2000)) {
+    if ($e.ProviderName -notin 'Application Error', 'Application Hang') { continue }
+    $name = [string]$e.Properties[0].Value
+    if (-not $name) { continue }
+    $key = $name.ToLower()
+    if (-not $apps.ContainsKey($key)) { $apps[$key] = @{ Name = $name; Crash = 0; Hang = 0; First = $e.TimeCreated; Last = $e.TimeCreated } }
+    $a = $apps[$key]
+    if ($e.Id -eq 1000) { $a.Crash++ } else { $a.Hang++ }
+    if ($e.TimeCreated -lt $a.First) { $a.First = $e.TimeCreated }
+    if ($e.TimeCreated -gt $a.Last) { $a.Last = $e.TimeCreated }
+  }
+  $out.Apps = @($apps.Values | ForEach-Object { [pscustomobject]$_ })
+  $sys = @()
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 41, 6008, 1001; StartTime = $since } -MaxEvents 500)) {
+    if ($e.Id -eq 41 -and $e.ProviderName -like '*Kernel-Power*') { $sys += [pscustomobject]@{ Kind = 'restart'; Time = $e.TimeCreated } }
+    elseif ($e.Id -eq 6008) { $sys += [pscustomobject]@{ Kind = 'shutdown'; Time = $e.TimeCreated } }
+    elseif ($e.Id -eq 1001 -and $e.ProviderName -like '*WER-SystemErrorReporting*') { $sys += [pscustomobject]@{ Kind = 'bsod'; Time = $e.TimeCreated } }
+  }
+  $out.System = $sys
+  $ins = @()
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; Id = 1033; StartTime = $since.AddDays(-3) } -MaxEvents 300)) { $ins += [pscustomobject]@{ Time = $e.TimeCreated; Name = [string]$e.Properties[0].Value } }
+  foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'; Id = 19; StartTime = $since.AddDays(-3) } -MaxEvents 300)) { $ins += [pscustomobject]@{ Time = $e.TimeCreated; Name = "Windows-opdatering: $([string]$e.Properties[0].Value)" } }
+  $out.Installs = $ins
+  return $out
+}
+
+
+$GpuLibScript = {
+  param($sync, $arg)
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $sync.Status = 'Henter GPU-eksempler...'
+  $j = Invoke-RestMethod -Uri 'https://raw.githubusercontent.com/iBlessi/gpu-undervolt-db/main/data/undervolt_results.json' -UseBasicParsing -TimeoutSec 15
+  return @($j.results)
+}
+
+
+$GpuBenchHtml = @'
+<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><title>PC-Tjek GPU-test</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}
+canvas{width:100vw;height:100vh;display:block}
+#o{position:fixed;left:28px;top:22px;font:600 17px "Segoe UI",sans-serif;color:#fff;text-shadow:0 0 8px #000;opacity:.9;line-height:1.5}
+#o small{font-weight:400;opacity:.75}
+#f{position:fixed;inset:0;display:none;align-items:center;justify-content:center;font:600 30px "Segoe UI",sans-serif;color:#fff;background:#0D0F14}
+</style></head>
+<body><canvas id="c"></canvas><div id="o">PC-Tjek GPU-test<br><small>Starter…</small></div><div id="f">✓ Færdig. Du kan gå tilbage til PC-Tjek.</div>
+<script>
+const q = new URLSearchParams(location.search);
+let work = parseFloat(q.get('work')) || 0;
+const resMode = q.get('res') === '1';   // fast opløsning (1080p/1440p/4K), uafhængig af skærmen
+if (resMode) work = 1.0;
+const fixed = resMode || work > 0; if (!fixed) work = 1.0;
+let remain = null;
+const fmtR = x => x == null ? '' : ` · ⏱ ${Math.floor(x / 60)}:${String(x % 60).padStart(2, '0')} tilbage`;
+const post = (p, d) => fetch(p, { method: 'POST', body: JSON.stringify(d || {}) }).catch(() => {});
+const c = document.getElementById('c'), o = document.getElementById('o');
+const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
+if (!gl) { post('/error', { e: 'WebGL2 er ikke tilgængeligt' }); }
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
+const fs = `#version 300 es
+precision highp float; uniform vec2 R; uniform float T; out vec4 col;
+mat2 rot(float a){ float s = sin(a), c = cos(a); return mat2(c, -s, s, c); }
+float map(vec3 p){
+  p.xz *= rot(T * .21); p.xy *= rot(T * .13);
+  float d = length(max(abs(p) - 1., 0.)); float s = 1.;
+  for (int i = 0; i < 5; i++) {
+    vec3 a = mod(p * s, 2.) - 1.; s *= 3.;
+    vec3 r = abs(1. - 3. * abs(a));
+    float da = max(r.x, r.y), db = max(r.y, r.z), dc = max(r.z, r.x);
+    d = max(d, (min(da, min(db, dc)) - 1.) / s);
+  }
+  return d;
+}
+vec3 nrm(vec3 p){ vec2 e = vec2(.0007, 0.); return normalize(vec3(map(p+e.xyy)-map(p-e.xyy), map(p+e.yxy)-map(p-e.yxy), map(p+e.yyx)-map(p-e.yyx))); }
+float shadow(vec3 ro, vec3 rd){ float r = 1., t = .02; for (int i = 0; i < 48; i++) { float h = map(ro + rd * t); r = min(r, 10. * h / t); t += clamp(h, .01, .2); if (h < .0005 || t > 6.) break; } return clamp(r, 0., 1.); }
+void main(){
+  vec2 uv = (gl_FragCoord.xy * 2. - R) / R.y;
+  vec3 ro = vec3(0., 0., 3.0 + sin(T * .3) * .5), rd = normalize(vec3(uv, -1.7));
+  float t = 0.; int i;
+  for (i = 0; i < 220; i++) { float d = map(ro + rd * t); if (d < .0004 || t > 12.) break; t += d; }
+  vec3 c = mix(vec3(.05, .06, .09), vec3(.02, .02, .03), uv.y * .5 + .5);
+  if (t < 12.) {
+    vec3 p = ro + rd * t, n = nrm(p), l = normalize(vec3(.6, .8, .5));
+    float dif = clamp(dot(n, l), 0., 1.) * shadow(p + n * .002, l);
+    float ao = 1. - float(i) / 220.;
+    vec3 base = mix(vec3(.55, .36, .96), vec3(.23, .62, 1.), .5 + .5 * n.y);
+    c = base * (.18 + .82 * dif) * ao + pow(clamp(dot(reflect(rd, n), l), 0., 1.), 24.) * .4;
+  }
+  col = vec4(pow(c, vec3(.4545)), 1.);
+}`;
+function sh(t, s){ const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) post('/error', { e: gl.getShaderInfoLog(x) }); return x; }
+const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
+const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
+function resize(){ c.width = Math.max(320, Math.round(innerWidth * devicePixelRatio * work)); c.height = Math.max(180, Math.round(innerHeight * devicePixelRatio * work)); gl.viewport(0, 0, c.width, c.height); }
+resize(); addEventListener('resize', resize);
+addEventListener('error', e => post('/jserr', { e: String(e.message || e) }));
+c.addEventListener('webglcontextlost', e => { e.preventDefault(); post('/lost'); o.innerHTML = 'PC-Tjek GPU-test<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
+addEventListener('keydown', e => { if (e.key === 'Escape') { post('/abort'); o.innerHTML = 'PC-Tjek GPU-test<br><small>Stopper…</small>'; } });
+let t0 = performance.now(), last = t0, frames = 0, win = [], winStart = t0, calibUntil = fixed ? 0 : t0 + 7000, done = false, label = '';
+// Opløsningstest: scenen tegnes i præcis den valgte opløsning (lærredet får den størrelse og skaleres til skærmen).
+// Edge startes uden skærmens Hz-loft, så tallet er rigtige viste billeder pr. sekund (FPS).
+let fw = 0, fh = 0, warmUntil = 0;
+function setRes(str){
+  const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
+  const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
+  fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
+  warmUntil = performance.now() + 1500; win = []; winStart = performance.now();
+}
+if (resMode) {
+  c.style.objectFit = 'contain';
+  removeEventListener('resize', resize);
+  setRes(q.get('r0') || '1920x1080');
+  post('/calib', { work: 0 });
+}
+try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); post('/renderer', { r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
+function frame(now){
+  if (done) return;
+  const dt = now - last; last = now; frames++; win.push(dt);
+  gl.uniform2f(uR, c.width, c.height); gl.uniform1f(uT, (now - t0) / 1000); gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (resMode && now - winStart >= 1000) {
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
+    const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
+    if (now >= warmUntil) post('/fps', { f, ms, p99 });
+    o.innerHTML = `PC-Tjek GPU-test · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    win = []; winStart = now;
+  } else if (!resMode && now - winStart >= 1000) {
+    const ms = now - winStart, f = win.length, fps = 1000 * f / ms;
+    const s = win.slice().sort((a, b) => a - b), p99 = s[Math.min(s.length - 1, Math.floor(s.length * .99))];
+    if (calibUntil && now < calibUntil) { calibrate(fps); }
+    else { if (calibUntil) { calibUntil = 0; post('/calib', { work }); } post('/fps', { f, ms, p99 }); }
+    o.innerHTML = `PC-Tjek GPU-test · ${fps.toFixed(0)} fps<br><small>${calibUntil ? 'Kalibrerer belastning…' : label}${fmtR(remain)} · Esc for at stoppe</small>`;
+    win = []; winStart = now;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+setInterval(() => fetch('/state').then(r => r.json()).then(s => {
+  label = s.Label || ''; remain = (typeof s.Remain === 'number' && s.Step > 0) ? s.Remain : null; if (resMode && s.Res) setRes(s.Res); if (s.Done && !done) { done = true; document.getElementById('f').style.display = 'flex'; }
+}).catch(() => {}), resMode ? 400 : 1000);
+</script></body></html>
+'@
+# Indbygget GPU-test: lokal webside med 3D-scene (WebGL2) i fuld skærm + målinger via nvidia-smi.
+# arg: Html, Steps (watt pr. trin, eller $null = rør ikke strømgrænsen), Work (0 = kalibrer), StepSec, Dir
+$GpuBenchScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'Stop'
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path $smi)) { $smi = "$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe" }
+  $hasSmi = Test-Path $smi   # NVIDIA: alt måles. AMD/Intel: FPS og belastning, og watt for hele pc'en på batteri.
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  function Num($x) { $v = 0.0; if ([double]::TryParse(([string]$x).Trim(), [Globalization.NumberStyles]::Float, $inv, [ref]$v)) { $v } else { $null } }
+  function Q($fields) { @((& $smi -i 0 "--query-gpu=$fields" --format=csv,noheader,nounits 2>$null | Select-Object -First 1) -split ',\s*' | ForEach-Object { Num $_ }) }
+  function Sample {
+    if ($hasSmi) { $v = Q 'power.draw,temperature.gpu,fan.speed,clocks.gr,utilization.gpu'; return [pscustomobject]@{ W = $v[0]; T = $v[1]; F = $v[2]; C = $v[3]; U = $v[4] } }
+    $u = $null; try { $u = [math]::Min(100, [math]::Round((@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D*' }) | Measure-Object UtilizationPercentage -Sum).Sum)) } catch {}
+    $w = $null; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; if ($bt -and -not $bt.PowerOnline -and $bt.DischargeRate -gt 0) { $w = [math]::Round($bt.DischargeRate / 1000, 1) } } catch {}
+    return [pscustomobject]@{ W = $w; T = $null; F = $null; C = $null; U = $u }
+  }
+  if (-not ('PcTjek.PowerModeB' -as [type])) { try { Add-Type -Namespace PcTjek -Name PowerModeB -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid g); [DllImport("powrprof.dll")] public static extern uint PowerGetEffectiveOverlayScheme(out Guid g);' } catch {} }
+  function Get-PM { try { $g = [guid]::Empty; if ([PcTjek.PowerModeB]::PowerGetEffectiveOverlayScheme([ref]$g) -eq 0) { return $g.ToString() } } catch {}; return $null }
+  function Set-PM($g) { try { [void][PcTjek.PowerModeB]::PowerSetActiveOverlayScheme([guid]$g) } catch {}; Start-Sleep -Milliseconds 300; return ((Get-PM) -eq ([guid]$g).ToString()) }
+  $modeNames = @{ '961cc777-2547-4f9d-8174-7d86181b8a7a' = 'Bedste energieffektivitet'; '00000000-0000-0000-0000-000000000000' = 'Balanceret'; 'ded574b5-45a0-4f42-8737-46345c09c238' = 'Bedste ydeevne' }
+  $origMode = Get-PM; $changedMode = $false
+  $lim = if ($hasSmi) { Q 'power.limit,power.default_limit,power.min_limit,power.max_limit' } else { @($null, $null, $null, $null) }
+  $orig = $lim[0]; $def = $lim[1]
+  $browser = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+               "$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $browser) { throw 'Hverken Edge eller Chrome blev fundet.' }
+  $listener = New-Object Net.HttpListener
+  $port = 8760
+  while ($true) { try { $listener.Prefixes.Clear(); $listener.Prefixes.Add("http://localhost:$port/"); $listener.Start(); break } catch { $port++; if ($port -gt 8799) { throw 'Ingen ledig port til testen.' } } }
+  $resList = @($arg.Res | Where-Object { $_ })
+  $script:BState = @{ Step = 0; Total = @($arg.Steps).Count; Label = 'Klargør'; Done = $false; Res = $(if ($resList.Count) { [string]$resList[0] } else { '' }) }
+  $script:BFps = New-Object System.Collections.ArrayList
+  $script:BAbort = $false; $script:BErr = $null; $script:BLost = $false; $script:BJsErr = ''; $script:BRenderer = ''
+  $script:BStepStart = $null; $script:BLeftAfter = 0; $script:BPerStep = 5 + [double]$arg.StepSec
+  function Remain { if (-not $script:BStepStart) { return [int]((@($arg.Steps).Count) * $script:BPerStep) }; [int][math]::Max(0, $script:BLeftAfter + $script:BPerStep - ((Get-Date) - $script:BStepStart).TotalSeconds) }
+  function Fmt-Rem([int]$x) { '{0}:{1:00}' -f [math]::Floor($x / 60), ($x % 60) }
+  $script:BWork = [double]$arg.Work; $script:BCalib = ($script:BWork -gt 0)
+  $script:BTask = $listener.GetContextAsync()
+  $htmlBytes = [Text.Encoding]::UTF8.GetBytes([string]$arg.Html)
+  function Pump {
+    while ($script:BTask.IsCompleted) {
+      $ctx = $script:BTask.Result
+      $script:BTask = $listener.GetContextAsync()
+      $path = $ctx.Request.Url.AbsolutePath; $body = ''
+      if ($ctx.Request.HasEntityBody) { $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8); $body = $sr.ReadToEnd(); $sr.Close() }
+      $out = [Text.Encoding]::UTF8.GetBytes('ok'); $type = 'text/plain'
+      switch ($path) {
+        '/'      { $out = $htmlBytes; $type = 'text/html; charset=utf-8' }
+        '/state' { $script:BState.Remain = Remain; $out = [Text.Encoding]::UTF8.GetBytes(($script:BState | ConvertTo-Json -Compress)); $type = 'application/json' }
+        '/fps'   { try { $j = $body | ConvertFrom-Json; [void]$script:BFps.Add([pscustomobject]@{ Time = Get-Date; F = [double]$j.f; Ms = [double]$j.ms; P99 = [double]$j.p99 }) } catch {} }
+        '/calib' { try { $script:BWork = [double]($body | ConvertFrom-Json).work; $script:BCalib = $true } catch {} }
+        '/abort' { $script:BAbort = $true }
+        '/lost'  { $script:BLost = $true; $script:BAbort = $true }
+        '/renderer' { try { $script:BRenderer = [string]($body | ConvertFrom-Json).r } catch {} }
+        '/jserr' { try { $script:BJsErr = [string]($body | ConvertFrom-Json).e } catch {} }
+        '/error' { try { $script:BErr = [string]($body | ConvertFrom-Json).e } catch { $script:BErr = 'Fejl i testsiden' }; $script:BAbort = $true }
+      }
+      try { $ctx.Response.ContentType = $type; $ctx.Response.Headers.Add('Cache-Control', 'no-store'); $ctx.Response.OutputStream.Write($out, 0, $out.Length); $ctx.Response.Close() } catch {}
+    }
+  }
+  function WaitPump([double]$sec) { $end = (Get-Date).AddSeconds($sec); while ((Get-Date) -lt $end -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 80 } }
+  # Browserens profil skal ligge i din egen mappe: Edge/Chrome kan ikke arbejde i den låste ProgramData-mappe
+  $prof = Join-Path $env:LOCALAPPDATA 'PC-Tjek\bench-browser'
+  New-Item -ItemType Directory -Force $prof | Out-Null
+  $url = "http://localhost:$port/?work=$(([double]$arg.Work).ToString($inv))$(if ($resList.Count) { "&res=1&r0=$($resList[0])" })"
+  $bargs = if ($browser -like '*msedge*') { "--kiosk `"$url`" --edge-kiosk-type=fullscreen --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-gpu-vsync --disable-frame-rate-limit" }
+           else { "--kiosk --user-data-dir=`"$prof`" --no-first-run --no-default-browser-check --disable-features=Translate,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-gpu-vsync --disable-frame-rate-limit `"$url`"" }
+  $results = New-Object System.Collections.ArrayList
+  $changedPl = $false
+  try {
+    $sync.Status = 'Starter testscenen...'
+    Start-Process -FilePath $browser -ArgumentList $bargs | Out-Null
+    $tw = (Get-Date).AddSeconds(25)
+    while ($script:BFps.Count -eq 0 -and -not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 }
+    if (-not $script:BCalib) { $sync.Status = 'Kalibrerer belastning...'; $tw = (Get-Date).AddSeconds(15); while (-not $script:BCalib -and (Get-Date) -lt $tw -and -not $script:BAbort) { Pump; Start-Sleep -Milliseconds 100 } }
+    if ($script:BErr) { throw "Testsiden fejlede: $($script:BErr)" }
+    if (-not $script:BCalib -and $script:BFps.Count -eq 0) { throw 'Testscenen startede ikke. Er Edge eller Chrome blokeret?' }
+    $steps = @($arg.Steps); $total = $steps.Count
+    for ($i = 0; $i -lt $total; $i++) {
+      if ($script:BAbort) { break }
+      $pl = $steps[$i]
+      $script:BState.Step = $i + 1
+      $script:BStepStart = Get-Date; $script:BLeftAfter = ($total - $i - 1) * $script:BPerStep
+      $rs = if ($resList.Count) { [string]$arg.Res[$i] } else { '' }
+      $script:BState.Res = $rs
+      $resTxt = if ($rs) { " · $($rs -replace 'x', '×')" } else { '' }
+      $applied = $true
+      $md = if ($arg.Modes) { [string]@($arg.Modes)[$i] } else { '' }
+      if ($md) {
+        if (-not $changedMode -and $arg.RestoreFile -and $origMode) { [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Overlay = $origMode; Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress)) }
+        $applied = Set-PM $md; $changedMode = $true   # bekræftet ved at læse tilstanden tilbage
+      }
+      $script:BState.Label = if ($md) { "Trin $($i + 1)/$total · $($modeNames[$md])" } elseif ($pl -and $rs) { "Trin $($i + 1)/$total$resTxt · $([math]::Round($pl)) W" } elseif ($rs) { "Trin $($i + 1)/$total$resTxt" } elseif ($pl) { "Trin $($i + 1)/$total · strømgrænse $([math]::Round($pl / $def * 100)) %" } else { 'Måler' }
+      if ($pl) {
+        if (-not $changedPl -and $arg.RestoreFile -and $orig) {   # gem den oprindelige værdi FØR første ændring
+          [IO.File]::WriteAllText([string]$arg.RestoreFile, (@{ Watts = [int][math]::Round($orig); Pid = $PID; Date = (Get-Date).ToString('s') } | ConvertTo-Json -Compress))
+        }
+        & $smi -i 0 -pl ([math]::Round($pl)) 2>&1 | Out-Null; $changedPl = $true
+        Start-Sleep -Milliseconds 300; $nowPl = (Q 'power.limit')[0]
+        $applied = ($null -ne $nowPl -and [math]::Abs($nowPl - [math]::Round($pl)) -le 2)   # bekræftet ved at læse grænsen tilbage
+      }
+      $sync.Status = "$($script:BState.Label): stabiliserer... · ⏱ $(Fmt-Rem (Remain)) tilbage"
+      WaitPump 5
+      $t0 = Get-Date; $samples = New-Object System.Collections.ArrayList; $nextS = $t0
+      while (((Get-Date) - $t0).TotalSeconds -lt [double]$arg.StepSec -and -not $script:BAbort) {
+        Pump
+        if ((Get-Date) -ge $nextS) {
+          $sm = Sample
+          [void]$samples.Add($sm)
+          $nextS = $nextS.AddSeconds(1)
+          $el = ((Get-Date) - $t0).TotalSeconds
+          $sync.Progress = [double](100 * ($i + [math]::Min(1, $el / [double]$arg.StepSec)) / $total)
+          $lastF = $script:BFps | Select-Object -Last 1
+          $sync.Status = "$($script:BState.Label) · $(if ($lastF) { [math]::Round(1000 * $lastF.F / [math]::Max(1, $lastF.Ms)) } else { '–' }) fps$(if ($null -ne $sm.W) { " · $([int]$sm.W) W" })$(if ($null -ne $sm.T) { " · $([int]$sm.T) °C" })$(if ($null -ne $sm.U -and -not $hasSmi) { " · belastning $($sm.U) %" }) · ⏱ $(Fmt-Rem (Remain)) tilbage"
+        }
+        Start-Sleep -Milliseconds 80
+      }
+      $t1 = Get-Date
+      $fw = @($script:BFps | Where-Object { $_.Time -ge $t0 -and $_.Time -le $t1 })
+      $avg = { param($prop) $x = @($samples | ForEach-Object { $_.$prop } | Where-Object { $null -ne $_ }); if ($x.Count) { [math]::Round(($x | Measure-Object -Average).Average, 1) } else { $null } }
+      $fps = if ($fw.Count) { [math]::Round(1000 * ($fw | Measure-Object F -Sum).Sum / [math]::Max(1, ($fw | Measure-Object Ms -Sum).Sum), 1) } else { $null }
+      $p1 = if ($fw.Count) { [math]::Round(1000 / [math]::Max(0.1, ($fw | Measure-Object P99 -Average).Average), 1) } else { $null }
+      $tx = @($samples | ForEach-Object { $_.T } | Where-Object { $null -ne $_ }); $cx = @($samples | ForEach-Object { $_.C } | Where-Object { $_ })
+      $secF = @($fw | Where-Object { $_.Ms -gt 0 } | ForEach-Object { 1000 * $_.F / $_.Ms })
+      [void]$results.Add([pscustomobject]@{ Tmax = $(if ($tx.Count) { ($tx | Measure-Object -Maximum).Maximum } else { $null }); Cmin = $(if ($cx.Count) { ($cx | Measure-Object -Minimum).Minimum } else { $null }); FpsMin = $(if ($secF.Count) { [math]::Round(($secF | Measure-Object -Minimum).Minimum, 1) } else { $null }); Res = $rs; Mode = $md; Applied = $applied; Pl = $pl; Pct = $(if ($pl -and $def) { [math]::Round($pl / $def * 100) } else { $null }); W = (& $avg 'W'); T = (& $avg 'T'); F = (& $avg 'F'); C = (& $avg 'C'); U = (& $avg 'U'); Fps = $fps; P1 = $p1 })
+    }
+  } finally {
+    # Gendan altid det oprindelige, og fjern først gendannelsesfilen, når det er BEKRÆFTET
+    $okRestore = $true
+    if ($changedPl -and $orig) {
+      & $smi -i 0 -pl ([math]::Round($orig)) 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
+      $now = (Q 'power.limit')[0]; if ($null -eq $now -or [math]::Abs($now - $orig) -gt 2) { $okRestore = $false }
+    }
+    if ($changedMode -and $origMode) { if (-not (Set-PM $origMode)) { $okRestore = $false } }
+    if ($arg.RestoreFile -and $okRestore) { Remove-Item -LiteralPath ([string]$arg.RestoreFile) -Force -ErrorAction SilentlyContinue }
+    $script:BState.Done = $true
+    try { WaitPump 1.5 } catch {}
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*$prof*" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force } catch {} }
+    try { $listener.Stop(); $listener.Close() } catch {}
+  }
+  return @{ Steps = @($results); FpsPosts = $script:BFps.Count; Renderer = $script:BRenderer; Calib = $script:BCalib; JsErr = $script:BJsErr; Browser = (Split-Path $browser -Leaf); Work = $script:BWork; Aborted = $script:BAbort; Lost = $script:BLost; HasSmi = $hasSmi; OrigMode = $origMode; RestoreOk = $okRestore; Orig = $orig; Default = $def; Min = $lim[2]; Max = $lim[3] }
+}
+
+# =====================================================================
+#  GUI
+# =====================================================================
+
+# =====================================================================
+#  DEN STORE TEST (CPU, RAM, disk). Grafikdelen kører bagefter med testscenen.
+# =====================================================================
+$BenchScript = {
+  param($sync, $arg)
+  $ErrorActionPreference = 'Stop'
+  $code = @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Threading;
+
+namespace OptiBench
+{
+    public static class Cpu
+    {
+        // Én arbejdsenhed: heltal (primtal), kommatal (matrix), kryptografi (SHA-256) og komprimering
+        static int Unit(byte[] buf, double[] a, double[] b, double[] c, bool[] comp, SHA256 sha)
+        {
+            int count = 0;
+            Array.Clear(comp, 0, comp.Length);
+            int lim = comp.Length - 1;
+            for (int i = 2; i <= lim; i++)
+            {
+                if (!comp[i]) { count++; for (int j = i * 2; j <= lim; j += i) comp[j] = true; }
+            }
+            const int n = 48;
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++)
+                {
+                    double s = 0;
+                    for (int k = 0; k < n; k++) s += a[i * n + k] * b[k * n + j];
+                    c[i * n + j] = s;
+                }
+            byte[] h = sha.ComputeHash(buf);
+            count += h[0];
+            using (MemoryStream ms = new MemoryStream())
+            {
+                using (DeflateStream z = new DeflateStream(ms, CompressionMode.Compress, true)) { z.Write(buf, 0, buf.Length); }
+                count += (int)(ms.Length & 1);
+            }
+            return count;
+        }
+
+        // Kører arbejdsenheder i 'seconds' sekunder på 'threads' tråde. Returnerer enheder pr. sekund (i alt).
+        public static double Run(int threads, double seconds)
+        {
+            long total = 0;
+            object lk = new object();
+            Thread[] ts = new Thread[threads];
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int t = 0; t < threads; t++)
+            {
+                int seed = t + 1;
+                ts[t] = new Thread(() =>
+                {
+                    Random r = new Random(seed);
+                    byte[] buf = new byte[32 * 1024];
+                    for (int i = 0; i < buf.Length; i++) buf[i] = (byte)(r.Next(256) & (i % 7 == 0 ? 0xFF : 0x3F));
+                    double[] a = new double[48 * 48], b = new double[48 * 48], c = new double[48 * 48];
+                    for (int i = 0; i < a.Length; i++) { a[i] = r.NextDouble(); b[i] = r.NextDouble(); }
+                    bool[] comp = new bool[15001];
+                    long mine = 0; int sink = 0;
+                    using (SHA256 sha = SHA256.Create())
+                    {
+                        while (sw.Elapsed.TotalSeconds < seconds) { sink += Unit(buf, a, b, c, comp, sha); mine++; }
+                    }
+                    lock (lk) { total += mine; if (sink == int.MinValue) total++; }
+                });
+                ts[t].IsBackground = true;
+                ts[t].Start();
+            }
+            foreach (Thread th in ts) th.Join();
+            return total / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+        }
+    }
+
+    public static class Mem
+    {
+        // Kopierer store blokke på flere tråde. Returnerer GB/s (kopieret data pr. sekund).
+        public static double CopyGBs(int threads, double seconds)
+        {
+            const int size = 64 * 1024 * 1024;
+            long bytes = 0;
+            object lk = new object();
+            Thread[] ts = new Thread[threads];
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int t = 0; t < threads; t++)
+            {
+                ts[t] = new Thread(() =>
+                {
+                    byte[] src = new byte[size], dst = new byte[size];
+                    for (int i = 0; i < size; i += 4096) src[i] = (byte)i;
+                    long mine = 0;
+                    while (sw.Elapsed.TotalSeconds < seconds) { Buffer.BlockCopy(src, 0, dst, 0, size); mine += size; }
+                    lock (lk) { bytes += mine; }
+                });
+                ts[t].IsBackground = true;
+                ts[t].Start();
+            }
+            foreach (Thread th in ts) th.Join();
+            return bytes / Math.Max(0.001, sw.Elapsed.TotalSeconds) / 1e9;
+        }
+    }
+
+    public static class Disk
+    {
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteFile(IntPtr h, IntPtr buf, uint n, out uint done, IntPtr ov);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool ReadFile(IntPtr h, IntPtr buf, uint n, out uint done, IntPtr ov);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetFilePointerEx(IntPtr h, long dist, out long newPos, uint method);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr VirtualAlloc(IntPtr addr, UIntPtr size, uint type, uint prot);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool VirtualFree(IntPtr addr, UIntPtr size, uint type);
+
+        const uint GENERIC_READ = 0x80000000, GENERIC_WRITE = 0x40000000, CREATE_ALWAYS = 2;
+        const uint NO_BUFFERING = 0x20000000, WRITE_THROUGH = 0x80000000, DELETE_ON_CLOSE = 0x04000000;
+
+        // Skriver og læser en testfil uden Windows' cache. Returnerer { skriv MB/s, læs MB/s, små læsninger pr. sek (4 KB) }
+        public static double[] Test(string path, long sizeMB, double randSeconds)
+        {
+            const uint chunk = 4 * 1024 * 1024;
+            long size = sizeMB * 1024 * 1024;
+            IntPtr buf = VirtualAlloc(IntPtr.Zero, (UIntPtr)chunk, 0x3000, 4);
+            IntPtr small = VirtualAlloc(IntPtr.Zero, (UIntPtr)4096, 0x3000, 4);
+            if (buf == IntPtr.Zero || small == IntPtr.Zero) throw new Exception("Kunne ikke reservere hukommelse til disktesten.");
+            byte[] rnd = new byte[chunk];
+            new Random(42).NextBytes(rnd);
+            Marshal.Copy(rnd, 0, buf, (int)chunk);
+            IntPtr h = CreateFile(path, GENERIC_READ | GENERIC_WRITE, 0, IntPtr.Zero, CREATE_ALWAYS, NO_BUFFERING | WRITE_THROUGH | DELETE_ON_CLOSE, IntPtr.Zero);
+            if (h == new IntPtr(-1)) throw new Exception("Kunne ikke oprette testfilen (fejl " + Marshal.GetLastWin32Error() + ").");
+            try
+            {
+                uint done;
+                long pos;
+                Stopwatch sw = Stopwatch.StartNew();
+                for (long w = 0; w < size; w += chunk)
+                    if (!WriteFile(h, buf, chunk, out done, IntPtr.Zero)) throw new Exception("Skrivefejl " + Marshal.GetLastWin32Error());
+                double write = size / 1048576.0 / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+
+                SetFilePointerEx(h, 0, out pos, 0);
+                sw.Restart();
+                for (long r = 0; r < size; r += chunk)
+                    if (!ReadFile(h, buf, chunk, out done, IntPtr.Zero)) throw new Exception("Læsefejl " + Marshal.GetLastWin32Error());
+                double read = size / 1048576.0 / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+
+                Random rr = new Random(7);
+                long blocks = size / 4096, ops = 0;
+                sw.Restart();
+                while (sw.Elapsed.TotalSeconds < randSeconds)
+                {
+                    long off = (long)(rr.NextDouble() * (blocks - 1)) * 4096;
+                    SetFilePointerEx(h, off, out pos, 0);
+                    if (!ReadFile(h, small, 4096, out done, IntPtr.Zero)) break;
+                    ops++;
+                }
+                double iops = ops / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+                return new double[] { write, read, iops };
+            }
+            finally
+            {
+                CloseHandle(h);
+                VirtualFree(buf, UIntPtr.Zero, 0x8000);
+                VirtualFree(small, UIntPtr.Zero, 0x8000);
+            }
+        }
+    }
+}
+'@
+  if (-not ('OptiBench.Cpu' -as [type])) { Add-Type -TypeDefinition $code -Language CSharp }
+  $sync.Status = 'Læser hardware...'; $sync.Progress = 1
+  $cpuO = Get-CimInstance Win32_Processor | Select-Object -First 1
+  $cpuName = (([string]$cpuO.Name) -replace '\((R|TM|tm)\)', '' -replace '\s+CPU\s*@.*$', '' -replace '\s+\d+-Core Processor', '' -replace '\s+', ' ').Trim()
+  $vids = @(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch '(?i)basic|virtual|remote|parsec|meta|mirage|displaylink' })
+  $gpuO = $vids | Where-Object { $_.Name -match '(?i)nvidia|radeon rx|radeon pro|arc a|arc b' } | Select-Object -First 1
+  if (-not $gpuO) { $gpuO = $vids | Select-Object -First 1 }
+  $cs = Get-CimInstance Win32_ComputerSystem
+  $ramGB = [math]::Round($cs.TotalPhysicalMemory / 1GB)
+  $ramMHz = (Get-CimInstance Win32_PhysicalMemory | Measure-Object ConfiguredClockSpeed -Maximum).Maximum
+  $diskName = ''; try { $pn = Get-Partition -DriveLetter ($env:SystemDrive.Substring(0, 1)) | Select-Object -First 1; $diskName = (Get-Disk -Number $pn.DiskNumber).FriendlyName } catch {}
+  $laptop = ($cs.PCSystemType -eq 2)
+  $onBattery = $false; try { $bt = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1; if ($bt) { $onBattery = -not $bt.PowerOnline } } catch {}
+  $threads = [Environment]::ProcessorCount
+  $hw = [ordered]@{ Cpu = $cpuName; Cores = [int]$cpuO.NumberOfCores; Threads = $threads; Gpu = [string]$gpuO.Name; RamGB = $ramGB; RamMHz = [int]$ramMHz; Disk = [string]$diskName; Laptop = $laptop; OnBattery = $onBattery }
+
+  # CPU: én kerne
+  $sync.Status = "CPU · én kerne (10 sek.)"; $sync.Progress = 3
+  [void][OptiBench.Cpu]::Run(1, 1.0)   # opvarmning
+  $one = [OptiBench.Cpu]::Run(1, 10.0)
+  $sync.Progress = 16
+  # CPU: alle kerner i 60 sek. Første 10 sek. = topydelse, sidste 10 sek. = varm pc
+  $buckets = New-Object System.Collections.ArrayList
+  for ($i = 0; $i -lt 12; $i++) {
+    $sync.Status = "CPU · alle $threads tråde · $([int](60 - $i * 5)) sek. tilbage (holder den farten, når den bliver varm?)"
+    [void]$buckets.Add([OptiBench.Cpu]::Run($threads, 5.0))
+    $sync.Progress = 16 + ($i + 1) * 5
+  }
+  $multi = ($buckets[0] + $buckets[1]) / 2
+  $hot = ($buckets[10] + $buckets[11]) / 2
+  $sustain = [math]::Round(100 * $hot / [math]::Max(1, $multi))
+  # RAM
+  $sync.Status = 'RAM · kopierer store blokke...'; $sync.Progress = 77
+  $ram = [OptiBench.Mem]::CopyGBs([math]::Min(4, $threads), 3.0)
+  # Disk
+  $sync.Status = 'Disk · skriver og læser en testfil på 512 MB (uden Windows-cache)...'; $sync.Progress = 82
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ('opticon-disktest-' + [guid]::NewGuid().ToString('N') + '.tmp')
+  $d = @(0, 0, 0)
+  try { $d = [OptiBench.Disk]::Test($tmp, 512, 3.0) } catch { $sync.Status = "Disktesten fejlede: $($_.Exception.Message)" } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  $sync.Progress = 100
+  return @{ Hw = $hw; Cpu1 = [math]::Round($one); CpuN = [math]::Round($multi); Sustain = $sustain; Ram = [math]::Round($ram, 1)
+            DiskW = [math]::Round($d[0]); DiskR = [math]::Round($d[1]); Iops = [math]::Round($d[2]) }
+}
+
+[xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PC-Tjek" Width="1280" Height="820" MinWidth="1050" MinHeight="650" WindowStartupLocation="CenterScreen"
+        Foreground="#E7E9EE" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13">
+  <Window.Background>
+    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#0C0E14" Offset="0"/><GradientStop Color="#110F1B" Offset="1"/></LinearGradientBrush>
+  </Window.Background>
+  <Window.Resources>
+    <SolidColorBrush x:Key="Card" Color="#141823"/>
+    <SolidColorBrush x:Key="Line" Color="#20263A"/>
+    <SolidColorBrush x:Key="Muted" Color="#8C95A9"/>
+    <LinearGradientBrush x:Key="Accent" StartPoint="0,0" EndPoint="1,1">
+      <GradientStop Color="#8B5CF6" Offset="0"/><GradientStop Color="#6D7CFF" Offset="0.55"/><GradientStop Color="#3B9EFF" Offset="1"/>
+    </LinearGradientBrush>
+
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="Background" Value="#1E2433"/>
+      <Setter Property="Padding" Value="14,8"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid x:Name="root">
+              <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="10"/>
+              <Border x:Name="hv" CornerRadius="10" Background="#16FFFFFF" Visibility="Hidden"/>
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="hv" Property="Visibility" Value="Visible"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="hv" Property="Background" Value="#26000000"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.4"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource Accent}"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="White"/>
+      <Setter Property="Effect"><Setter.Value><DropShadowEffect Color="#7C5CFF" BlurRadius="16" ShadowDepth="0" Opacity="0.35"/></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="Danger" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="#5A1E26"/>
+    </Style>
+
+    <Style x:Key="Nav" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#AEB6C6"/><Setter Property="Margin" Value="0,2"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="14"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Grid>
+              <Border x:Name="bd" Background="Transparent" CornerRadius="10" Padding="14,10">
+                <ContentPresenter/>
+              </Border>
+              <Border x:Name="bar" Width="3" CornerRadius="2" HorizontalAlignment="Left" Margin="0,9" Background="{StaticResource Accent}" Visibility="Collapsed"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#151925"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bd" Property="Background"><Setter.Value><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#2A2152" Offset="0"/><GradientStop Color="#161B28" Offset="1"/></LinearGradientBrush></Setter.Value></Setter>
+                <Setter TargetName="bar" Property="Visibility" Value="Visible"/>
+                <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="CardB" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Card}"/><Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="18"/>
+    </Style>
+    <Style x:Key="H1" TargetType="TextBlock"><Setter Property="FontSize" Value="26"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+    <Style x:Key="Sub" TargetType="TextBlock"><Setter Property="Foreground" Value="{StaticResource Muted}"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
+
+    <Style TargetType="TextBox">
+      <Setter Property="Background" Value="#10131A"/><Setter Property="Foreground" Value="#E7E9EE"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="Padding" Value="8,5"/><Setter Property="CaretBrush" Value="#E7E9EE"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="CheckBox">
+        <StackPanel x:Name="root" Orientation="Horizontal" Background="Transparent">
+          <Border x:Name="box" Width="18" Height="18" CornerRadius="5" BorderThickness="1.5" BorderBrush="#3A4358" Background="#0F1219" VerticalAlignment="Center">
+            <Path x:Name="mark" Data="M3.2,8.6 L6.8,12.2 L13.2,4.8" Stroke="White" StrokeThickness="2.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+          </Border>
+          <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="box" Property="BorderBrush" Value="#6B74A0"/></Trigger>
+          <Trigger Property="IsChecked" Value="True"><Setter TargetName="box" Property="Background" Value="{StaticResource Accent}"/><Setter TargetName="box" Property="BorderBrush" Value="Transparent"/><Setter TargetName="mark" Property="Visibility" Value="Visible"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.45"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+        <StackPanel x:Name="root" Orientation="Horizontal" Background="Transparent">
+          <Grid Width="18" Height="18" VerticalAlignment="Center">
+            <Ellipse x:Name="ring" Stroke="#3A4358" StrokeThickness="1.5" Fill="#0F1219"/>
+            <Ellipse x:Name="dot" Width="8" Height="8" Fill="White" Visibility="Collapsed"/>
+          </Grid>
+          <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ring" Property="Stroke" Value="#6B74A0"/></Trigger>
+          <Trigger Property="IsChecked" Value="True"><Setter TargetName="ring" Property="Fill" Value="{StaticResource Accent}"/><Setter TargetName="ring" Property="Stroke" Value="Transparent"/><Setter TargetName="dot" Property="Visibility" Value="Visible"/></Trigger>
+          <Trigger Property="IsEnabled" Value="False"><Setter TargetName="root" Property="Opacity" Value="0.45"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="#1C2130"/><Setter Property="Foreground" Value="#E7E9EE"/><Setter Property="BorderBrush" Value="#2E3546"/><Setter Property="Padding" Value="10,6"/>
+    </Style>
+    <Style x:Key="ThumbS" TargetType="Thumb">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
+        <Border x:Name="t" Background="#2C3344" CornerRadius="4"/>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="t" Property="Background" Value="#465070"/></Trigger>
+          <Trigger Property="IsDragging" Value="True"><Setter TargetName="t" Property="Background" Value="#7C5CFF"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Width" Value="10"/><Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+        <Grid Background="Transparent" Margin="2"><Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True"><Track.Thumb><Thumb Style="{StaticResource ThumbS}"/></Track.Thumb></Track></Grid>
+      </ControlTemplate></Setter.Value></Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/><Setter Property="MinWidth" Value="0"/><Setter Property="Height" Value="10"/><Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent" Margin="2"><Track x:Name="PART_Track" Orientation="Horizontal"><Track.Thumb><Thumb Style="{StaticResource ThumbS}"/></Track.Thumb></Track></Grid>
+          </ControlTemplate></Setter.Value></Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridRow">
+      <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#181D2A"/></Trigger></Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGrid">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#E7E9EE"/>
+      <Setter Property="RowBackground" Value="Transparent"/><Setter Property="AlternatingRowBackground" Value="#111520"/>
+      <Setter Property="GridLinesVisibility" Value="None"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HeadersVisibility" Value="Column"/><Setter Property="AutoGenerateColumns" Value="False"/>
+      <Setter Property="CanUserAddRows" Value="False"/><Setter Property="CanUserDeleteRows" Value="False"/>
+      <Setter Property="RowHeight" Value="32"/><Setter Property="SelectionMode" Value="Single"/>
+      <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+    </Style>
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="Padding" Value="8,8"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="FontSize" Value="12"/>
+    </Style>
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="8,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridCell">
+            <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#2B2555"/><Setter Property="Foreground" Value="White"/></Trigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="236"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+
+    <!-- ===== Sidemenu ===== -->
+    <Border BorderBrush="{StaticResource Line}" BorderThickness="0,0,1,0">
+      <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#0A0B11" Offset="0"/><GradientStop Color="#0E0C19" Offset="1"/></LinearGradientBrush></Border.Background>
+      <Grid Margin="14,20,14,16">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Orientation="Horizontal" Margin="8,0,0,22">
+          <Grid Width="40" Height="40">
+            <Border Name="LogoTile" CornerRadius="10" Background="{StaticResource Accent}" Margin="3">
+              <TextBlock Text="✓" FontSize="19" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White"/>
+            </Border>
+            <Image Name="LogoImg" RenderOptions.BitmapScalingMode="HighQuality"/>
+          </Grid>
+          <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+            <TextBlock Text="PC-Tjek" FontSize="19" FontWeight="SemiBold"/>
+            <TextBlock Name="VerText" Text="v2.0" FontSize="11" Foreground="{StaticResource Muted}"/>
+          </StackPanel>
+        </StackPanel>
+        <StackPanel Grid.Row="1">
+          <RadioButton Name="NavHome"    Style="{StaticResource Nav}" GroupName="nav" IsChecked="True" Content="🏠   Overblik"/>
+          <RadioButton Name="NavTweaks"  Style="{StaticResource Nav}" GroupName="nav" Content="⚡   Optimering"/>
+          <RadioButton Name="NavBench"   Style="{StaticResource Nav}" GroupName="nav" Content="🏁   Benchmark"/>
+          <RadioButton Name="NavHelped"  Style="{StaticResource Nav}" GroupName="nav" Content="✅   Hjalp det?"/>
+          <RadioButton Name="NavModes"   Style="{StaticResource Nav}" GroupName="nav" Content="🎮   Tilstande"/>
+          <RadioButton Name="NavVagt"    Style="{StaticResource Nav}" GroupName="nav" Content="🛡   Vagt"/>
+          <RadioButton Name="NavSecure"  Style="{StaticResource Nav}" GroupName="nav" Content="🔐   Sikkerhedstjek"/>
+          <RadioButton Name="NavFind"    Style="{StaticResource Nav}" GroupName="nav" Content="🚩   Fund"/>
+          <RadioButton Name="NavTime"    Style="{StaticResource Nav}" GroupName="nav" Content="🕒   Hændelsesforløb"/>
+          <RadioButton Name="NavStart"   Style="{StaticResource Nav}" GroupName="nav" Content="🚀   Opstart"/>
+          <RadioButton Name="NavClean"   Style="{StaticResource Nav}" GroupName="nav" Content="🧹   Oprydning"/>
+          <RadioButton Name="NavFiles"   Style="{StaticResource Nav}" GroupName="nav" Content="🗂   Filer"/>
+          <RadioButton Name="NavUpdates" Style="{StaticResource Nav}" GroupName="nav" Content="⬆   Opdateringer"/>
+          <RadioButton Name="NavHealth"  Style="{StaticResource Nav}" GroupName="nav" Content="💓   Ydelse og helbred"/>
+        </StackPanel>
+        <StackPanel Grid.Row="2">
+          <Border Name="UpdateBanner" Visibility="Collapsed" CornerRadius="10" Padding="12" Margin="0,0,0,12" Background="#1E1838" BorderBrush="#8B5CF6" BorderThickness="1">
+            <StackPanel>
+              <TextBlock Name="UpdateText" Text="✨ Ny version klar" FontWeight="SemiBold" TextWrapping="Wrap"/>
+              <TextBlock Name="UpdateNotes" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,10"/>
+              <Button Name="BtnUpdateApp" Content="⬇  Opdatér nu" Style="{StaticResource Primary}" Margin="0"/>
+            </StackPanel>
+          </Border>
+          <Border Name="ModeSide" Visibility="Collapsed" CornerRadius="12" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="12,10" Margin="0,0,0,10" Cursor="Hand" ToolTip="Klik for at se, hvad PC-Tjek har gjort">
+            <StackPanel>
+              <TextBlock Name="ModeSideTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+              <TextBlock Name="ModeSideSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,8"/>
+              <Button Name="BtnModeStopSide" Content="⏹  Afslut og gendan" Padding="10,6" Margin="0" FontSize="12"/>
+            </StackPanel>
+          </Border>
+          <Button Name="BtnScan" Style="{StaticResource Primary}" Content="🔍   Scan pc'en" Padding="14,12" Margin="0,0,0,10" FontSize="14"/>
+          <ProgressBar Name="Busy" Height="3" Maximum="100" IsIndeterminate="True" Visibility="Hidden" Foreground="#8B5CF6" Background="Transparent" BorderThickness="0" Margin="0,0,0,8"/>
+          <TextBlock Name="StatusText" Text="Klar" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12"/>
+          <Button Name="BtnCheckUpdate" Content="Søg efter app-opdatering" Background="Transparent" Foreground="#6B7488" Padding="0,8,0,0" HorizontalAlignment="Left" FontSize="11" Margin="0"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ===== Indhold ===== -->
+    <Grid Grid.Column="1" Margin="28,22,28,20">
+
+      <!-- OVERBLIK -->
+      <Grid Name="PageHome">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,18">
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Name="BtnExport" Content="📄  Eksportér rapport" IsEnabled="False"/>
+            <Button Name="BtnUndo" Content="↶  Fortryd seneste" Margin="0"/>
+          </StackPanel>
+          <StackPanel><TextBlock Style="{StaticResource H1}" Text="Overblik"/><TextBlock Name="Verdict" Style="{StaticResource Sub}" Text="Tryk på Scan pc'en. Scanningen læser kun og ændrer intet."/></StackPanel>
+        </DockPanel>
+        <Grid Grid.Row="1" Margin="0,0,0,16">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="250"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Border Style="{StaticResource CardB}" Margin="0,0,16,0">
+            <Grid Width="150" Height="150" HorizontalAlignment="Center" VerticalAlignment="Center">
+              <Ellipse Stroke="#242A39" StrokeThickness="12" Margin="6"/>
+              <Path Name="ScoreArc" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Stroke="{StaticResource Accent}"/>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Name="ScoreText" Text="–" FontSize="42" FontWeight="Bold" HorizontalAlignment="Center"/>
+                <TextBlock Name="ScoreLabel" Text="ikke scannet" FontSize="12" Foreground="{StaticResource Muted}" HorizontalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <UniformGrid Grid.Column="1" Columns="3">
+            <Border Name="SecCard" Style="{StaticResource CardB}" Margin="0,0,10,0" Cursor="Hand" ToolTip="Klik for at se fundene">
+              <StackPanel><TextBlock Text="🛡  Sikkerhed" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="SecValue" Text="–" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                <TextBlock Name="SecSub" Text="ikke scannet endnu" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+            <Border Style="{StaticResource CardB}" Margin="0,0,10,0">
+              <StackPanel><TextBlock Text="💾  Lagerplads" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="CntSpace" Text="–" FontSize="26" FontWeight="Bold" Foreground="#60A5FA" Margin="0,6,0,0"/>
+                <TextBlock Name="SpaceSub" Text="kan ryddes" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+            <Border Style="{StaticResource CardB}">
+              <StackPanel><TextBlock Text="🚀  Opstart" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="StartValue" Text="–" FontSize="26" FontWeight="Bold" Foreground="#C084FC" Margin="0,6,0,0"/>
+                <TextBlock Name="StartSub" Text="programmer starter med Windows" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0"/></StackPanel></Border>
+          </UniformGrid>
+        </Grid>
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Margin="0,0,0,16" Padding="18,14">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <DockPanel Margin="0,0,0,10">
+              <Button Name="BtnCopyInfo" DockPanel.Dock="Right" Content="📋  Kopiér til support" Padding="10,5" Margin="0" FontSize="12"/>
+              <TextBlock Text="💻  Din pc" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center"/>
+            </DockPanel>
+            <UniformGrid Grid.Row="1" Columns="3">
+              <StackPanel Margin="0,0,16,10"><TextBlock Text="SYSTEM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysOS" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysOSsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,10"><TextBlock Text="PROCESSOR" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysCpu" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysCpusub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,0,10"><TextBlock Text="GRAFIKKORT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysGpu" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysGpusub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,0"><TextBlock Text="HUKOMMELSE" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysRam" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysRamsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel Margin="0,0,16,0"><TextBlock Text="BUNDKORT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysBoard" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysBoardsub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+              <StackPanel><TextBlock Text="LAGER" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="SysDisk" Text="…" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Name="SysDisksub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/></StackPanel>
+            </UniformGrid>
+          </Grid>
+        </Border>
+        <Grid Grid.Row="3">
+        <Border Name="ScanCard" Style="{StaticResource CardB}" Padding="28,24" Visibility="Collapsed" Panel.ZIndex="1">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Right" HorizontalAlignment="Right">
+                <TextBlock Name="ScanEta" Text="beregner tid..." FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+                <TextBlock Name="ScanElapsed" Text="" Foreground="{StaticResource Muted}" HorizontalAlignment="Right" Margin="0,2,0,0"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Name="ScanPct" Text="0" FontSize="40" FontWeight="Bold"/>
+                <TextBlock Text="%" FontSize="22" Foreground="{StaticResource Muted}" VerticalAlignment="Bottom" Margin="4,0,0,8"/>
+              </StackPanel>
+            </DockPanel>
+            <ProgressBar Name="ScanBar" Grid.Row="1" Height="10" Maximum="100" Margin="0,14,0,16" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0"/>
+            <TextBlock Name="ScanStep" Grid.Row="2" Text="Starter..." FontSize="16" FontWeight="SemiBold"/>
+            <TextBlock Name="ScanDetail" Grid.Row="3" Text="" Foreground="#6FA8FF" Margin="0,4,0,0"/>
+            <TextBlock Name="ScanPhases" Grid.Row="4" Margin="0,18,0,0" FontSize="14" LineHeight="26" Foreground="{StaticResource Muted}"/>
+          </Grid>
+        </Border>
+        <!-- DIN PLAN -->
+        <Grid Name="PlanCard">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,12">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="BtnFixAll" Content="🧹  Ryd anbefalede filer" Style="{StaticResource Primary}" Visibility="Collapsed" Padding="18,10" FontSize="14"/>
+              <Button Name="BtnDetails" Content="Vis detaljer" Visibility="Collapsed" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Name="PlanTitle" Text="Din plan" FontSize="20" FontWeight="SemiBold"/>
+              <TextBlock Name="PlanSub" Style="{StaticResource Sub}" Text="Tryk på Scan pc'en. Bagefter får du en kort liste med det, du skal gøre, med én knap til hvert trin."/>
+            </StackPanel>
+          </DockPanel>
+          <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <ItemsControl Name="PlanList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border Background="#161A23" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,0,0,10">
+                    <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="52"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                      <Border Width="36" Height="36" CornerRadius="18" Background="{StaticResource Accent}" VerticalAlignment="Center" HorizontalAlignment="Left">
+                        <TextBlock Text="{Binding Gruppe}" FontSize="15" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      </Border>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <TextBlock Text="{Binding Navn}" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock Text="{Binding Info}" Foreground="#8A94A7" TextWrapping="Wrap" Margin="0,3,0,0"/>
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Status}" Foreground="#4ADE80" VerticalAlignment="Center" Margin="0,0,12,0" FontWeight="SemiBold"/>
+                        <Button Content="{Binding Note}" Tag="{Binding Id}" IsEnabled="{Binding Valgt}" Style="{StaticResource Primary}" Margin="0" MinWidth="150"/>
+                      </StackPanel>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </Grid>
+        <Border Name="StoryCard" Style="{StaticResource CardB}" Padding="0" Visibility="Collapsed">
+          <TextBox Name="Story" Background="Transparent" BorderThickness="0" Padding="20,16" IsReadOnly="True" TextWrapping="Wrap" FontSize="13.5"
+                   VerticalScrollBarVisibility="Auto" FontFamily="Segoe UI Variable Text, Segoe UI"
+                   Text="Analysen vises her efter scanningen: hvad der er fundet, hvad en evt. falsk installer gjorde, og hvad du bør gøre."/>
+        </Border>
+        </Grid>
+      </Grid>
+
+      <!-- VAGT -->
+
+
+
+      <!-- HJALP DET? -->
+      <Grid Name="PageHelped" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+          <TextBlock Style="{StaticResource H1}" Text="Hjalp det?"/>
+          <TextBlock Style="{StaticResource Sub}" Text="Alle dine ændringer samlet med en måling før og efter. Opstart måles ved de næste opstarter, oprydning som ledig plads, GPU-profiler med samme test, og alt andet med den store test."/>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="18,14" Margin="0,0,0,14">
+          <DockPanel>
+            <Button Name="BtnHelpedBench" DockPanel.Dock="Right" Content="📌  Jeg har ændret noget: hjalp det?" Style="{StaticResource Primary}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+            <StackPanel>
+              <TextBlock Name="HelpedSummary" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" Text="Ingen ændringer registreret endnu."/>
+              <TextBlock Name="HelpedSub" Style="{StaticResource Sub}" FontSize="12" Margin="0,4,0,0" Text="Har du fx ændret noget i BIOS, Afterburner eller Windows? Tryk på knappen. Opticon kører den store test og sammenligner med testen før ændringen."/>
+            </StackPanel>
+          </DockPanel>
+        </Border>
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridHelped" IsReadOnly="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="DATO" Binding="{Binding Navn}" Width="105"/>
+              <DataGridTextColumn Header="ÆNDRING" Binding="{Binding Info}" Width="2.2*"/>
+              <DataGridTextColumn Header="FØR" Binding="{Binding Note}" Width="1.3*"/>
+              <DataGridTextColumn Header="EFTER" Binding="{Binding Gruppe}" Width="1.3*"/>
+              <DataGridTextColumn Header="HJALP DET?" Binding="{Binding Status}" Width="2.6*">
+                <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style></DataGridTextColumn.ElementStyle>
+              </DataGridTextColumn>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+      </Grid>
+      <!-- BENCHMARK -->
+      <Grid Name="PageBench" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="0,0,8,0">
+          <TextBlock Style="{StaticResource H1}" Text="Benchmark"/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Én stor test af hele pc'en: processor, hukommelse, disk og grafik. Ca. 3 minutter. Resultaterne gemmes, så du kan følge din pc over tid og sammenligne med andre med samme hardware."/>
+          <Border Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="200"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="OPTICON-SCORE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BenchScore" Text="–" FontSize="48" FontWeight="Bold" Foreground="#A78BFA"/>
+                <TextBlock Name="BenchScoreSub" Text="ikke testet endnu" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/>
+              </StackPanel>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="16,0,0,0">
+                <TextBlock Name="BenchHw" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                <StackPanel Orientation="Horizontal">
+                  <Button Name="BtnBench" Content="🏁  Kør den store test (ca. 3 min)" Style="{StaticResource Primary}" Padding="18,11"/>
+                </StackPanel>
+                <ProgressBar Name="BenchBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="BenchStatus" Style="{StaticResource Sub}" FontSize="12" Margin="0,6,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Border>
+          <UniformGrid Columns="3" Margin="0,0,-10,4">
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="CPU · ÉN KERNE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BCpu1" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BCpu1Sub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="CPU · ALLE KERNER" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BCpuN" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BCpuNSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="HOLDER FARTEN (VARM)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BSus" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BSusSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="HUKOMMELSE" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BRam" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BRamSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="DISK" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BDisk" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BDiskSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+              <Border Style="{StaticResource CardB}" Margin="0,0,10,10" Padding="16,14"><StackPanel>
+                <TextBlock Text="GRAFIK · FPS (1080p-SCENE)" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <TextBlock Name="BGpu" Text="–" FontSize="24" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock Name="BGpuSub" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel></Border>
+          </UniformGrid>
+          <Border Name="BenchAdviceBox" Visibility="Collapsed" CornerRadius="16" Background="#141B2A" BorderBrush="#2C4A7A" BorderThickness="1" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="🩺  Hvad betyder dine tal?" FontSize="16" FontWeight="SemiBold"/>
+              <TextBlock Name="BenchAdvice" TextWrapping="Wrap" Margin="0,8,0,0" LineHeight="21" Foreground="#C3CAD6"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                  <Button Name="BtnBenchGb" Content="🔎  Se andre i Geekbench"/>
+                  <Button Name="BtnBenchShare" Content="🌍  Del mit resultat" Style="{StaticResource Primary}" Margin="0" IsEnabled="False"/>
+                </StackPanel>
+                <TextBlock Text="🌍  Andre med samme hardware" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock Style="{StaticResource Sub}" FontSize="11.5" Margin="0,6,0,0" Text="🔓 Del mit resultat: deles offentligt som et opslag under din GitHub-konto. Kun hardware og testtal, ingen navne eller filer. Kun fulde tests tilsluttet strøm kan deles."/>
+              <TextBlock Name="BenchCmpText" Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Kør testen for at se, hvordan din pc klarer sig mod andre med samme processor og grafikkort."/>
+              <DataGrid Name="GridBenchCmp" IsReadOnly="True" Margin="0,10,0,0" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="TEST" Binding="{Binding Navn}" Width="1.6*"/>
+                  <DataGridTextColumn Header="DIG" Binding="{Binding Info}" Width="1*"/>
+                  <DataGridTextColumn Header="ANDRE (MEDIAN)" Binding="{Binding Note}" Width="1.2*"/>
+                  <DataGridTextColumn Header="FORSKEL" Binding="{Binding Status}" Width="1*"/>
+                  <DataGridTextColumn Header="SAMMENLIGNET MED" Binding="{Binding Gruppe}" Width="2.2*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="📈  Din historik" FontSize="16" FontWeight="SemiBold"/>
+              <TextBlock Name="BenchHistEmpty" Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Ingen tests endnu."/>
+              <DataGrid Name="GridBenchHist" IsReadOnly="True" Margin="0,10,0,0" MaxHeight="260" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="DATO" Binding="{Binding Navn}" Width="1.2*"/>
+                  <DataGridTextColumn Header="SCORE" Binding="{Binding Info}" Width="0.8*"/>
+                  <DataGridTextColumn Header="CPU 1 / ALLE" Binding="{Binding Note}" Width="1.3*"/>
+                  <DataGridTextColumn Header="GRAFIK" Binding="{Binding Status}" Width="0.8*"/>
+                  <DataGridTextColumn Header="DISK LÆS" Binding="{Binding Gruppe}" Width="0.9*"/>
+                  <DataGridTextColumn Header="PC" Binding="{Binding Sti}" Width="2*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+        </ScrollViewer>
+      </Grid>
+      <!-- TILSTANDE -->
+      <Grid Name="PageModes" Visibility="Collapsed">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="0,0,8,0">
+          <TextBlock Style="{StaticResource H1}" Text="Tilstande"/>
+          <TextBlock Style="{StaticResource Sub}" Margin="0,0,0,16" Text="Midlertidige indstillinger til spil og fokus. Alt bliver sat tilbage, når du er færdig, også hvis pc'en går ned undervejs. Du kan altid se, hvad PC-Tjek har gjort."/>
+          <Border Name="ModeActiveCard" Visibility="Collapsed" CornerRadius="14" Background="#1B1630" BorderBrush="#8B5CF6" BorderThickness="1" Padding="20,16" Margin="0,0,0,14">
+            <DockPanel>
+              <Button Name="BtnModeStop" DockPanel.Dock="Right" Content="⏹  Afslut og gendan" Style="{StaticResource Primary}" VerticalAlignment="Center" Padding="16,10" Margin="12,0,0,0"/>
+              <StackPanel>
+                <TextBlock Name="ModeActiveTitle" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock Name="ModeActiveSub" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <TextBlock Name="ModeLastText" Style="{StaticResource Sub}" FontSize="12" Margin="2,0,0,14" Visibility="Collapsed"/>
+
+          <Border Style="{StaticResource CardB}" Padding="20,18" Margin="0,0,0,14">
+            <StackPanel>
+              <DockPanel>
+                <Button Name="BtnGameAdd" DockPanel.Dock="Right" Content="➕  Tilføj spil" Style="{StaticResource Primary}" VerticalAlignment="Top" Margin="0"/>
+                <StackPanel>
+                  <TextBlock Text="🎮  Spil" FontSize="17" FontWeight="SemiBold"/>
+                  <TextBlock Style="{StaticResource Sub}" Margin="0,4,12,0" Text="Starter af sig selv, når et af dine spil åbner, og slutter, når du lukker det: lukker de baggrundsapps, du har valgt, dæmper beskeder og bruger evt. din GPU-profil. Bagefter startes alt igen."/>
+                </StackPanel>
+              </DockPanel>
+              <TextBlock Name="GamesEmpty" Style="{StaticResource Sub}" Margin="0,14,0,0" Text="Ingen spil endnu. Start dit spil, og tryk så på Tilføj spil. Så finder PC-Tjek det selv."/>
+              <DataGrid Name="GridGames" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="200" Visibility="Collapsed">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="SPIL" Binding="{Binding Navn}" Width="2*"/>
+                  <DataGridTextColumn Header="LUKKER" Binding="{Binding Info}" Width="3*"/>
+                  <DataGridTextColumn Header="GPU" Binding="{Binding Note}" Width="110"/>
+                  <DataGridTextColumn Header="BESKEDER" Binding="{Binding Gruppe}" Width="100"/>
+                </DataGrid.Columns>
+              </DataGrid>
+              <StackPanel Name="GameBtns" Orientation="Horizontal" Margin="0,10,0,0" Visibility="Collapsed">
+                <Button Name="BtnGameEdit" Content="✏  Ret valgt" IsEnabled="False"/>
+                <Button Name="BtnGameRemove" Content="🗑  Fjern valgt" IsEnabled="False"/>
+              </StackPanel>
+
+              <Border Name="GamePick" Visibility="Collapsed" CornerRadius="12" Background="#141821" BorderBrush="#2A3142" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+                <StackPanel>
+                  <TextBlock Text="Hvilket spil?" FontWeight="SemiBold" FontSize="15"/>
+                  <TextBlock Style="{StaticResource Sub}" Margin="0,4,0,10" Text="Her er de programmer med et vindue, der kører lige nu. Vælg dit spil, eller find programfilen selv."/>
+                  <DataGrid Name="GridGamePick" IsReadOnly="True" MaxHeight="220">
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="VINDUE" Binding="{Binding Navn}" Width="3*"/>
+                      <DataGridTextColumn Header="PROGRAM" Binding="{Binding Info}" Width="2*"/>
+                    </DataGrid.Columns>
+                  </DataGrid>
+                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Name="BtnGamePickOk" Content="Vælg" Style="{StaticResource Primary}" IsEnabled="False"/>
+                    <Button Name="BtnGameBrowse" Content="📂  Find programfil..."/>
+                    <Button Name="BtnGamePickCancel" Content="Annullér"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <Border Name="GameSetup" Visibility="Collapsed" CornerRadius="12" Background="#141821" BorderBrush="#2A3142" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+                <StackPanel>
+                  <TextBlock Name="GameSetupTitle" FontWeight="SemiBold" FontSize="15"/>
+                  <TextBlock Name="GameSetupSub" Style="{StaticResource Sub}" Margin="0,4,0,10"/>
+                  <DataGrid Name="GridModeApps" MaxHeight="300">
+                    <DataGrid.Columns>
+                      <DataGridTemplateColumn Header="LUK" Width="48">
+                        <DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding Valgt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+                      </DataGridTemplateColumn>
+                      <DataGridTextColumn Header="PROGRAM" Binding="{Binding Navn}" Width="2*" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="CPU" Binding="{Binding Info}" Width="70" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="DISK/NET" Binding="{Binding Gruppe}" Width="90" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="RAM" Binding="{Binding Status}" Width="75" IsReadOnly="True"/>
+                      <DataGridTextColumn Header="BEMÆRKNING" Binding="{Binding Note}" Width="3*" IsReadOnly="True"/>
+                    </DataGrid.Columns>
+                  </DataGrid>
+                  <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="0,8,0,0" Text="Windows, Defender, Windows Update, drivere og anti-cheat vises ikke. Dem rører PC-Tjek aldrig."/>
+                  <CheckBox Name="ChkGameMute" Content="Dæmp Windows-beskeder, mens jeg spiller" IsChecked="True" Margin="0,12,0,0"/>
+                  <CheckBox Name="ChkGameGpu" Content="Brug min GPU-profil" Margin="0,6,0,0" IsEnabled="False"/>
+                  <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                    <Button Name="BtnGameSave" Content="💾  Gem" Style="{StaticResource Primary}"/>
+                    <Button Name="BtnGameRemeasure" Content="↻  Mål igen"/>
+                    <Button Name="BtnGameCancel" Content="Annullér"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <Border Style="{StaticResource CardB}" Padding="20,18" Margin="0,0,0,14">
+            <StackPanel>
+              <TextBlock Text="🔕  Fokus" FontSize="17" FontWeight="SemiBold"/>
+              <TextBlock Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Et stykke tid uden forstyrrelser. Slutter af sig selv, og alt sættes tilbage."/>
+              <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                <RadioButton Name="Foc25" GroupName="foc" Content="25 min" IsChecked="True" Foreground="#E7E9EE" Margin="0,0,22,0"/>
+                <RadioButton Name="Foc50" GroupName="foc" Content="50 min" Foreground="#E7E9EE" Margin="0,0,22,0"/>
+                <RadioButton Name="Foc90" GroupName="foc" Content="90 min" Foreground="#E7E9EE"/>
+              </StackPanel>
+              <CheckBox Name="ChkFocMute" Content="Dæmp beskeder (Windows og PC-Tjek)" IsChecked="True" Margin="0,14,0,0"/>
+              <CheckBox Name="ChkFocBlock" Content="Skjul distraktioner: bloker disse sider i alle browsere" Margin="0,8,0,0"/>
+              <TextBox Name="FocSites" Text="facebook.com, reddit.com, youtube.com, tiktok.com, instagram.com" Margin="26,6,0,0" Padding="8,6" Background="#141821" Foreground="#E7E9EE" BorderBrush="#2A3142" IsEnabled="{Binding IsChecked, ElementName=ChkFocBlock}"/>
+              <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                <Button Name="BtnFocStart" Content="▶  Start fokus" Style="{StaticResource Primary}" Padding="16,10"/>
+                <Button Name="BtnFocNotif" Content="🔔  Er det kun ét websteds beskeder, der generer?"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+          <TextBlock Style="{StaticResource Sub}" FontSize="12" Margin="2,0,0,8" Text="På vej: Mødetilstand (test mikrofon og kamera) og 'Hvorfor hakkede mit spil?' med en 60-sekunders måling."/>
+        </StackPanel>
+        </ScrollViewer>
+      </Grid>
+      <Grid Name="PageSecure" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14">
+          <TextBlock Style="{StaticResource H1}" Text="Sikkerhedstjek"/>
+          <TextBlock Style="{StaticResource Sub}" Text="Er Windows' egne beskyttelser slået til? Og har pc'en drivere, som angribere kan misbruge? Vælg en linje for at se, hvad du skal gøre."/>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,12">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="WinSecBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center" Text="–"/>
+                  <StackPanel><TextBlock Text="🔐  Windows-beskyttelse" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="WinSecSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Tjekker..."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridSecure" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="420" SelectionMode="Single">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                    <DataGridTextColumn Header="BESKYTTELSE" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="NU" Binding="{Binding Info}" Width="2*"/>
+                    <DataGridTextColumn Header="HVAD BETYDER DET" Binding="{Binding Note}" Width="4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <Border Name="SecHintBox" Visibility="Collapsed" CornerRadius="10" Background="#1B1630" BorderBrush="#3B3366" BorderThickness="1" Padding="14,10" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="SecHintTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="SecHint" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+                  </StackPanel>
+                </Border>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnSecFix" Content="🔧  Ret det for mig" Style="{StaticResource Primary}" IsEnabled="False"/>
+                  <Button Name="BtnSecOpen" Content="⚙  Åbn indstillingen" IsEnabled="False"/>
+                  <Button Name="BtnSecRefresh" Content="⟳  Tjek igen"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="DrvBig" DockPanel.Dock="Right" FontSize="24" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center" Text="–"/>
+                  <StackPanel><TextBlock Text="🧩  Farlige drivere" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="DrvSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Sammenligner dine drivere med LOLDrivers, en åben liste over drivere, som angribere misbruger. Tager typisk under et minut."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridDrv" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="300" SelectionMode="Single" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                    <DataGridTextColumn Header="DRIVER" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="FRA" Binding="{Binding Info}" Width="2*"/>
+                    <DataGridTextColumn Header="HVAD SKAL JEG GØRE" Binding="{Binding Note}" Width="4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnDrvScan" Content="🔎  Scan drivere" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnDrvShow" Content="📂  Vis filen" IsEnabled="False"/>
+                  <Button Name="BtnDrvApps" Content="🗑  Afinstallér programmer"/>
+                  <Button Name="BtnDrvInfo" Content="ℹ  Om LOLDrivers"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+      <Grid Name="PageVagt" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,16">
+          <TextBlock Style="{StaticResource H1}" Text="Vagt"/>
+          <TextBlock Style="{StaticResource Sub}" Text="Passer på din pc i baggrunden, også når PC-Tjek er lukket. Du får en lille besked nederst til højre, hvis der sker noget."/>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="22,18" Margin="0,0,0,14">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="72"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Name="VagtIconBg" Width="56" Height="56" CornerRadius="16" Background="#242A39" HorizontalAlignment="Left">
+              <TextBlock Name="VagtIcon" Text="🛡" FontSize="27" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+              <TextBlock Name="VagtStatus" Text="Tjekker..." FontSize="20" FontWeight="SemiBold"/>
+              <TextBlock Name="VagtSub" Style="{StaticResource Sub}" Margin="0,3,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Name="BtnVagtTest" Content="👀  Vis et eksempel"/>
+              <Button Name="BtnVagtToggle" Content="Slå vagten til" Style="{StaticResource Primary}" Padding="18,10" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <UniformGrid Grid.Row="2" Columns="2" Margin="0,0,0,14">
+          <Border Style="{StaticResource CardB}" Margin="0,0,7,0" Padding="18,16">
+            <DockPanel>
+              <CheckBox Name="ChkDl" DockPanel.Dock="Right" IsChecked="True" VerticalAlignment="Top" RenderTransformOrigin="0.5,0.5"><CheckBox.RenderTransform><ScaleTransform ScaleX="1.4" ScaleY="1.4"/></CheckBox.RenderTransform></CheckBox>
+              <StackPanel Margin="0,0,12,0">
+                <TextBlock Text="🛡  Download-vagt" FontSize="15.5" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Tjekker programfiler, du henter, med det samme: hvem der har lavet dem, hvor de kommer fra, og om Defender finder noget. Advarer, før du kører noget farligt."/>
+                <TextBlock Name="VagtDlInfo" Margin="0,8,0,0" FontSize="12" Foreground="#6FA8FF"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource CardB}" Margin="7,0,0,0" Padding="18,16">
+            <DockPanel>
+              <CheckBox Name="ChkWd" DockPanel.Dock="Right" IsChecked="True" VerticalAlignment="Top" RenderTransformOrigin="0.5,0.5"><CheckBox.RenderTransform><ScaleTransform ScaleX="1.4" ScaleY="1.4"/></CheckBox.RenderTransform></CheckBox>
+              <StackPanel Margin="0,0,12,0">
+                <TextBlock Text="👀  Vagthund" FontSize="15.5" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,5,0,0" Text="Giver besked, når noget nyt sætter sig fast, eller når noget kendt pludselig peger på et andet program: opstart, planlagte opgaver, tjenester, browserudvidelser og Defender-undtagelser."/>
+                <TextBlock Name="VagtWdInfo" Margin="0,8,0,0" FontSize="12" Foreground="#6FA8FF"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+        </UniformGrid>
+        <Border Grid.Row="3" Style="{StaticResource CardB}" Padding="6">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <DockPanel Margin="10,6,6,6">
+              <Button Name="BtnVagtRefresh" DockPanel.Dock="Right" Content="⟳" Margin="0" Padding="10,4"/>
+              <TextBlock Text="Det har vagten set" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <DataGrid Name="GridVagt" Grid.Row="1" IsReadOnly="True">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="TID" Binding="{Binding Tid, StringFormat='dd-MM HH:mm'}" Width="100"/>
+                <DataGridTextColumn Header="" Binding="{Binding Ikon}" Width="36"/>
+                <DataGridTextColumn Header="TYPE" Binding="{Binding Type}" Width="100"/>
+                <DataGridTextColumn Header="HVAD" Binding="{Binding Titel}" Width="2*"/>
+                <DataGridTextColumn Header="DETALJE" Binding="{Binding Detalje}" Width="3*"/>
+              </DataGrid.Columns>
+            </DataGrid>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- OPTIMERING -->
+      <Grid Name="PageTweaks" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <DockPanel Margin="0,0,0,16">
+          <Button Name="BtnTweakRefresh" DockPanel.Dock="Right" Content="⟳  Tjek igen" VerticalAlignment="Center" Margin="0"/>
+          <StackPanel>
+            <TextBlock Style="{StaticResource H1}" Text="Optimering"/>
+            <TextBlock Name="TweakSummary" Style="{StaticResource Sub}" Text="Gratis ydelse, der ofte bliver glemt. Intet ændres, uden at du selv gør det."/>
+          </StackPanel>
+        </DockPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🧠" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Hukommelse (RAM)" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="RamBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="RamBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="RamNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="RamNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="RamArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="RamCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="RamCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="RamText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="RamSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="RamStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="RamAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="RamAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="RamHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🖥" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Skærmens opdateringshastighed" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="HzBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="HzBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="HzNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="HzNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="HzArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="HzCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="HzCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="HzText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="HzSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="HzStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="HzAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="HzAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="HzHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+              <TextBlock Text="🔧" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="0,0,16,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Drivere og BIOS" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Name="DrvBadge" CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#1D2433" VerticalAlignment="Center">
+                  <TextBlock Name="DrvBadgeText" Text="Tjekker..." FontSize="12" FontWeight="SemiBold" Foreground="#8AB4FF"/>
+                </Border>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                <StackPanel><TextBlock Name="DrvNowLbl" Text="NU" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="DrvNow" Text="–" FontSize="26" FontWeight="Bold"/></StackPanel>
+                <TextBlock Name="DrvArrow" Text="→" FontSize="24" Foreground="#5A6478" Margin="20,16,20,0"/>
+                <StackPanel><TextBlock Name="DrvCanLbl" Text="MULIGT" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="DrvCan" Text="–" FontSize="26" FontWeight="Bold" Foreground="#A78BFA"/></StackPanel>
+              </StackPanel>
+              <TextBlock Name="DrvText" TextWrapping="Wrap" Foreground="#AEB6C6" Margin="0,12,0,0" LineHeight="20"/>
+              <Border Name="DrvSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                <TextBlock Name="DrvStepsText" TextWrapping="Wrap" LineHeight="23"/>
+              </Border>
+            </StackPanel>
+            <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+              <Button Name="DrvAction" Content="" Style="{StaticResource Primary}" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="DrvAction2" Content="" Margin="0,0,0,8" Visibility="Collapsed"/>
+              <Button Name="DrvHow" Content="📖  Sådan gør du" Margin="0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <!-- GPU-TUNING -->
+        <Border Style="{StaticResource CardB}" Margin="0,0,0,14" Padding="20,18">
+          <StackPanel>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="66"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Border Width="50" Height="50" CornerRadius="15" Background="{StaticResource Accent}" VerticalAlignment="Top" HorizontalAlignment="Left">
+                <TextBlock Text="🎮" FontSize="24" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="0,0,16,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="Grafikkort" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <Border CornerRadius="10" Padding="10,3" Margin="12,0,0,0" Background="#3B2C6E" VerticalAlignment="Center"><TextBlock Text="Avanceret" FontSize="12" FontWeight="SemiBold" Foreground="#C4B5FD"/></Border>
+                </StackPanel>
+                <TextBlock Name="GpuName" Foreground="#AEB6C6" Margin="0,4,0,0"/>
+                <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Vælg herunder, hvad du vil opnå. Opticon måler før og efter i sin egen testscene, så du kan se, om det hjalp."/>
+              </StackPanel>
+              <StackPanel Grid.Column="2" VerticalAlignment="Top" MinWidth="190">
+                <Button Name="BtnGpuTool" Content="🛠  Åbn tuningværktøj" Style="{StaticResource Primary}" Margin="0,0,0,8"/>
+                <Button Name="BtnGpuAb" Content="MSI Afterburner" Margin="0,0,0,8"/>
+                <Button Name="GpuHow" Content="📖  Sådan gør du" Margin="0"/>
+              </StackPanel>
+            </Grid>
+            <Border Name="GpuSteps" Visibility="Collapsed" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="10" Padding="16,12" Margin="0,14,0,0">
+              <TextBlock Name="GpuStepsText" TextWrapping="Wrap" LineHeight="23"/>
+            </Border>
+            <!-- live -->
+            <Border Background="#10131A" BorderBrush="#20263A" BorderThickness="1" CornerRadius="10" Padding="14,10" Margin="0,14,0,0">
+              <StackPanel>
+                <TextBlock Text="GRAFIKKORTET LIGE NU · opdateres hvert 3. sekund · bare til orientering, du skal ikke gøre noget her" FontSize="11" Foreground="{StaticResource Muted}"/>
+                <UniformGrid Columns="5" Margin="0,8,0,0">
+                  <StackPanel><TextBlock Text="Strøm nu / maks" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveW" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Temperatur" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveT" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Blæser" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveF" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Hastighed (clock)" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveC" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                  <StackPanel><TextBlock Text="Belastning" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="GpuLiveU" Text="–" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                </UniformGrid>
+              </StackPanel>
+            </Border>
+            <!-- vælger: hvad vil du? -->
+            <Border Background="#121726" BorderBrush="#2A3142" BorderThickness="1" CornerRadius="12" Padding="14,12" Margin="0,16,0,0">
+              <StackPanel>
+                <TextBlock Text="Hvad vil du opnå?" FontWeight="SemiBold" FontSize="14"/>
+                <WrapPanel Margin="0,10,0,0">
+                  <Button Name="ChoosePower" Content="🔋  Mindre strøm, varme og larm"/>
+                  <Button Name="ChooseFps" Content="⚡  Flere FPS"/>
+                  <Button Name="ChooseOwn" Content="📏  Test mine egne indstillinger"/>
+                  <Button Name="ChooseAll" Content="Vis alt" Background="Transparent" Foreground="#8C95A9"/>
+                </WrapPanel>
+                <TextBlock Name="ChooseHelp" Style="{StaticResource Sub}" FontSize="12" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Border>
+            <!-- automatisk test -->
+            <Border Name="SecAuto" Background="#10131A" BorderBrush="#3B2C6E" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,16,0,0">
+              <StackPanel>
+                <DockPanel>
+                  <Button Name="BtnGpuAuto" DockPanel.Dock="Right" Content="🚀  Find det bedste punkt (ca. 4 min)" Style="{StaticResource Primary}" Padding="16,9" Margin="0"/>
+                  <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="🚀  Automatisk: mindre strøm, næsten samme ydelse" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="GpuAutoInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="PC-Tjek viser en 3D-testscene i fuld skærm og prøver selv 4 strømgrænser (100, 90, 80 og 70 %). Bagefter får du en anbefaling. Den oprindelige indstilling gendannes altid."/>
+                  </StackPanel>
+                </DockPanel>
+                <ProgressBar Name="GpuAutoBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <DataGrid Name="GridGpuAuto" IsReadOnly="True" Margin="0,12,0,0" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="34"/>
+                    <DataGridTextColumn Header="STRØMGRÆNSE" Binding="{Binding Navn}" Width="1.4*"/>
+                    <DataGridTextColumn Header="EFFEKT" Binding="{Binding Info}" Width="1.2*"/>
+                    <DataGridTextColumn Header="FPS" Binding="{Binding Note}" Width="1.3*"/>
+                    <DataGridTextColumn Header="TEMP · BLÆSER · CLOCK" Binding="{Binding Gruppe}" Width="2.4*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <Border Name="GpuRecBox" Visibility="Collapsed" CornerRadius="10" Background="#173325" BorderBrush="#22C55E" BorderThickness="1" Padding="14,12" Margin="0,12,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuRecTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="GpuRecText" Foreground="#C3E8D0" TextWrapping="Wrap" Margin="0,4,0,10"/>
+                    <WrapPanel>
+                      <Button Name="BtnGpuApply" Content="✅  Brug anbefalingen" Style="{StaticResource Primary}"/>
+                      <Button Name="BtnGpuReset" Content="↩  Tilbage til standard"/>
+                      <Button Name="BtnGpuAbHow" Content="🎚  Hellere med Afterburner?"/>
+                    </WrapPanel>
+                    <!-- illustration af Afterburner-skyderen (egen tegning) -->
+                    <Border Name="GpuAbBox" Visibility="Collapsed" Background="#0B0D12" CornerRadius="10" Padding="16,12" Margin="0,12,0,0">
+                      <StackPanel>
+                        <TextBlock Text="Sådan i MSI Afterburner:" FontWeight="SemiBold"/>
+                        <Grid Margin="0,10,0,4" Width="340" HorizontalAlignment="Left">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/><ColumnDefinition Width="50"/></Grid.ColumnDefinitions>
+                          <TextBlock Text="Power Limit (%)" Foreground="#AEB6C6" VerticalAlignment="Center"/>
+                          <Grid Grid.Column="1" Height="10" VerticalAlignment="Center">
+                            <Border Background="#242A39" CornerRadius="5"/>
+                            <Border Name="GpuAbFill" Background="{StaticResource Accent}" CornerRadius="5" HorizontalAlignment="Left" Width="120"/>
+                          </Grid>
+                          <TextBlock Name="GpuAbVal" Grid.Column="2" Text="80" FontWeight="Bold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                        </Grid>
+                        <TextBlock Name="GpuAbSteps" Foreground="#AEB6C6" TextWrapping="Wrap" LineHeight="21" Margin="0,6,0,0"/>
+                      </StackPanel>
+                    </Border>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+            </Border>
+            <!-- FPS ved forskellige opløsninger -->
+            <Border Name="SecRes" Background="#10131A" BorderBrush="#1E3A5F" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <DockPanel>
+                  <Button Name="BtnGpuRes" DockPanel.Dock="Right" Content="📺  Mål FPS" Style="{StaticResource Primary}" Padding="16,9" Margin="0" VerticalAlignment="Top"/>
+                  <StackPanel Margin="0,0,12,0">
+                    <TextBlock Text="📺  FPS ved Full HD, 2K og 4K" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock Name="GpuResInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Samme testscene i 1920×1080, 2560×1440 og 3840×2160, uden skærmens Hz-loft og uanset hvilken skærm du har. Rigtige FPS uden din skærms Hz-loft, så du ser, hvad grafikkortet kan. Du ser FPS, laveste 1 %, strøm og FPS pr. watt for hver opløsning. Ca. 1½ minut."/>
+                    <CheckBox Name="ChkGpuResCmp" Content="Sammenlign med min GPU-profil (ca. 3 minutter)" Margin="0,8,0,0" IsEnabled="False"/>
+                  </StackPanel>
+                </DockPanel>
+                <ProgressBar Name="GpuResBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="#60A5FA" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <DataGrid Name="GridGpuRes" IsReadOnly="True" Margin="0,12,0,0" Visibility="Collapsed">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="OPLØSNING" Binding="{Binding Navn}" Width="1.5*"/>
+                    <DataGridTextColumn Header="STRØM" Binding="{Binding Info}" Width="1.2*"/>
+                    <DataGridTemplateColumn Header="FPS" Width="2.2*">
+                      <DataGridTemplateColumn.CellTemplate><DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                          <Border Width="{Binding Tal}" Height="10" CornerRadius="5" Background="#60A5FA" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding Note}" Margin="8,0,0,0" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate></DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="LAVESTE 1 %" Binding="{Binding Gruppe}" Width="1*"/>
+                    <DataGridTextColumn Header="WATT · TEMP" Binding="{Binding Status}" Width="1.3*"/>
+                    <DataGridTextColumn Header="FPS PR. WATT" Binding="{Binding Id}" Width="1*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Name="GpuResVerdict" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+              </StackPanel>
+            </Border>
+            <!-- OC-tjek -->
+            <Border Name="SecOc" Background="#10131A" BorderBrush="#5F3A1E" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="⚡  OC-tjek: flere FPS, og holder det?" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Name="GpuOcInfo" Style="{StaticResource Sub}" Margin="0,4,0,0" Text="Lad NVIDIAs egen automatiske tuning finde dit overclock, og lad PC-Tjek måle, om det giver flere FPS og kører stabilt. Testen kører i 2K, så det er grafikkortet, der bliver presset."/>
+                <WrapPanel Margin="0,12,0,0">
+                  <Button Name="BtnOcBase" Content="1 · Mål udgangspunkt (1 min)" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnOcTune" Content="2 · Find overclock automatisk"/>
+                  <Button Name="BtnOcCheck" Content="3 · Tjek OC (5 min)" IsEnabled="False"/>
+                </WrapPanel>
+                <ProgressBar Name="GpuOcBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="#F59E0B" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="GpuOcBase" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+                <Border Name="GpuOcBox" Visibility="Collapsed" CornerRadius="10" BorderThickness="1" Padding="14,12" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuOcTitle" FontSize="15.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <TextBlock Name="GpuOcText" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="20"/>
+                  </StackPanel>
+                </Border>
+                <Border Name="GpuOcEstBox" Visibility="Collapsed" CornerRadius="10" Background="Transparent" BorderBrush="#2A3142" BorderThickness="1" Padding="12,10" Margin="0,10,0,0">
+                  <StackPanel>
+                    <TextBlock Name="GpuOcEstTitle" FontSize="13" FontWeight="SemiBold" Foreground="#AEB6C6" TextWrapping="Wrap"/>
+                    <UniformGrid Columns="4" Margin="0,10,0,6">
+                      <StackPanel><TextBlock Text="FPS" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstFps" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstFpsSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="STRØM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstW" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstWSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="VARME" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstT" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstTSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                      <StackPanel><TextBlock Text="LARM" FontSize="11" Foreground="{StaticResource Muted}"/><TextBlock Name="OcEstN" FontSize="14" FontWeight="SemiBold" Foreground="#C3CAD6"/><TextBlock Name="OcEstNSub" FontSize="12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
+                    </UniformGrid>
+                    <TextBlock Name="GpuOcEstText" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" LineHeight="18"/>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+            </Border>
+            <!-- mål før/efter (egne indstillinger) -->
+            <Border Name="SecOwn" Background="#10131A" BorderBrush="#242A39" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,12,0,0">
+              <StackPanel>
+                <TextBlock Text="📏  Test dine egne indstillinger (før/efter)" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Name="GpuMeasureInfo" Style="{StaticResource Sub}" Margin="0,4,0,10" Text="Til undervolt i fx Afterburner: 1) Tryk 'Mål FØR'. Testscenen kører 1 minut. 2) Lav ÉN ændring i Afterburner. 3) Tryk 'Mål EFTER'. Begge målinger bruger præcis samme belastning."/>
+                <WrapPanel>
+                  <Button Name="BtnGpuBefore" Content="①  Mål FØR (1 min)" Style="{StaticResource Primary}"/>
+                  <Button Name="BtnGpuAfter" Content="②  Mål EFTER (1 min)" IsEnabled="False"/>
+                </WrapPanel>
+                <ProgressBar Name="GpuMeasureBar" Height="6" Maximum="100" Margin="0,12,0,0" Foreground="{StaticResource Accent}" Background="#242A39" BorderThickness="0" Visibility="Collapsed"/>
+                <TextBlock Name="GpuResult" TextWrapping="Wrap" FontSize="15" FontWeight="SemiBold" Margin="0,12,0,0"/>
+                <TextBlock Name="GpuVerdict" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="#AEB6C6"/>
+                <DockPanel Name="GpuSavePanel" Margin="0,10,0,0" Visibility="Collapsed">
+                  <Button Name="BtnGpuSave" DockPanel.Dock="Right" Content="💾  Gem som 'Testet på min pc'" Margin="8,0,0,0"/>
+                  <TextBox Name="TxtGpuNote" ToolTip="Hvad ændrede du? Fx 'Afterburner: 900 mV @ 2600 MHz'"/>
+                </DockPanel>
+              </StackPanel>
+            </Border>
+            <StackPanel Name="SecExtra" Visibility="Collapsed">
+            <!-- testet på min pc -->
+            <TextBlock Text="🏠  Testet på min pc" FontSize="15" FontWeight="SemiBold" Margin="0,18,0,6"/>
+            <DataGrid Name="GridGpuMine" IsReadOnly="True" MaxHeight="200">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="DATO" Binding="{Binding Gruppe}" Width="100"/>
+                <DataGridTextColumn Header="ÆNDRING" Binding="{Binding Navn}" Width="2*"/>
+                <DataGridTextColumn Header="RESULTAT" Binding="{Binding Info}" Width="3*"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock Name="GpuMineEmpty" Style="{StaticResource Sub}" Text="Ingen målinger endnu. Gem din første før/efter-måling ovenfor."/>
+            <!-- testet af andre -->
+            <DockPanel Margin="0,18,0,6">
+              <Button Name="BtnGpuSrc" DockPanel.Dock="Right" Content="🔗  Åbn kilde" Padding="10,5" Margin="0" IsEnabled="False"/>
+              <TextBlock Text="🌍  Testet af andre" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBlock Name="GpuLibInfo" Style="{StaticResource Sub}" Margin="0,0,0,6" Text="Henter eksempler..."/>
+            <DataGrid Name="GridGpuLib" IsReadOnly="True" MaxHeight="240">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="KORT" Binding="{Binding Navn}" Width="2*"/>
+                <DataGridTextColumn Header="METODE / INDSTILLING" Binding="{Binding Info}" Width="3*"/>
+                <DataGridTextColumn Header="RESULTAT" Binding="{Binding Note}" Width="2*"/>
+                <DataGridTextColumn Header="KILDETYPE" Binding="{Binding Gruppe}" Width="120"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock FontSize="11" Foreground="#6B7488" Margin="0,6,0,0" TextWrapping="Wrap" Text="Eksempler: TechFuelHQ Community GPU Undervolt Results (CC BY 4.0), github.com/iBlessi/gpu-undervolt-db. To kort med samme GPU kan opføre sig forskelligt, så din egen måling tæller mest."/>
+            </StackPanel>
+          </StackPanel>
+        </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+
+      <!-- FUND -->
+      <Grid Name="PageFind" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Fund"/><TextBlock Style="{StaticResource Sub}" Text="Alt, scanningen har fundet, sorteret efter risiko. Vælg en række for at se forklaringen og hvad du kan gøre."/></StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+          <ComboBox Name="FilterRisk" Width="190" SelectedIndex="1">
+            <ComboBoxItem Content="Alt"/><ComboBoxItem Content="Mellem og derover"/><ComboBoxItem Content="Kun Høj og Kritisk"/><ComboBoxItem Content="Kun bloat"/><ComboBoxItem Content="Kun nyt siden sidst"/>
+          </ComboBox>
+          <TextBox Name="FilterText" Width="280" Margin="10,0,0,0" ToolTip="Søg i fund"/>
+        </StackPanel>
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridFind" IsReadOnly="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="RISIKO" Binding="{Binding Risiko}" Width="80"/>
+              <DataGridTextColumn Header="KATEGORI" Binding="{Binding Kategori}" Width="130"/>
+              <DataGridTextColumn Header="FUND" Binding="{Binding Titel}" Width="2*"/>
+              <DataGridTextColumn Header="DETALJE" Binding="{Binding Detalje}" Width="3*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <Border Grid.Row="3" Style="{StaticResource CardB}" Margin="0,12,0,0">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Name="DetWhy" TextWrapping="Wrap" Text="Vælg et fund for at se forklaringen."/>
+              <TextBlock Name="DetAdvice" TextWrapping="Wrap" Margin="0,8,0,0" FontWeight="SemiBold" Foreground="#A78BFA"/>
+              <TextBox Name="DetPath" Margin="0,6,0,0" Background="Transparent" Foreground="{StaticResource Muted}" BorderThickness="0" Padding="0" IsReadOnly="True" TextWrapping="Wrap"/>
+            </StackPanel>
+            <WrapPanel Grid.Column="1" VerticalAlignment="Center" MaxWidth="560">
+              <Button Name="BtnIgnore" Content="✓ Markér som OK" IsEnabled="False" Background="#1E3A2B"/>
+              <Button Name="BtnOpen" Content="📂 Åbn placering" IsEnabled="False"/>
+              <Button Name="BtnVT" Content="🛡 VirusTotal" IsEnabled="False"/>
+              <Button Name="BtnDisable" Content="⛔ Deaktivér" IsEnabled="False" Style="{StaticResource Danger}"/>
+              <Button Name="BtnUninstall" Content="🗑 Afinstallér" IsEnabled="False" Style="{StaticResource Danger}" Margin="0"/>
+            </WrapPanel>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- HÆNDELSESFORLØB -->
+      <Grid Name="PageTime" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Hændelsesforløb"/><TextBlock Style="{StaticResource Sub}" Text="Installationer, nye tjenester og opgaver, Defender-hændelser, nye filer og browserudvidelser fra de sidste 45 dage. ⚠ markerer tidsrummet efter en mistænkelig installation."/></StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+          <TextBox Name="TimeFilter" Width="280" ToolTip="Søg, fx paw"/>
+          <CheckBox Name="OnlyFocus" Content="Kun ⚠ mistænkelige tidsrum" Margin="16,0,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridTime" IsReadOnly="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="TID" Binding="{Binding Tid, StringFormat='dd-MM-yyyy HH:mm'}" Width="130"/>
+              <DataGridTextColumn Header="TYPE" Binding="{Binding Type}" Width="100"/>
+              <DataGridTextColumn Header="" Binding="{Binding Fokus}" Width="170"/>
+              <DataGridTextColumn Header="HÆNDELSE" Binding="{Binding Hændelse}" Width="2*"/>
+              <DataGridTextColumn Header="DETALJE" Binding="{Binding Detalje}" Width="3*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+      </Grid>
+
+      <!-- OPSTART -->
+      <Grid Name="PageStart" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Opstart"/><TextBlock Name="StartInfo" Style="{StaticResource Sub}" Text="Programmer, der starter, når du logger ind. Til/fra virker som i Jobliste: intet slettes."/></StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridStart" IsReadOnly="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="90"/>
+              <DataGridTextColumn Header="PROGRAM" Binding="{Binding Navn}" Width="2*"/>
+              <DataGridTextColumn Header="ANBEFALING" Binding="{Binding Tip}" Width="3*"/>
+              <DataGridTextColumn Header="UDGIVER" Binding="{Binding Udgiver}" Width="2*"/>
+              <DataGridTextColumn Header="KILDE" Binding="{Binding Kilde}" Width="120"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,12,0,0">
+          <Button Name="BtnToggle" Content="⏻  Slå til / fra" Style="{StaticResource Primary}" IsEnabled="False"/>
+          <Button Name="BtnStartAll" Content="⚡  Slå alle anbefalede fra"/>
+          <Button Name="BtnStartRefresh" Content="⟳  Opdatér"/>
+          <TextBlock Text="Tip: dobbeltklik på en række for at slå den til eller fra." VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="8,0,0,0"/>
+        </StackPanel>
+      </Grid>
+
+      <!-- OPRYDNING -->
+      <Grid Name="PageClean" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Oprydning"/><TextBlock Style="{StaticResource Sub}" Text="Midlertidige filer og caches, som Windows og programmer selv genskaber. Filer, der er i brug eller yngre end 24 timer, springes over."/></StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridClean">
+            <DataGrid.Columns>
+              <DataGridTemplateColumn Header="" Width="44">
+                <DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding Valgt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="HVAD" Binding="{Binding Navn}" Width="2*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="STØRRELSE" Binding="{Binding Info}" Width="110" IsReadOnly="True"/>
+              <DataGridTextColumn Header="BESKRIVELSE" Binding="{Binding Note}" Width="3*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="RESULTAT" Binding="{Binding Status}" Width="130" IsReadOnly="True"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <DockPanel Grid.Row="2" Margin="0,12,0,0">
+          <StackPanel Orientation="Horizontal">
+            <Button Name="BtnCleanMeasure" Content="📏  Beregn størrelser"/>
+            <Button Name="BtnCleanRun" Content="🧹  Ryd op i valgte" Style="{StaticResource Primary}" IsEnabled="False"/>
+            <Button Name="BtnCleanmgr" Content="Avanceret: Diskoprydning"/>
+          </StackPanel>
+          <TextBlock Name="CleanTotal" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold"/>
+        </DockPanel>
+      </Grid>
+
+      <!-- FILER -->
+      <Grid Name="PageFiles" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Filer"/><TextBlock Style="{StaticResource Sub}" Text="Dubletter, gamle installere og de største filer i dine mapper. Slettede filer flyttes til papirkurven, så du kan fortryde."/></StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+          <Button Name="BtnFilesScan" Content="🔎  Analysér mine filer" Style="{StaticResource Primary}"/>
+          <ComboBox Name="FilesFilter" Width="170" SelectedIndex="0" Margin="4,0,0,0" VerticalContentAlignment="Center">
+            <ComboBoxItem Content="Alle"/><ComboBoxItem Content="Dubletter"/><ComboBoxItem Content="Gamle installere"/><ComboBoxItem Content="Store filer"/>
+          </ComboBox>
+        </StackPanel>
+        <Border Grid.Row="2" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridFiles">
+            <DataGrid.Columns>
+              <DataGridTemplateColumn Header="" Width="44">
+                <DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding Valgt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="TYPE" Binding="{Binding Gruppe}" Width="90" IsReadOnly="True"/>
+              <DataGridTextColumn Header="FIL" Binding="{Binding Navn}" Width="2*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="MB" Binding="{Binding Tal}" Width="80" IsReadOnly="True"/>
+              <DataGridTextColumn Header="NOTE" Binding="{Binding Note}" Width="2*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="MAPPE" Binding="{Binding Info}" Width="2*" IsReadOnly="True"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <DockPanel Grid.Row="3" Margin="0,12,0,0">
+          <StackPanel Orientation="Horizontal">
+            <Button Name="BtnFilesSuggest" Content="✨  Vælg forslag"/>
+            <Button Name="BtnFilesNone" Content="Fravælg alle"/>
+            <Button Name="BtnFilesOpen" Content="📂  Åbn placering"/>
+            <Button Name="BtnFilesDelete" Content="🗑  Flyt valgte til papirkurv" Style="{StaticResource Danger}"/>
+          </StackPanel>
+          <TextBlock Name="FilesTotal" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold"/>
+        </DockPanel>
+      </Grid>
+
+      <!-- OPDATERINGER -->
+      <Grid Name="PageUpdates" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Opdateringer"/><TextBlock Style="{StaticResource Sub}" Text="Gamle programmer er en af de største sikkerhedsrisici. Bruger Windows' egen pakkehåndtering (winget) til at opdatere i baggrunden."/>
+          <Border Name="VendorCard" Visibility="Collapsed" CornerRadius="14" Background="#141B2A" BorderBrush="#2C4A7A" BorderThickness="1" Padding="16,14" Margin="0,14,0,0">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Button Name="BtnVendorOpen" Style="{StaticResource Primary}" Margin="0"/>
+              </StackPanel>
+              <StackPanel>
+                <TextBlock Name="VendorTitle" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock Name="VendorText" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardB}" Padding="6">
+          <DataGrid Name="GridUpdates">
+            <DataGrid.Columns>
+              <DataGridTemplateColumn Header="" Width="44">
+                <DataGridTemplateColumn.CellTemplate><DataTemplate><CheckBox IsChecked="{Binding Valgt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" HorizontalAlignment="Center"/></DataTemplate></DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="PROGRAM" Binding="{Binding Navn}" Width="2*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="NUVÆRENDE" Binding="{Binding Info}" Width="130" IsReadOnly="True"/>
+              <DataGridTextColumn Header="NY VERSION" Binding="{Binding Note}" Width="130" IsReadOnly="True"/>
+              <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="2*" IsReadOnly="True"/>
+              <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="110" IsReadOnly="True"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,12,0,0">
+          <Button Name="BtnUpdCheck" Content="🔄  Søg efter opdateringer"/>
+          <Button Name="BtnUpdRun" Content="⬆  Opdatér valgte" Style="{StaticResource Primary}" IsEnabled="False"/>
+            <TextBlock Name="UpdInfo" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Margin="8,0,0,0"/>
+            <TextBlock Name="UpdReboot" VerticalAlignment="Center" Foreground="#F6C344" Margin="12,0,0,0" FontWeight="SemiBold"/>
+        </StackPanel>
+      </Grid>
+
+      <!-- YDELSE OG HELBRED -->
+      <Grid Name="PageHealth" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Margin="0,0,0,14"><TextBlock Style="{StaticResource H1}" Text="Ydelse og helbred"/><TextBlock Name="PerfText" Style="{StaticResource Sub}" Text="Diskens tilstand, strømplan, spilindstillinger og hvor længe siden pc'en blev genstartet."/></StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+            <Border Name="RebootBanner" Visibility="Collapsed" CornerRadius="12" Background="#2A2210" BorderBrush="#F6C344" BorderThickness="1" Padding="16,12" Margin="0,0,0,12">
+              <DockPanel>
+                <Button Name="BtnRebootNow" DockPanel.Dock="Right" Content="🔁  Genstart nu" Style="{StaticResource Primary}" Margin="0"/>
+                <StackPanel VerticalAlignment="Center"><TextBlock Text="🔁  Genstart for at færdiggøre en opdatering" FontWeight="SemiBold" FontSize="14.5"/><TextBlock Name="RebootWhy" Style="{StaticResource Sub}" Margin="0,3,0,0"/></StackPanel>
+              </DockPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="6" Margin="0,0,0,12">
+              <DataGrid Name="GridHealth" IsReadOnly="True" MaxHeight="330">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="" Binding="{Binding Status}" Width="40"/>
+                  <DataGridTextColumn Header="EMNE" Binding="{Binding Navn}" Width="2*"/>
+                  <DataGridTextColumn Header="VÆRDI" Binding="{Binding Info}" Width="2*"/>
+                  <DataGridTextColumn Header="VURDERING" Binding="{Binding Note}" Width="3*"/>
+                </DataGrid.Columns>
+              </DataGrid>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16" Margin="0,0,0,12">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="BootBig" DockPanel.Dock="Right" FontSize="22" FontWeight="Bold" Foreground="#A78BFA" VerticalAlignment="Center"/>
+                  <StackPanel><TextBlock Text="⏱  Opstartstid" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="BootSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Henter målinger..."/></StackPanel>
+                </DockPanel>
+                <Grid Height="150" Margin="0,14,0,0">
+                  <ItemsControl Name="BootBars" VerticalAlignment="Bottom">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <StackPanel Margin="0,0,10,0" VerticalAlignment="Bottom" ToolTip="{Binding Note}">
+                          <TextBlock Text="{Binding Info}" FontSize="11" Foreground="#AEB6C6" HorizontalAlignment="Center"/>
+                          <Border Height="{Binding Tal}" Width="26" CornerRadius="6,6,2,2" Background="{Binding Gruppe}" Margin="0,3,0,3"/>
+                          <TextBlock Text="{Binding Navn}" FontSize="10.5" Foreground="#6B7488" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Grid>
+                <TextBlock Name="BootLegend" FontSize="11.5" Foreground="#6B7488" Margin="0,6,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardB}" Padding="20,16">
+              <StackPanel>
+                <DockPanel>
+                  <TextBlock Name="CrashBig" DockPanel.Dock="Right" FontSize="22" FontWeight="Bold" VerticalAlignment="Center"/>
+                  <StackPanel><TextBlock Text="💥  Hvad crasher?" FontSize="15.5" FontWeight="SemiBold"/><TextBlock Name="CrashSub" Style="{StaticResource Sub}" Margin="0,3,0,0" Text="Henter de seneste 14 dages hændelser..."/></StackPanel>
+                </DockPanel>
+                <DataGrid Name="GridCrash" IsReadOnly="True" Margin="0,12,0,0" MaxHeight="300">
+                  <DataGrid.Columns>
+                    <DataGridTextColumn Header="" Binding="{Binding Status}" Width="36"/>
+                    <DataGridTextColumn Header="HVAD" Binding="{Binding Navn}" Width="2*"/>
+                    <DataGridTextColumn Header="ANTAL" Binding="{Binding Info}" Width="120"/>
+                    <DataGridTextColumn Header="SIDST" Binding="{Binding Gruppe}" Width="120"/>
+                    <DataGridTextColumn Header="MULIG SAMMENHÆNG" Binding="{Binding Note}" Width="3*"/>
+                  </DataGrid.Columns>
+                </DataGrid>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+        <WrapPanel Grid.Row="2" Margin="0,12,0,0">
+          <Button Name="BtnHealthRefresh" Content="⟳  Tjek igen"/>
+          <Button Name="BtnPowerHigh" Content="⚡  Strømplan: Høj ydelse"/>
+          <Button Name="BtnPowerBal" Content="🍃  Strømplan: Balanceret"/>
+          <Button Name="BtnGameMode" Content="🎮  Slå spiltilstand til"/>
+          <Button Name="BtnOfflineScan" Content="🛡  Defender Offline-scan"/>
+        </WrapPanel>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>
+'@
