@@ -69,6 +69,22 @@
         </StackPanel>
       </Border>
 
+
+      <!-- MalwareBazaar -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <TextBlock Text="🧬  Ekstra tjek med MalwareBazaar (valgfrit)" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock x:Name="MbSub" Style="{StaticResource Sub}" Margin="0,2,0,8" TextWrapping="Wrap" Text="MalwareBazaar er en gratis database fra abuse.ch med over 1 million bekræftede malware-filer. Med en gratis nøgle slår Scan pc'en usignerede filers fingeraftryk op der. Kun fingeraftrykket sendes, aldrig selve filen."/>
+          <TextBlock Style="{StaticResource Sub}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8" Text="Sådan får du en nøgle (2 minutter): 1) Tryk &quot;Hent nøgle&quot; og log ind på auth.abuse.ch med fx Google eller GitHub. 2) Find &quot;Optional&quot; → &quot;Auth-Key&quot;, og tryk &quot;Generate Key&quot;. 3) Kopiér nøglen, sæt den ind herunder, og tryk Gem."/>
+          <StackPanel Orientation="Horizontal">
+            <PasswordBox x:Name="MbBox" Width="320" Margin="0,0,8,0" Padding="8,6" Background="#0E1118" Foreground="#E7E9EE" BorderBrush="#2A3142"/>
+            <Button Content="Hent nøgle" Click="MbOpen_Click"/>
+            <Button x:Name="BtnMbSave" Content="Gem" Style="{StaticResource Primary}" Click="MbSave_Click"/>
+            <Button x:Name="BtnMbRemove" Content="Fjern" Click="MbRemove_Click" Margin="0"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
       <Border Style="{StaticResource CardB}" Margin="0,14,0,14">
         <StackPanel Orientation="Horizontal">
           <TextBlock x:Name="SumBig" Text="…" FontSize="30" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0"/>

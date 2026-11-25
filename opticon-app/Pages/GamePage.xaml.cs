@@ -22,7 +22,41 @@ namespace Opticon.Pages
             if (last != null) Show(last, null, "Sidste måling " + last.Date.ToString("d. MMM 'kl.' HH:mm", new CultureInfo("da-DK")));
         }
 
-        public void OnShown() { if (!loaded) { loaded = true; LoadSettings(); } }
+        public void OnShown() { if (!loaded) { loaded = true; LoadSettings(); LoadNv(); } }
+
+        // ---------- NVIDIA strømgrænse ----------
+        NvInfo nv;
+
+        async void LoadNv()
+        {
+            try { nv = await Task.Run(() => NvidiaPower.Query()); } catch { nv = null; }
+            if (nv == null) { NvCard.Visibility = Visibility.Collapsed; return; }
+            NvCard.Visibility = Visibility.Visible;
+            NvSlider.Minimum = Math.Ceiling(nv.Min); NvSlider.Maximum = Math.Floor(nv.Max); NvSlider.Value = Math.Round(nv.Limit);
+            NvSub.Text = string.Format(new CultureInfo("da-DK"), "{0}: standard {1:0} W, nu {2:0} W (bruger {3:0} W lige nu). Lavere grænse giver et køligere og mere stille kort for typisk få procent færre FPS. Kør gerne strømtesten eller \"Hjalp det?\" før og efter. Kræver administrator og nulstilles ved genstart.", nv.Name, nv.Default, nv.Limit, nv.Draw);
+        }
+
+        void NvSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (nv == null) return;
+            NvVal.Text = NvSlider.Value.ToString("0") + " W" + (Math.Abs(NvSlider.Value - nv.Default) < 1 ? "" : string.Format(" ({0:+0;-0} %)", 100 * (NvSlider.Value - nv.Default) / nv.Default));
+        }
+
+        void NvApply(double w)
+        {
+            if (nv == null) return;
+            if (!Admin.IsElevated)
+            {
+                if (MessageBox.Show("Det kræver administrator at ændre strømgrænsen.\n\nGenstarte Opticon som administrator nu?", "Opticon", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes) Admin.RestartElevated("--page game");
+                return;
+            }
+            try { MessageBox.Show(NvidiaPower.Set(nv, w), "Opticon", MessageBoxButton.OK, MessageBoxImage.Information); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            LoadNv();
+        }
+
+        void NvApply_Click(object sender, RoutedEventArgs e) { NvApply(NvSlider.Value); }
+        void NvReset_Click(object sender, RoutedEventArgs e) { if (nv != null) NvApply(nv.Default); }
 
         async void LoadSettings()
         {
@@ -188,7 +222,9 @@ namespace Opticon.Pages
         // ---------- Mål i mit spil og "Hjalp det?" ----------
         GameResult abBefore;
 
-        int Seconds() { return GameDur.SelectedIndex == 0 ? 30 : GameDur.SelectedIndex == 2 ? 120 : 60; }
+        int durSec = 60;
+        int Seconds() { return durSec; }
+        void Dur_Click(object sender, RoutedEventArgs e) { durSec = durSec == 30 ? 60 : durSec == 60 ? 120 : 30; GameDur.Content = "⏱  " + durSec + " sek."; }
 
         bool NeedAdmin()
         {

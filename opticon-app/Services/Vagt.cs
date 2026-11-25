@@ -159,8 +159,8 @@ namespace Opticon.Services
         {
             try
             {
-                var r = await Task.Run(() => MalwareScan.Run((p, t) => { }));
-                var now = r.Finds.Where(f => f.Category != "Proces" && f.Category != "Trussel (fjernet)").ToList();
+                var r = await Task.Run(() => MalwareScan.Run((p, t) => { }, false));
+                var now = r.Finds.Where(f => f.Category != "Proces" && f.Category != "Trussel (fjernet)" && f.Category != "Netværk" && f.Category != "Ny fil").ToList();
                 var keys = now.Select(Key).Distinct().ToList();
                 List<string> baseline = null;
                 try { if (File.Exists(BaseFile)) baseline = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(BaseFile)); } catch { }

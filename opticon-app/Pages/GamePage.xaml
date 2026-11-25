@@ -109,11 +109,7 @@
         <StackPanel>
           <DockPanel Margin="0,0,0,8">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-              <ComboBox x:Name="GameDur" Width="110" Margin="0,0,8,0" SelectedIndex="1">
-                <ComboBoxItem Content="30 sek."/>
-                <ComboBoxItem Content="60 sek."/>
-                <ComboBoxItem Content="120 sek."/>
-              </ComboBox>
+<Button x:Name="GameDur" Content="⏱  60 sek." Click="Dur_Click" ToolTip="Hvor længe der måles"/>
               <Button x:Name="BtnAb" Content="Hjalp det?" Click="Ab_Click"/>
               <Button x:Name="BtnGame" Content="🎯  Mål i mit spil" Style="{StaticResource Primary}" Click="Game_Click" Margin="0"/>
             </StackPanel>
@@ -123,6 +119,22 @@
             </StackPanel>
           </DockPanel>
           <TextBlock x:Name="GameText" TextWrapping="Wrap" FontSize="14" LineHeight="22"/>
+        </StackPanel>
+      </Border>
+
+      <!-- NVIDIA strømgrænse -->
+      <Border x:Name="NvCard" Style="{StaticResource CardB}" Margin="0,14,0,0" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock Text="⚡  Grafikkortets strømgrænse (NVIDIA)" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock x:Name="NvSub" Style="{StaticResource Sub}" Margin="0,2,0,10" TextWrapping="Wrap"/>
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Content="Standard" Click="NvReset_Click"/>
+              <Button Content="Anvend" Style="{StaticResource Primary}" Click="NvApply_Click" Margin="0"/>
+            </StackPanel>
+            <TextBlock x:Name="NvVal" DockPanel.Dock="Right" Width="80" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold" Margin="12,0"/>
+            <Slider x:Name="NvSlider" VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="5" ValueChanged="NvSlider_Changed"/>
+          </DockPanel>
         </StackPanel>
       </Border>
     </StackPanel>

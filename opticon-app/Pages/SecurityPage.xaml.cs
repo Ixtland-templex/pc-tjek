@@ -19,6 +19,42 @@ namespace Opticon.Pages
             BtnAdmin.Visibility = Admin.IsElevated ? Visibility.Collapsed : Visibility.Visible;
             vagtInit = true; ChkVagt.IsChecked = Vagt.Enabled; vagtInit = false;
             ShowVagt();
+            ShowMb();
+        }
+
+        void ShowMb()
+        {
+            bool has = MbKey.Get() != null;
+            BtnMbRemove.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
+            MbBox.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
+            BtnMbSave.Visibility = MbBox.Visibility;
+            if (has) MbSub.Text = "✓ Nøglen er gemt (krypteret, kun din bruger kan læse den). Scan pc'en slår nu usignerede filer op i MalwareBazaar.";
+        }
+
+        void MbOpen_Click(object sender, RoutedEventArgs e) { try { Process.Start(new ProcessStartInfo("https://auth.abuse.ch/") { UseShellExecute = true }); } catch { } }
+
+        async void MbSave_Click(object sender, RoutedEventArgs e)
+        {
+            var key = MbBox.Password.Trim();
+            if (key.Length < 20) { MessageBox.Show("Nøglen ser for kort ud. Kopiér hele nøglen fra auth.abuse.ch.", "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+            BtnMbSave.IsEnabled = false;
+            string err;
+            try { err = await Task.Run(() => MbKey.Test(key)); } catch (Exception ex) { err = "Kunne ikke nå MalwareBazaar: " + (ex.InnerException ?? ex).Message; }
+            if (err == null)
+            {
+                try { MbKey.Save(key); MbBox.Password = ""; MessageBox.Show("Nøglen virker og er gemt.", "Opticon", MessageBoxButton.OK, MessageBoxImage.Information); }
+                catch (Exception ex) { MessageBox.Show("Nøglen virker, men kunne ikke gemmes: " + ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            }
+            else MessageBox.Show(err, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning);
+            BtnMbSave.IsEnabled = true;
+            ShowMb();
+        }
+
+        void MbRemove_Click(object sender, RoutedEventArgs e)
+        {
+            MbKey.Remove();
+            MbSub.Text = "Nøglen er fjernet.";
+            ShowMb();
         }
 
         bool vagtInit;
@@ -109,9 +145,10 @@ namespace Opticon.Pages
             ScanSum.Text = "Scanner…";
             try
             {
-                var prog = new Progress<Tuple<double, string>>(p => { ScanBar.Value = p.Item1; ScanSum.Text = p.Item2; });
+                var prog = new Progress<Tuple<double, string>>(p => { if (p.Item1 >= 0) ScanBar.Value = p.Item1; ScanSum.Text = p.Item2; });
                 IProgress<Tuple<double, string>> ip = prog;
-                lastScan = await Task.Run(() => MalwareScan.Run((pc, t) => ip.Report(Tuple.Create(pc, t))));
+                var key = MbKey.Get();
+                lastScan = await Task.Run(() => MalwareScan.Run((pc, t) => ip.Report(Tuple.Create(pc, t)), true, key));
                 int crit = lastScan.Finds.Count(f => f.Level >= 4), high = lastScan.Finds.Count(f => f.Level == 3), mid = lastScan.Finds.Count(f => f.Level == 2);
                 ScanSum.Text = (crit > 0 ? "⛔ " + crit + " kritiske fund. Se dem herunder." : high > 0 ? "⚠ " + high + " fund bør tjekkes." : mid > 0 ? "Ingen tegn på malware. " + mid + " ting er værd at kigge på." : "✓ Ingen tegn på malware fundet.")
                     + " " + lastScan.Checked + " ting tjekket." + (lastScan.Elevated ? "" : " Kør som administrator for at se Defenders fund og undtagelser.");
