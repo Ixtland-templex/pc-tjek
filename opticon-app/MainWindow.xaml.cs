@@ -23,6 +23,7 @@ namespace Opticon
             AboutData.Text = "Log og indstillinger: " + App.DataDir;
             SetupTray();
             ChkTray.IsChecked = Settings.Current.CloseToTray;
+            ChkShare.IsChecked = Settings.Current.ShareResults == true;
             SourceInitialized += (s, e) =>
             {
                 // Mørk titellinje, så den passer til resten af appen
@@ -162,6 +163,11 @@ namespace Opticon
             if (tray != null) { tray.Visible = false; tray.Dispose(); }
             base.OnClosed(e);
             Application.Current.Shutdown();
+        }
+
+        void Share_Changed(object sender, RoutedEventArgs e)
+        {
+            Settings.Current.ShareResults = ChkShare.IsChecked == true; Settings.Save();
         }
 
         void Tray_Changed(object sender, RoutedEventArgs e)

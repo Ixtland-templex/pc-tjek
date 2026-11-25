@@ -106,6 +106,7 @@
             <TextBlock x:Name="AboutVersion" FontSize="16" FontWeight="SemiBold"/>
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Opticon er gratis og open source. Koden ligger åbent på GitHub, så alle kan se præcis, hvad programmet gør."/>
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" x:Name="AboutData"/>
+            <CheckBox x:Name="ChkShare" Content="Del mine benchmark-resultater anonymt, så jeg kan sammenligne med andre" Margin="0,14,0,0" Checked="Share_Changed" Unchecked="Share_Changed"/>
             <CheckBox x:Name="ChkTray" Content="Når jeg lukker vinduet, skal Opticon blive ved uret (så Vagt, tilstande og opdateringer kører videre)" Margin="0,14,0,0" Checked="Tray_Changed" Unchecked="Tray_Changed"/>
             <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
               <Button x:Name="BtnCheckUpdate" Content="Søg efter opdatering" Click="CheckUpdate_Click"/>
