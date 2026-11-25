@@ -20,6 +20,7 @@
           <Image Source="Opticon.ico" Width="30" Height="30" Margin="0,0,10,0"/>
           <TextBlock Text="Opticon" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
         </StackPanel>
+        <Button DockPanel.Dock="Bottom" x:Name="BtnUpdate" Style="{StaticResource Primary}" Visibility="Collapsed" Margin="4,0,4,10" HorizontalAlignment="Stretch" Click="Update_Click"/>
         <TextBlock DockPanel.Dock="Bottom" x:Name="VersionText" Foreground="{StaticResource Muted}" FontSize="11" Margin="8,0" TextWrapping="Wrap"/>
         <StackPanel>
           <RadioButton x:Name="NavOverview" Style="{StaticResource Nav}" GroupName="nav" Content="🏠  Overblik" IsChecked="True" Checked="Nav_Checked"/>
@@ -101,6 +102,7 @@
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Opticon er gratis og open source. Koden ligger åbent på GitHub, så alle kan se præcis, hvad programmet gør."/>
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" x:Name="AboutData"/>
             <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+              <Button x:Name="BtnCheckUpdate" Content="Søg efter opdatering" Click="CheckUpdate_Click"/>
               <Button Content="Åbn logmappen" Click="OpenLog_Click"/>
               <Button Content="Se koden på GitHub" Click="OpenGitHub_Click"/>
             </StackPanel>

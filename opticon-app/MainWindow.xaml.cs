@@ -26,6 +26,8 @@ namespace Opticon
                 if (Array.IndexOf(args, "security") >= 0) NavSecurity.IsChecked = true;
                 else if (Array.IndexOf(args, "clean") >= 0) NavClean.IsChecked = true;
                 await LoadOverview();
+                await Task.Delay(4000);
+                await CheckUpdate(false);
             };
         }
 
@@ -77,6 +79,47 @@ namespace Opticon
         void OpenGitHub_Click(object sender, RoutedEventArgs e)
         {
             try { Process.Start(new ProcessStartInfo(RepoUrl) { UseShellExecute = true }); } catch { }
+        }
+
+        UpdateInfo pending;
+
+        async Task CheckUpdate(bool manual)
+        {
+            try
+            {
+                if (manual) { BtnCheckUpdate.IsEnabled = false; BtnCheckUpdate.Content = "Søger…"; }
+                pending = await Updater.Check();
+                if (pending != null)
+                {
+                    BtnUpdate.Content = "⬇  Opdatér til " + pending.Version.ToString(3);
+                    BtnUpdate.Visibility = Visibility.Visible;
+                    if (manual) Update_Click(null, null);
+                }
+                else if (manual) MessageBox.Show("Du har den nyeste version.", "Opticon", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception e)
+            {
+                App.Log("Søg efter opdatering: " + e.Message);
+                if (manual) MessageBox.Show("Kunne ikke søge efter opdateringer: " + e.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            finally { if (manual) { BtnCheckUpdate.IsEnabled = true; BtnCheckUpdate.Content = "Søg efter opdatering"; } }
+        }
+
+        async void CheckUpdate_Click(object sender, RoutedEventArgs e) { await CheckUpdate(true); }
+
+        async void Update_Click(object sender, RoutedEventArgs e)
+        {
+            if (pending == null) return;
+            var notes = string.IsNullOrWhiteSpace(pending.Notes) ? "" : "\n\n" + (pending.Notes.Length > 600 ? pending.Notes.Substring(0, 600) + "…" : pending.Notes);
+            if (MessageBox.Show("Opticon " + pending.Version.ToString(3) + " er klar." + notes + "\n\nOpdatér nu? Opticon lukker kort og starter igen.", "Ny version", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes) return;
+            BtnUpdate.IsEnabled = false;
+            try { await Updater.Install(pending, new Progress<string>(t => BtnUpdate.Content = t)); }
+            catch (Exception ex)
+            {
+                App.Log("Opdatering fejlede: " + ex);
+                MessageBox.Show("Opdateringen blev ikke installeret:\n\n" + ex.Message, "Opdatering", MessageBoxButton.OK, MessageBoxImage.Warning);
+                BtnUpdate.IsEnabled = true; BtnUpdate.Content = "⬇  Opdatér til " + pending.Version.ToString(3);
+            }
         }
     }
 }

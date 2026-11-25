@@ -55,3 +55,5 @@ Name: "{autodesktop}\Opticon"; Filename: "{app}\Opticon.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Opticon.exe"; Description: "Start Opticon nu"; Flags: nowait postinstall skipifsilent
+; Ved automatisk opdatering (stille installation) startes den nye version igen
+Filename: "{app}\Opticon.exe"; Flags: nowait; Check: WizardSilent
