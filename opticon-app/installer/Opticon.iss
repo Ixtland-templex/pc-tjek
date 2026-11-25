@@ -61,3 +61,25 @@ Name: "{autodesktop}\Opticon"; Filename: "{app}\Opticon.exe"; Tasks: desktopicon
 Filename: "{app}\Opticon.exe"; Description: "Start Opticon nu"; Flags: nowait postinstall skipifsilent
 ; Ved automatisk opdatering (stille installation) startes den nye version igen
 Filename: "{app}\Opticon.exe"; Flags: nowait; Check: WizardSilent
+
+[Code]
+// Luk Opticon (også Vagten i baggrunden), så filerne kan erstattes
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM Opticon.exe /T', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(800);
+  Result := '';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM Opticon.exe /T', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Sleep(800);
+  end;
+end;

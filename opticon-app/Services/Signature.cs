@@ -55,10 +55,21 @@ namespace Opticon.Services
                     return "Signeret: " + who;
                 }
                 // Windows' egne filer er ofte signeret via et katalog i stedet for i selve filen. Mappen kan kun ændres af Windows.
-                if (p.StartsWith(WinDir + "\\System32\\", StringComparison.OrdinalIgnoreCase) || p.StartsWith(WinDir + "\\SysWOW64\\", StringComparison.OrdinalIgnoreCase))
+                if (p.StartsWith(WinDir + "\\System32\\", StringComparison.OrdinalIgnoreCase) || p.StartsWith(WinDir + "\\SysWOW64\\", StringComparison.OrdinalIgnoreCase) || OwnedByWindows(p))
                     return "Signeret: Microsoft Windows (katalog)";
                 return "USIGNERET";
             });
+        }
+
+        /// <summary>Filer ejet af TrustedInstaller er en del af Windows selv (fx Windows Media Player) og kan kun ændres af Windows Update.</summary>
+        static bool OwnedByWindows(string path)
+        {
+            try
+            {
+                var owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier));
+                return owner != null && owner.Value == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+            }
+            catch { return false; }
         }
 
         static int Verify(string path)
