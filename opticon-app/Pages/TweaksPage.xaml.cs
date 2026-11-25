@@ -81,7 +81,15 @@ namespace Opticon.Pages
             var id = ((Button)sender).Tag as string ?? "";
             try
             {
-                if (id == "display") Open("ms-settings:display");
+                if (id.StartsWith("fix:"))
+                {
+                    MessageBox.Show(TweaksMore.Fix(id.Substring(4)), "Opticon", MessageBoxButton.OK, MessageBoxImage.Information);
+                    Load();
+                }
+                else if (id.StartsWith("ms-settings:")) Open(id);
+                else if (id.StartsWith("run:")) Process.Start(new ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, id.Substring(4))) { UseShellExecute = true });
+                else if (id == "page:modes") { var mw = Window.GetWindow(this) as MainWindow; if (mw != null) mw.NavModes.IsChecked = true; }
+                else if (id == "display") Open("ms-settings:display");
                 else if (id == "bios")
                 {
                     if (!Admin.IsElevated)

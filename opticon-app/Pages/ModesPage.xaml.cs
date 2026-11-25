@@ -101,7 +101,7 @@ namespace Opticon.Pages
             if (w.ShowDialog() != true) return;
             var games = Modes.Games();
             games.RemoveAll(g => g.Exe.Equals(exe, StringComparison.OrdinalIgnoreCase));
-            games.Add(new GameProfile { Name = name, Exe = exe, Close = boxes.Where(b => b.IsChecked == true).Select(b => (string)b.Content).ToList(), Mute = mute.IsChecked == true });
+            games.Add(new GameProfile { Name = name, Exe = exe, Path = dlg.FileName, Close = boxes.Where(b => b.IsChecked == true).Select(b => (string)b.Content).ToList(), Mute = mute.IsChecked == true });
             Modes.SaveGames(games);
             App.Log("Spil tilføjet til spil-tilstand: " + name);
             LoadGames();

@@ -205,6 +205,7 @@ namespace Opticon.Services
                 cards.Add(c);
             }
             catch (Exception e) { App.Log("Optimering driver: " + e.Message); }
+            TweaksMore.Add(cards);
             return cards;
         }
     }

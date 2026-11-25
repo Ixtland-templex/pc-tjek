@@ -84,6 +84,7 @@ namespace Opticon.Services
             status.Report("Installerer " + u.Version.ToString(3) + "… Opticon starter igen om lidt.");
             Process.Start(new ProcessStartInfo(file, "/SILENT /SUPPRESSMSGBOXES /NORESTART /SP-") { UseShellExecute = true });
             await Task.Delay(800);
+            App.Exiting = true;
             System.Windows.Application.Current.Shutdown();
         }
     }

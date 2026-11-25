@@ -22,7 +22,8 @@ namespace Opticon.Services
             try
             {
                 var exe = Environment.ProcessPath;
-                Process.Start(new ProcessStartInfo(exe, args ?? "") { UseShellExecute = true, Verb = "runas" });
+                Process.Start(new ProcessStartInfo(exe, ((args ?? "") + " --restart").Trim()) { UseShellExecute = true, Verb = "runas" });
+                App.Exiting = true;
                 Application.Current.Shutdown();
                 return true;
             }
