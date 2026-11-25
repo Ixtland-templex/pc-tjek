@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Opticon</AssemblyName>
+    <RootNamespace>Opticon</RootNamespace>
+    <ApplicationIcon>Opticon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.0</Version>
+    <Product>Opticon</Product>
+    <Company>Opticon</Company>
+    <Description>Opticon - sikkerhed, oprydning og optimering af din pc</Description>
+    <Copyright>MIT-licens</Copyright>
+    <SatelliteResourceLanguages>da;en</SatelliteResourceLanguages>
+    <!-- Et almindeligt program i en mappe (ingen selvudpakkende enkeltfil: den slags kan antivirus ikke lide) -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Opticon.ico" />
+  </ItemGroup>
+</Project>
