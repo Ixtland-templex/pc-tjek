@@ -73,7 +73,7 @@
           <Border Style="{StaticResource CardB}" Margin="0,4,0,0" Background="#1B1630" BorderBrush="#3B3366">
             <StackPanel>
               <TextBlock Text="🚧  Opticon flytter ind i et rigtigt Windows-program" FontSize="15" FontWeight="SemiBold"/>
-              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Sikkerhed, Oprydning og benchmark er flyttet over. Strømtesten og "Mål i mit spil" følger. Indtil da kan du stadig bruge den gamle app."/>
+              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Sikkerhed, Oprydning og benchmark er flyttet over. Strømtesten og &quot;Mål i mit spil&quot; følger. Indtil da kan du stadig bruge den gamle app."/>
             </StackPanel>
           </Border>
         </StackPanel>
