@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="da"><head><meta charset="utf-8"><title>Opticon grafiktest</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:default}
+canvas{width:100vw;height:100vh;display:block;object-fit:contain}
+#o{position:fixed;left:28px;top:22px;font:600 17px "Segoe UI",sans-serif;color:#fff;text-shadow:0 0 8px #000;opacity:.9;line-height:1.5}
+#o small{font-weight:400;opacity:.75}
+#s{position:fixed;top:14px;right:14px;z-index:10;padding:10px 16px;border-radius:10px;border:1px solid #3B3366;background:#1B1630;color:#E6E9F0;font:600 14px "Segoe UI",sans-serif;cursor:pointer;opacity:.85}
+</style></head>
+<body><canvas id="c"></canvas><div id="o">Opticon grafiktest<br><small>Starter…</small></div><button id="s">✕  Stop testen</button>
+<script>
+const send = d => { try { window.chrome.webview.postMessage(d); } catch (e) {} };
+const c = document.getElementById('c'), o = document.getElementById('o');
+const gl = c.getContext('webgl2', { antialias: false, powerPreference: 'high-performance', desynchronized: true });
+if (!gl) send({ t: 'error', e: 'WebGL2 er ikke tilgængeligt' });
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }`;
+const fs = `#version 300 es
+precision highp float; uniform vec2 R; uniform float T; out vec4 col;
+mat2 rot(float a){ float s = sin(a), c = cos(a); return mat2(c, -s, s, c); }
+float map(vec3 p){
+  p.xz *= rot(T * .21); p.xy *= rot(T * .13);
+  float d = length(max(abs(p) - 1., 0.)); float s = 1.;
+  for (int i = 0; i < 5; i++) {
+    vec3 a = mod(p * s, 2.) - 1.; s *= 3.;
+    vec3 r = abs(1. - 3. * abs(a));
+    float da = max(r.x, r.y), db = max(r.y, r.z), dc = max(r.z, r.x);
+    d = max(d, (min(da, min(db, dc)) - 1.) / s);
+  }
+  return d;
+}
+vec3 nrm(vec3 p){ vec2 e = vec2(.0007, 0.); return normalize(vec3(map(p+e.xyy)-map(p-e.xyy), map(p+e.yxy)-map(p-e.yxy), map(p+e.yyx)-map(p-e.yyx))); }
+float shadow(vec3 ro, vec3 rd){ float r = 1., t = .02; for (int i = 0; i < 48; i++) { float h = map(ro + rd * t); r = min(r, 10. * h / t); t += clamp(h, .01, .2); if (h < .0005 || t > 6.) break; } return clamp(r, 0., 1.); }
+void main(){
+  vec2 uv = (gl_FragCoord.xy * 2. - R) / R.y;
+  vec3 ro = vec3(0., 0., 3.0 + sin(T * .3) * .5), rd = normalize(vec3(uv, -1.7));
+  float t = 0.; int i;
+  for (i = 0; i < 220; i++) { float d = map(ro + rd * t); if (d < .0004 || t > 12.) break; t += d; }
+  vec3 c = mix(vec3(.05, .06, .09), vec3(.02, .02, .03), uv.y * .5 + .5);
+  if (t < 12.) {
+    vec3 p = ro + rd * t, n = nrm(p), l = normalize(vec3(.6, .8, .5));
+    float dif = clamp(dot(n, l), 0., 1.) * shadow(p + n * .002, l);
+    float ao = 1. - float(i) / 220.;
+    vec3 base = mix(vec3(.55, .36, .96), vec3(.23, .62, 1.), .5 + .5 * n.y);
+    c = base * (.18 + .82 * dif) * ao + pow(clamp(dot(reflect(rd, n), l), 0., 1.), 24.) * .4;
+  }
+  col = vec4(pow(c, vec3(.4545)), 1.);
+}`;
+function sh(t, s){ const x = gl.createShader(t); gl.shaderSource(x, s); gl.compileShader(x); if (!gl.getShaderParameter(x, gl.COMPILE_STATUS)) send({ t: 'error', e: gl.getShaderInfoLog(x) }); return x; }
+const pr = gl.createProgram(); gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(pr); gl.useProgram(pr);
+const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const uR = gl.getUniformLocation(pr, 'R'), uT = gl.getUniformLocation(pr, 'T');
+addEventListener('error', e => send({ t: 'jserr', e: String(e.message || e) }));
+c.addEventListener('webglcontextlost', e => { e.preventDefault(); send({ t: 'lost' }); o.innerHTML = 'Opticon grafiktest<br><small>⛔ Grafikdriveren gik ned eller genstartede</small>'; });
+function stopTest() { send({ t: 'abort' }); o.innerHTML = 'Opticon grafiktest<br><small>Stopper…</small>'; }
+document.getElementById('s').onclick = stopTest;
+addEventListener('keydown', e => { if (e.key === 'Escape' || e.key === 'q' || e.key === 'Q') stopTest(); });
+try { const dbg = gl.getExtension('WEBGL_debug_renderer_info'); send({ t: 'renderer', r: dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(gl.getParameter(gl.RENDERER)) }); } catch (e) {}
+
+// Scenen tegnes i præcis den valgte opløsning. For at måle grafikkortet og ikke skærmen (der låser til fx 60 Hz)
+// tegnes scenen K gange i træk, og vi læser én pixel tilbage, så vi venter, til grafikkortet er færdigt.
+// Tiden pr. billede giver FPS uden skærmlås, ligesom et spil med V-Sync slået fra.
+let t0 = performance.now(), fw = 0, fh = 0, warmUntil = 0, K = 1, draws = 0, gpuMs = 0, win = [], done = false, label = '', remain = null;
+const px = new Uint8Array(4);
+function setRes(str){
+  const m = /^(\d+)x(\d+)$/.exec(str || ''); if (!m) return;
+  const w = +m[1], h = +m[2]; if (w === fw && h === fh) return;
+  fw = w; fh = h; c.width = w; c.height = h; gl.viewport(0, 0, w, h);
+  warmUntil = performance.now() + 2500; win = []; draws = 0; gpuMs = 0;
+}
+function frame(now){
+  if (done) return;
+  if (fw) {
+    gl.uniform2f(uR, c.width, c.height);
+    const ts = performance.now();
+    for (let k = 0; k < K; k++) { gl.uniform1f(uT, (now - t0) / 1000 + k * 0.004); gl.drawArrays(gl.TRIANGLES, 0, 3); }
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const g = Math.max(0.01, performance.now() - ts);
+    draws += K; gpuMs += g; win.push(g / K);
+    if (g < 6 && K < 64) K = Math.min(64, Math.ceil(K * 1.3)); else if (g > 14 && K > 1) K = Math.max(1, Math.floor(K * 0.6));
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+const fmtR = x => x == null ? '' : ` · ⏱ ${Math.floor(x / 60)}:${String(x % 60).padStart(2, '0')} tilbage`;
+setInterval(() => {
+  if (done || !fw) return;
+  const now = performance.now(), f = draws, ms = gpuMs, fps = ms > 0 ? 1000 * f / ms : 0;
+  const s = win.slice().sort((a, b) => a - b), p99 = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * .99))] : 0;
+  if (now >= warmUntil && f > 0) send({ t: 'fps', f, ms, p99, w: fw, h: fh, K });
+  o.innerHTML = `Opticon grafiktest · ${fw}×${fh} · ${fps.toFixed(0)} fps<br><small>${label}${fmtR(remain)} · Esc for at stoppe</small>`;
+  win = []; draws = 0; gpuMs = 0;
+}, 1000);
+window.chrome.webview.addEventListener('message', e => {
+  const s = e.data || {};
+  label = s.Label || ''; remain = typeof s.Remain === 'number' ? s.Remain : null;
+  if (s.Res) setRes(s.Res);
+  if (s.Done && !done) { done = true; o.innerHTML = 'Opticon grafiktest<br><small>✓ Færdig</small>'; }
+});
+send({ t: 'ready' });
+</script></body></html>

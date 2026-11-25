@@ -9,7 +9,7 @@
     <RootNamespace>Opticon</RootNamespace>
     <ApplicationIcon>Opticon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Product>Opticon</Product>
     <Company>Opticon</Company>
     <Description>Opticon - sikkerhed, oprydning og optimering af din pc</Description>
@@ -23,8 +23,10 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Opticon.ico" />
+    <EmbeddedResource Include="Views\gpu-test.html" LogicalName="gpu-test.html" />
   </ItemGroup>
 </Project>
