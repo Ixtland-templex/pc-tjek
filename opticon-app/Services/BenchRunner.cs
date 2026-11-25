@@ -27,6 +27,14 @@ namespace Opticon.Services
         public string GpuNote { get; set; }
         public int Score { get; set; }
         public bool OnBattery { get; set; }
+        public string CpuName { get; set; }
+        public string GpuName { get; set; }
+        public int Cores { get; set; }
+        public int Threads { get; set; }
+        public int RamGB { get; set; }
+        public int RamMHz { get; set; }
+        public string DiskName { get; set; }
+        public bool Laptop { get; set; }
     }
 
     public static class BenchRunner
@@ -48,6 +56,7 @@ namespace Opticon.Services
         public static BenchResult RunCpuRamDisk(Action<double, string> progress)
         {
             var r = new BenchResult { Date = DateTime.Now, OnBattery = PowerMode.OnBattery() };
+            ReadHardware(r);
             int threads = Environment.ProcessorCount;
             progress(2, "CPU · én kerne (10 sek.)");
             Cpu.Run(1, 1.0);
@@ -70,6 +79,28 @@ namespace Opticon.Services
             finally { try { File.Delete(tmp); } catch { } }
             progress(90, "Klar til grafiktesten…");
             return r;
+        }
+
+        public static void ReadHardware(BenchResult r)
+        {
+            try
+            {
+                var cpu = Wmi.First(@"root\cimv2", "SELECT Name, NumberOfCores FROM Win32_Processor");
+                r.CpuName = System.Text.RegularExpressions.Regex.Replace(Convert.ToString(Wmi.Prop(cpu, "Name")) ?? "", @"\((R|TM|tm)\)|\s+CPU\s*@.*$|\s+\d+-Core Processor", "").Trim();
+                r.CpuName = System.Text.RegularExpressions.Regex.Replace(r.CpuName, @"\s+", " ");
+                r.Cores = Convert.ToInt32(Wmi.Prop(cpu, "NumberOfCores") ?? 0);
+                r.Threads = Environment.ProcessorCount;
+                var vids = Wmi.Query(@"root\cimv2", "SELECT Name FROM Win32_VideoController").Select(v => Convert.ToString(Wmi.Prop(v, "Name")) ?? "")
+                    .Where(n => !System.Text.RegularExpressions.Regex.IsMatch(n, "basic|virtual|remote|parsec|meta|mirage|displaylink", System.Text.RegularExpressions.RegexOptions.IgnoreCase)).ToList();
+                r.GpuName = vids.FirstOrDefault(n => System.Text.RegularExpressions.Regex.IsMatch(n, "nvidia|radeon rx|radeon pro|arc a|arc b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) ?? vids.FirstOrDefault() ?? "";
+                var cs = Wmi.First(@"root\cimv2", "SELECT TotalPhysicalMemory, PCSystemType FROM Win32_ComputerSystem");
+                r.RamGB = (int)Math.Round(Convert.ToDouble(Wmi.Prop(cs, "TotalPhysicalMemory") ?? 0) / 1073741824.0);
+                r.Laptop = Convert.ToInt32(Wmi.Prop(cs, "PCSystemType") ?? 0) == 2;
+                r.RamMHz = Wmi.Query(@"root\cimv2", "SELECT ConfiguredClockSpeed FROM Win32_PhysicalMemory").Select(m => Convert.ToInt32(Wmi.Prop(m, "ConfiguredClockSpeed") ?? 0)).DefaultIfEmpty(0).Max();
+                var d = Wmi.First(@"root\cimv2", "SELECT Model FROM Win32_DiskDrive WHERE Index=0");
+                r.DiskName = Convert.ToString(Wmi.Prop(d, "Model")) ?? "";
+            }
+            catch (Exception e) { App.Log("Hardware til benchmark: " + e.Message); }
         }
 
         public static List<BenchResult> History()

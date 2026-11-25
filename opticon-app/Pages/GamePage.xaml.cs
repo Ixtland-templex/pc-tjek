@@ -19,10 +19,78 @@ namespace Opticon.Pages
         {
             InitializeComponent();
             var last = BenchRunner.History().LastOrDefault();
-            if (last != null) Show(last, null, "Sidste måling " + last.Date.ToString("d. MMM 'kl.' HH:mm", new CultureInfo("da-DK")));
+            if (last != null) { Show(last, null, "Sidste måling " + last.Date.ToString("d. MMM 'kl.' HH:mm", new CultureInfo("da-DK"))); shown = last; }
         }
 
-        public void OnShown() { if (!loaded) { loaded = true; LoadSettings(); } }
+        public void OnShown() { if (!loaded) { loaded = true; LoadSettings(); LoadNv(); LoadCompare(); } }
+
+        // ---------- Sammenlign med andre ----------
+        BenchResult shown;
+
+        async void LoadCompare()
+        {
+            if (shown == null || shown.Score <= 0) return;
+            if (string.IsNullOrEmpty(shown.CpuName)) await Task.Run(() => BenchRunner.ReadHardware(shown));   // ældre målinger uden hardware-navne
+            CmpPanel.Visibility = Visibility.Visible;
+            CmpText.Text = "Henter resultater fra andre…";
+            try
+            {
+                var me = shown;
+                var res = await Task.Run(() => Community.Compare(me));
+                CmpList.ItemsSource = res.Item1;
+                CmpText.Text = res.Item2;
+            }
+            catch (Exception ex) { App.Log("Sammenlign: " + ex.Message); CmpText.Text = "Kunne ikke hente andres resultater lige nu."; }
+        }
+
+        void Share_Click(object sender, RoutedEventArgs e)
+        {
+            if (shown == null || shown.Score <= 0) { MessageBox.Show("Kun fulde tests kan deles. Kør benchmarken, så alle dele bliver målt.", "Del resultat"); return; }
+            if (shown.OnBattery) { MessageBox.Show("Dette resultat er målt på batteri og kan ikke sammenlignes retfærdigt. Sæt opladeren i, kør testen igen, og del det.", "Del resultat", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
+            if (MessageBox.Show("Dit resultat deles offentligt i Opticons GitHub-projekt, så andre med samme hardware kan sammenligne.\n\nDet indeholder kun: processor, grafikkort, RAM, diskmodel, bærbar/stationær og testtallene. Ingen navne, filer eller andet.\n\nGitHub åbner med et færdigt opslag. Du skal være logget ind og trykke \"Create\". Resultatet kommer med i Opticon få minutter efter.\n\nFortsæt?", "Del mit resultat", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            try { Community.Share(shown); } catch (Exception ex) { MessageBox.Show(ex.Message, "Opticon"); }
+        }
+
+        void Geekbench_Click(object sender, RoutedEventArgs e)
+        {
+            var cpu = shown != null && !string.IsNullOrEmpty(shown.CpuName) ? shown.CpuName : "";
+            if (MessageBox.Show("Geekbench Browser har millioner af resultater. Søg på din processor" + (cpu.Length > 0 ? " (" + cpu + ")" : "") + ", og se, hvad andre med samme model typisk får.\n\nGeekbench er en anden test end Opticons, så tallene kan ikke sammenlignes direkte.\n\nÅbn Geekbench Browser?", "Andre i Geekbench", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+                try { Process.Start(new ProcessStartInfo("https://browser.geekbench.com/search?q=" + Uri.EscapeDataString(cpu)) { UseShellExecute = true }); } catch { }
+        }
+
+        // ---------- NVIDIA strømgrænse ----------
+        NvInfo nv;
+
+        async void LoadNv()
+        {
+            try { nv = await Task.Run(() => NvidiaPower.Query()); } catch { nv = null; }
+            if (nv == null) { NvCard.Visibility = Visibility.Collapsed; return; }
+            NvCard.Visibility = Visibility.Visible;
+            NvSlider.Minimum = Math.Ceiling(nv.Min); NvSlider.Maximum = Math.Floor(nv.Max); NvSlider.Value = Math.Round(nv.Limit);
+            NvSub.Text = string.Format(new CultureInfo("da-DK"), "{0}: standard {1:0} W, nu {2:0} W (bruger {3:0} W lige nu). Lavere grænse giver et køligere og mere stille kort for typisk få procent færre FPS. Kør gerne strømtesten eller \"Hjalp det?\" før og efter. Kræver administrator og nulstilles ved genstart.", nv.Name, nv.Default, nv.Limit, nv.Draw);
+        }
+
+        void NvSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (nv == null) return;
+            NvVal.Text = NvSlider.Value.ToString("0") + " W" + (Math.Abs(NvSlider.Value - nv.Default) < 1 ? "" : string.Format(" ({0:+0;-0} %)", 100 * (NvSlider.Value - nv.Default) / nv.Default));
+        }
+
+        void NvApply(double w)
+        {
+            if (nv == null) return;
+            if (!Admin.IsElevated)
+            {
+                if (MessageBox.Show("Det kræver administrator at ændre strømgrænsen.\n\nGenstarte Opticon som administrator nu?", "Opticon", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes) Admin.RestartElevated("--page game");
+                return;
+            }
+            try { MessageBox.Show(NvidiaPower.Set(nv, w), "Opticon", MessageBoxButton.OK, MessageBoxImage.Information); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            LoadNv();
+        }
+
+        void NvApply_Click(object sender, RoutedEventArgs e) { NvApply(NvSlider.Value); }
+        void NvReset_Click(object sender, RoutedEventArgs e) { if (nv != null) NvApply(nv.Default); }
 
         async void LoadSettings()
         {
@@ -79,6 +147,7 @@ namespace Opticon.Pages
                 {
                     var last = BenchRunner.History().LastOrDefault();
                     r = new BenchResult { Date = DateTime.Now, OnBattery = PowerMode.OnBattery() };
+                    var rr = r; await Task.Run(() => BenchRunner.ReadHardware(rr));
                     if (last != null) { r.Cpu1 = last.Cpu1; r.CpuN = last.CpuN; r.Sustain = last.Sustain; r.Ram = last.Ram; r.DiskR = last.DiskR; r.DiskW = last.DiskW; r.Iops = last.Iops; }
                 }
 
@@ -102,6 +171,8 @@ namespace Opticon.Pages
                 if (full || r.Gpu > 0) BenchRunner.Save(r);
                 App.Log("Benchmark: " + (r.Score > 0 ? r.Score + " point" : "delvis") + (r.GpuNote != null ? " · " + r.GpuNote : ""));
                 Show(r, prev, null);
+                shown = r;
+                LoadCompare();
             }
             catch (Exception ex)
             {
@@ -188,7 +259,9 @@ namespace Opticon.Pages
         // ---------- Mål i mit spil og "Hjalp det?" ----------
         GameResult abBefore;
 
-        int Seconds() { return GameDur.SelectedIndex == 0 ? 30 : GameDur.SelectedIndex == 2 ? 120 : 60; }
+        int durSec = 60;
+        int Seconds() { return durSec; }
+        void Dur_Click(object sender, RoutedEventArgs e) { durSec = durSec == 30 ? 60 : durSec == 60 ? 120 : 30; GameDur.Content = "⏱  " + durSec + " sek."; }
 
         bool NeedAdmin()
         {

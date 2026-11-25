@@ -78,6 +78,13 @@ namespace Opticon.Services
                 watcher.EnableRaisingEvents = true;
             }
 
+            // Tilstande: spil-tilstand starter og slutter af sig selv, fokus slutter, når tiden er gået
+            Modes.Notice += (t, b) => Popup(1, t, b);
+            var modeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            bool modeBusy = false;
+            modeTimer.Tick += async (s, e) => { if (modeBusy) return; modeBusy = true; try { await Task.Run(() => Modes.Tick(true)); } finally { modeBusy = false; } };
+            modeTimer.Start();
+
             // Vagthund: første gang efter 2 min, derefter hvert 10. minut
             timer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
             timer.Tick += async (s, e) => { timer.Interval = TimeSpan.FromMinutes(10); await Watchdog(); };
@@ -159,8 +166,8 @@ namespace Opticon.Services
         {
             try
             {
-                var r = await Task.Run(() => MalwareScan.Run((p, t) => { }));
-                var now = r.Finds.Where(f => f.Category != "Proces" && f.Category != "Trussel (fjernet)").ToList();
+                var r = await Task.Run(() => MalwareScan.Run((p, t) => { }, false));
+                var now = r.Finds.Where(f => f.Category != "Proces" && f.Category != "Trussel (fjernet)" && f.Category != "Netværk" && f.Category != "Ny fil").ToList();
                 var keys = now.Select(Key).Distinct().ToList();
                 List<string> baseline = null;
                 try { if (File.Exists(BaseFile)) baseline = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(BaseFile)); } catch { }

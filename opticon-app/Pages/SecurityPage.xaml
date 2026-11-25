@@ -49,7 +49,7 @@
                       <ColumnDefinition Width="*"/>
                       <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding Dot}" FontSize="15"/>
+                    <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
                     <StackPanel Grid.Column="1">
                       <TextBlock FontSize="14" TextWrapping="Wrap"><Run Text="{Binding Risk, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Category, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Title, Mode=OneWay}"/></TextBlock>
                       <TextBlock Text="{Binding Detail}" Style="{StaticResource Sub}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
@@ -58,6 +58,7 @@
                       <TextBlock Text="{Binding Advice}" Visibility="{Binding AdviceVis}" Foreground="#F5B83D" TextWrapping="Wrap" Margin="0,4,0,0"/>
                     </StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                      <Button Content="✓ Det er OK" Tag="{Binding}" Click="Ok_Click" Visibility="{Binding OkVis}" ToolTip="Du kender den og stoler på den. Den vises ikke som et problem igen."/>
                       <Button Content="Vis fil" Tag="{Binding}" Click="ShowFile_Click" Visibility="{Binding PathVis}"/>
                       <Button Content="VirusTotal" Tag="{Binding}" Click="VirusTotal_Click" Visibility="{Binding PathVis}" Margin="0"/>
                     </StackPanel>
@@ -66,6 +67,22 @@
               </DataTemplate>
             </ItemsControl.ItemTemplate>
           </ItemsControl>
+        </StackPanel>
+      </Border>
+
+
+      <!-- MalwareBazaar -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <TextBlock Text="🧬  Ekstra tjek med MalwareBazaar (valgfrit)" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock x:Name="MbSub" Style="{StaticResource Sub}" Margin="0,2,0,8" TextWrapping="Wrap" Text="MalwareBazaar er en gratis database fra abuse.ch med over 1 million bekræftede malware-filer. Med en gratis nøgle slår Scan pc'en usignerede filers fingeraftryk op der. Kun fingeraftrykket sendes, aldrig selve filen."/>
+          <TextBlock Style="{StaticResource Sub}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8" Text="Sådan får du en nøgle (2 minutter): 1) Tryk &quot;Hent nøgle&quot; og log ind på auth.abuse.ch med fx Google eller GitHub. 2) Find &quot;Optional&quot; → &quot;Auth-Key&quot;, og tryk &quot;Generate Key&quot;. 3) Kopiér nøglen, sæt den ind herunder, og tryk Gem."/>
+          <StackPanel Orientation="Horizontal">
+            <PasswordBox x:Name="MbBox" Width="320" Margin="0,0,8,0" Padding="8,6" Background="#0E1118" Foreground="#E7E9EE" BorderBrush="#2A3142"/>
+            <Button Content="Hent nøgle" Click="MbOpen_Click"/>
+            <Button x:Name="BtnMbSave" Content="Gem" Style="{StaticResource Primary}" Click="MbSave_Click"/>
+            <Button x:Name="BtnMbRemove" Content="Fjern" Click="MbRemove_Click" Margin="0"/>
+          </StackPanel>
         </StackPanel>
       </Border>
 
@@ -88,7 +105,7 @@
                   <ColumnDefinition Width="*"/>
                   <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Dot}" FontSize="16" VerticalAlignment="Top" Margin="0,1,0,0"/>
+                <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
                 <StackPanel Grid.Column="1">
                   <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Value, Mode=OneWay}"/></TextBlock>
                   <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
@@ -103,6 +120,34 @@
           </DataTemplate>
         </ItemsControl.ItemTemplate>
       </ItemsControl>
+      <Expander x:Name="OkExpander" Margin="0,4,0,0" Foreground="#9AA3B5" Visibility="Collapsed">
+        <Expander.Header><TextBlock x:Name="OkHeader" FontSize="14" Foreground="#4ADE80"/></Expander.Header>
+        <ItemsControl x:Name="OkItems" Margin="0,10,0,0">
+          <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <Border Style="{StaticResource CardB}" Margin="0,0,0,10" Padding="16,14">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="34"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
+                <StackPanel Grid.Column="1">
+                  <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Value, Mode=OneWay}"/></TextBlock>
+                  <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+                  <TextBlock Text="{Binding How}" Visibility="{Binding HowVis}" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                  <Button Content="Ret det" Style="{StaticResource Primary}" Tag="{Binding}" Click="Fix_Click" Visibility="{Binding FixVis}"/>
+                  <Button Content="Åbn" Tag="{Binding}" Click="Open_Click" Visibility="{Binding UriVis}" Margin="0"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Expander>
     </StackPanel>
   </ScrollViewer>
 </UserControl>
