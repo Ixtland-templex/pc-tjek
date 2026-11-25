@@ -19,10 +19,25 @@ namespace Opticon.Services
         public string Uri { get; set; }
 
         public string Dot { get { return Level == 0 ? "🔴" : Level == 1 ? "🟡" : Level == 2 ? "🟢" : "ℹ"; } }
+        public System.Windows.Media.Brush DotBrush { get { return DotBrushes.For(Level == 0 ? "#F05252" : Level == 1 ? "#F5B83D" : Level == 2 ? "#4ADE80" : "#6B8AFD"); } }
         public Visibility HowVis { get { return string.IsNullOrEmpty(How) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public Visibility FixVis { get { return string.IsNullOrEmpty(Fix) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public Visibility UriVis { get { return string.IsNullOrEmpty(Uri) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public int Sort { get { return Level == 0 ? 0 : Level == 1 ? 1 : Level == 3 ? 2 : 3; } }
+    }
+
+    public static class DotBrushes
+    {
+        static readonly Dictionary<string, System.Windows.Media.SolidColorBrush> cache = new Dictionary<string, System.Windows.Media.SolidColorBrush>();
+        public static System.Windows.Media.Brush For(string hex)
+        {
+            lock (cache)
+            {
+                System.Windows.Media.SolidColorBrush b;
+                if (!cache.TryGetValue(hex, out b)) { b = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)); b.Freeze(); cache[hex] = b; }
+                return b;
+            }
+        }
     }
 
     public class SecResult

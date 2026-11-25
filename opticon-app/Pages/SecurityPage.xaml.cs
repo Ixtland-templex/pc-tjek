@@ -87,7 +87,11 @@ namespace Opticon.Pages
             try
             {
                 var r = await Task.Run(() => SecurityCheck.Run());
-                List.ItemsSource = r.Items;
+                List.ItemsSource = r.Items.Where(i => i.Level != 2).ToList();
+                var okItems = r.Items.Where(i => i.Level == 2).ToList();
+                OkItems.ItemsSource = okItems;
+                OkHeader.Text = "✓  " + okItems.Count + " ting er i orden · tryk for at se dem";
+                OkExpander.Visibility = okItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
                 int red = r.Items.Count(i => i.Level == 0), yellow = r.Items.Count(i => i.Level == 1), green = r.Items.Count(i => i.Level == 2);
                 int total = red + yellow + green;
                 SumBig.Text = green + "/" + total;
@@ -165,7 +169,8 @@ namespace Opticon.Pages
         void ShowScan()
         {
             if (lastScan == null) return;
-            ScanList.ItemsSource = ChkAll.IsChecked == true ? lastScan.Finds : lastScan.Finds.Where(f => f.Level >= 2).ToList();
+            ScanList.ItemsSource = null;
+            ScanList.ItemsSource = ChkAll.IsChecked == true ? lastScan.Finds.OrderByDescending(f => f.Level).ToList() : lastScan.Finds.Where(f => f.Level >= 2).OrderByDescending(f => f.Level).ToList();
         }
 
         async void Quick_Click(object sender, RoutedEventArgs e)
@@ -181,6 +186,15 @@ namespace Opticon.Pages
             }
             catch (Exception ex) { ScanSum.Text = old; MessageBox.Show("Scanningen kunne ikke starte: " + ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
             BtnQuick.IsEnabled = true;
+        }
+
+        void Ok_Click(object sender, RoutedEventArgs e)
+        {
+            var f = (ScanFind)((Button)sender).Tag;
+            OkList.Add(f.Key);
+            App.Log("Markeret som OK: " + f.Key);
+            f.Level = 0; f.Detail = "✓ Markeret som OK af dig · " + f.Detail; f.Advice = "";
+            ShowScan();
         }
 
         void ShowFile_Click(object sender, RoutedEventArgs e)

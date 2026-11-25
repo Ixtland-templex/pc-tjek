@@ -1,0 +1,45 @@
+<UserControl x:Class="Opticon.Pages.TimelinePage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <DockPanel>
+    <StackPanel DockPanel.Dock="Top">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Content="↻  Opdatér" Click="Refresh_Click" Margin="0" VerticalAlignment="Center"/>
+        <StackPanel>
+          <TextBlock Text="Hændelsesforløb" Style="{StaticResource H1}"/>
+          <TextBlock Text="Hvad er der sket på pc'en de seneste 14 dage? Installationer, Defender, nedbrud, genstarter og Opticons egne ændringer." Style="{StaticResource Sub}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+      </DockPanel>
+      <WrapPanel x:Name="Filters" Margin="0,14,0,10"/>
+      <TextBlock x:Name="Sum" Style="{StaticResource Sub}" Margin="0,0,0,8"/>
+    </StackPanel>
+    <Border Style="{StaticResource CardB}" Padding="16,6">
+      <ListBox x:Name="List" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True">
+        <ListBox.ItemContainerStyle>
+          <Style TargetType="ListBoxItem">
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><ContentPresenter/></ControlTemplate></Setter.Value></Setter>
+          </Style>
+        </ListBox.ItemContainerStyle>
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <Border BorderBrush="#1F2533" BorderThickness="0,0,0,1" Padding="0,8">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="150"/>
+                  <ColumnDefinition Width="22"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding TimeText}" Foreground="#9AA3B5" FontSize="12.5"/>
+                <Ellipse Grid.Column="1" Width="9" Height="9" Fill="{Binding DotBrush}" VerticalAlignment="Top" Margin="0,5,0,0" HorizontalAlignment="Left"/>
+                <StackPanel Grid.Column="2">
+                  <TextBlock TextWrapping="Wrap" FontSize="13.5"><Run Text="{Binding Type, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Title, Mode=OneWay}" Foreground="#E7E9EE"/></TextBlock>
+                  <TextBlock Text="{Binding Detail}" Style="{StaticResource Sub}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Border>
+  </DockPanel>
+</UserControl>

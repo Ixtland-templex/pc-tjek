@@ -49,7 +49,7 @@
                       <ColumnDefinition Width="*"/>
                       <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding Dot}" FontSize="15"/>
+                    <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
                     <StackPanel Grid.Column="1">
                       <TextBlock FontSize="14" TextWrapping="Wrap"><Run Text="{Binding Risk, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Category, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Title, Mode=OneWay}"/></TextBlock>
                       <TextBlock Text="{Binding Detail}" Style="{StaticResource Sub}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
@@ -58,6 +58,7 @@
                       <TextBlock Text="{Binding Advice}" Visibility="{Binding AdviceVis}" Foreground="#F5B83D" TextWrapping="Wrap" Margin="0,4,0,0"/>
                     </StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                      <Button Content="✓ Det er OK" Tag="{Binding}" Click="Ok_Click" Visibility="{Binding OkVis}" ToolTip="Du kender den og stoler på den. Den vises ikke som et problem igen."/>
                       <Button Content="Vis fil" Tag="{Binding}" Click="ShowFile_Click" Visibility="{Binding PathVis}"/>
                       <Button Content="VirusTotal" Tag="{Binding}" Click="VirusTotal_Click" Visibility="{Binding PathVis}" Margin="0"/>
                     </StackPanel>
@@ -104,7 +105,7 @@
                   <ColumnDefinition Width="*"/>
                   <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="{Binding Dot}" FontSize="16" VerticalAlignment="Top" Margin="0,1,0,0"/>
+                <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
                 <StackPanel Grid.Column="1">
                   <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Value, Mode=OneWay}"/></TextBlock>
                   <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
@@ -119,6 +120,34 @@
           </DataTemplate>
         </ItemsControl.ItemTemplate>
       </ItemsControl>
+      <Expander x:Name="OkExpander" Margin="0,4,0,0" Foreground="#9AA3B5" Visibility="Collapsed">
+        <Expander.Header><TextBlock x:Name="OkHeader" FontSize="14" Foreground="#4ADE80"/></Expander.Header>
+        <ItemsControl x:Name="OkItems" Margin="0,10,0,0">
+          <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <Border Style="{StaticResource CardB}" Margin="0,0,0,10" Padding="16,14">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="34"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
+                <StackPanel Grid.Column="1">
+                  <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Value, Mode=OneWay}"/></TextBlock>
+                  <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+                  <TextBlock Text="{Binding How}" Visibility="{Binding HowVis}" Foreground="#C3CAD6" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                  <Button Content="Ret det" Style="{StaticResource Primary}" Tag="{Binding}" Click="Fix_Click" Visibility="{Binding FixVis}"/>
+                  <Button Content="Åbn" Tag="{Binding}" Click="Open_Click" Visibility="{Binding UriVis}" Margin="0"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Expander>
     </StackPanel>
   </ScrollViewer>
 </UserControl>
