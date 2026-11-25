@@ -46,22 +46,80 @@ namespace Opticon.Services
             return v.Major == 0 || v >= new Version(2, 45);   // ny app (0.x) eller gammel app fra 2.45
         }
 
+        static string url;
+        static readonly HttpClient http = MakeClient();
+        static HttpClient MakeClient() { var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) }; h.DefaultRequestHeaders.UserAgent.ParseAdd("Opticon"); return h; }
+
+        /// <summary>Adressen på fælles-databasen (står i opticon-app/community.json i repoet, så den kan ændres uden ny app-version).</summary>
+        public static string Url
+        {
+            get
+            {
+                if (url != null) return url;
+                try
+                {
+                    var j = http.GetStringAsync("https://raw.githubusercontent.com/" + Repo + "/main/opticon-app/community.json?t=" + DateTime.UtcNow.Ticks).Result;
+                    using (var d = JsonDocument.Parse(j)) url = d.RootElement.TryGetProperty("url", out var u) ? (u.GetString() ?? "") : "";
+                }
+                catch { url = ""; }
+                return url;
+            }
+        }
+
+        static IEnumerable<JsonElement> Parse(string json)
+        {
+            using (var doc = JsonDocument.Parse(json))
+                return doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement.EnumerateArray().Select(e => e.Clone()).ToList() : new List<JsonElement>();
+        }
+
+        /// <summary>Alle delte resultater: den nye fælles-database plus de gamle fra GitHub.</summary>
+        static JsonElement[] LoadAll()
+        {
+            var list = new List<JsonElement>();
+            try
+            {
+                var resp = http.GetAsync("https://raw.githubusercontent.com/" + Repo + "/results/results.json?t=" + DateTime.UtcNow.Ticks).Result;
+                if (resp.IsSuccessStatusCode) list.AddRange(Parse(resp.Content.ReadAsStringAsync().Result));
+            }
+            catch (Exception e) { App.Log("GitHub-resultater: " + e.Message); }
+            if (!string.IsNullOrEmpty(Url))
+                try { list.AddRange(Parse(http.GetStringAsync(Url).Result)); }
+                catch (Exception e) { App.Log("Fælles resultater: " + e.Message); }
+            return list.ToArray();
+        }
+
+        static Dictionary<string, object> Payload(BenchResult me)
+        {
+            return new Dictionary<string, object>
+            {
+                { "v", TestVersion }, { "app", Updater.Current.ToString(3) }, { "cpu", me.CpuName }, { "gpu", me.GpuName }, { "cores", me.Cores }, { "threads", me.Threads },
+                { "ramGB", me.RamGB }, { "ramMHz", me.RamMHz }, { "disk", me.DiskName ?? "" }, { "laptop", me.Laptop }, { "battery", me.OnBattery }, { "power", PowerMode.Name(PowerMode.Current()) },
+                { "scores", new Dictionary<string, object> { { "cpu1", me.Cpu1 }, { "cpuN", me.CpuN }, { "sustain", me.Sustain }, { "ram", me.Ram }, { "diskR", me.DiskR }, { "diskW", me.DiskW }, { "iops", me.Iops }, { "gpu", me.Gpu }, { "total", me.Score } } }
+            };
+        }
+
+        /// <summary>Deler resultatet med ét klik (ingen login). Returnerer null ved succes, ellers en fejltekst.</summary>
+        public static string Submit(BenchResult me)
+        {
+            if (string.IsNullOrEmpty(Url)) return "nourl";
+            try
+            {
+                var body = new StringContent(JsonSerializer.Serialize(Payload(me)), System.Text.Encoding.UTF8, "text/plain");
+                var resp = http.PostAsync(Url, body).Result;
+                var txt = resp.Content.ReadAsStringAsync().Result;
+                using (var d = JsonDocument.Parse(txt))
+                {
+                    if (d.RootElement.TryGetProperty("ok", out var ok) && ok.GetBoolean()) { App.Log("Benchmark delt"); return null; }
+                    return d.RootElement.TryGetProperty("error", out var er) ? er.GetString() : "ukendt svar";
+                }
+            }
+            catch (Exception e) { App.Log("Del resultat: " + e.Message); return (e.InnerException ?? e).Message; }
+        }
+
         /// <summary>Returnerer (rækker, tekst). Kaster ved netværksfejl.</summary>
         public static Tuple<List<CompareRow>, string> Compare(BenchResult me)
         {
-            JsonElement[] all;
-            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) })
-            {
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("Opticon");
-                var resp = http.GetAsync("https://raw.githubusercontent.com/" + Repo + "/results/results.json?t=" + DateTime.UtcNow.Ticks).Result;
-                if ((int)resp.StatusCode == 404) all = new JsonElement[0];
-                else
-                {
-                    resp.EnsureSuccessStatusCode();
-                    using (var doc = JsonDocument.Parse(resp.Content.ReadAsStringAsync().Result))
-                        all = doc.RootElement.EnumerateArray().Select(e => e.Clone()).ToArray();
-                }
-            }
+            var all = LoadAll();
             Func<JsonElement, string, string> str = (e, k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : "";
             Func<JsonElement, string, bool> boo = (e, k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.True;
             Func<JsonElement, string, double> score = (e, k) => e.TryGetProperty("scores", out var s) && s.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
@@ -104,12 +162,7 @@ namespace Opticon.Services
         /// <summary>Åbner GitHub med et færdigt opslag. Resultatet tilføjes automatisk af projektets GitHub-robot.</summary>
         public static void Share(BenchResult me)
         {
-            var data = new Dictionary<string, object>
-            {
-                { "v", TestVersion }, { "app", Updater.Current.ToString(3) }, { "cpu", me.CpuName }, { "gpu", me.GpuName }, { "cores", me.Cores }, { "threads", me.Threads },
-                { "ramGB", me.RamGB }, { "ramMHz", me.RamMHz }, { "disk", me.DiskName ?? "" }, { "laptop", me.Laptop }, { "battery", me.OnBattery }, { "power", PowerMode.Name(PowerMode.Current()) },
-                { "scores", new Dictionary<string, object> { { "cpu1", me.Cpu1 }, { "cpuN", me.CpuN }, { "sustain", me.Sustain }, { "ram", me.Ram }, { "diskR", me.DiskR }, { "diskW", me.DiskW }, { "iops", me.Iops }, { "gpu", me.Gpu }, { "total", me.Score } } }
-            };
+            var data = Payload(me);
             var json = JsonSerializer.Serialize(data);
             var title = "[Opticon-resultat] " + me.CpuName + " / " + me.GpuName;
             var body = "Opticon-resultat. Det bliver tilføjet automatisk, og opslaget lukkes af sig selv.\n\n```json\n" + json + "\n```";

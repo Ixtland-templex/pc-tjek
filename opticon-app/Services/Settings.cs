@@ -9,6 +9,7 @@ namespace Opticon.Services
     {
         public bool CloseToTray { get; set; } = true;
         public bool TrayTipShown { get; set; }
+        public bool? ShareResults { get; set; }   // null = ikke spurgt endnu
 
         static string FilePath { get { return Path.Combine(App.DataDir, "indstillinger.json"); } }
         static Settings cur;
