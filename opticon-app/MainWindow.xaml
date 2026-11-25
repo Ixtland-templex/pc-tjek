@@ -1,6 +1,7 @@
 <Window x:Class="Opticon.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:pages="clr-namespace:Opticon.Pages"
         Title="Opticon" Width="1200" Height="780" MinWidth="980" MinHeight="620" WindowStartupLocation="CenterScreen"
         Foreground="#E7E9EE" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="13" Icon="Opticon.ico">
   <Window.Background>
@@ -72,11 +73,14 @@
           <Border Style="{StaticResource CardB}" Margin="0,4,0,0" Background="#1B1630" BorderBrush="#3B3366">
             <StackPanel>
               <TextBlock Text="🚧  Opticon flytter ind i et rigtigt Windows-program" FontSize="15" FontWeight="SemiBold"/>
-              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Funktionerne fra den gamle Opticon (sikkerhedstjek, oprydning, spil og grafik) flyttes over én ad gangen. Indtil da kan du stadig bruge den gamle app."/>
+              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Sikkerhed er flyttet over. Oprydning og Spil og grafik følger én ad gangen. Indtil da kan du stadig bruge den gamle app."/>
             </StackPanel>
           </Border>
         </StackPanel>
       </ScrollViewer>
+
+      <!-- Sikkerhed -->
+      <pages:SecurityPage x:Name="PageSecurity" Visibility="Collapsed"/>
 
       <!-- Kommer snart -->
       <StackPanel x:Name="PageSoon" Visibility="Collapsed">

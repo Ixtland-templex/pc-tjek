@@ -17,10 +17,14 @@ namespace Opticon
             InitializeComponent();
             var v = typeof(App).Assembly.GetName().Version;
             string ver = v.Major + "." + v.Minor + "." + v.Build;
-            VersionText.Text = "Version " + ver + " (preview)";
+            VersionText.Text = "Version " + ver + " (preview)" + (Services.Admin.IsElevated ? "\nKører som administrator" : "");
             AboutVersion.Text = "Opticon " + ver + " (preview)";
             AboutData.Text = "Log og indstillinger: " + App.DataDir;
-            Loaded += async (s, e) => await LoadOverview();
+            Loaded += async (s, e) =>
+            {
+                if (Array.IndexOf(Environment.GetCommandLineArgs(), "security") >= 0) NavSecurity.IsChecked = true;
+                await LoadOverview();
+            };
         }
 
         async Task LoadOverview()
@@ -46,8 +50,10 @@ namespace Opticon
             PageOverview.Visibility = Visibility.Collapsed;
             PageSoon.Visibility = Visibility.Collapsed;
             PageAbout.Visibility = Visibility.Collapsed;
+            PageSecurity.Visibility = Visibility.Collapsed;
             var rb = (RadioButton)sender;
             if (rb == NavOverview) PageOverview.Visibility = Visibility.Visible;
+            else if (rb == NavSecurity) { PageSecurity.Visibility = Visibility.Visible; PageSecurity.OnShown(); }
             else if (rb == NavAbout) PageAbout.Visibility = Visibility.Visible;
             else
             {
