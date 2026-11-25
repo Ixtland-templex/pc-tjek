@@ -44,6 +44,12 @@ namespace Opticon.Services
             return i.Default > 0 && i.Max > i.Min ? i : null;
         }
 
+        /// <summary>Sætter grænsen uden at logge en besked (bruges under testen). Returnerer true ved succes.</summary>
+        public static bool TrySet(NvInfo gpu, double watts)
+        {
+            try { Set(gpu, watts); return true; } catch { return false; }
+        }
+
         /// <summary>Kræver administrator.</summary>
         public static string Set(NvInfo gpu, double watts)
         {

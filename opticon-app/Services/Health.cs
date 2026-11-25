@@ -16,7 +16,9 @@ namespace Opticon.Services
         public string Count { get; set; }
         public string Last { get; set; }
         public string Note { get; set; }
+        public string Advice { get; set; }
         public int Sort { get; set; }
+        public System.Windows.Visibility AdviceVis { get { return string.IsNullOrEmpty(Advice) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible; } }
         public System.Windows.Media.Brush DotBrush { get { return DotBrushes.For(Level == 0 ? "#F05252" : Level == 1 ? "#F5B83D" : "#6B7488"); } }
     }
 
@@ -132,22 +134,39 @@ namespace Opticon.Services
                 else if (e.Id == 6008) sys.Add(Tuple.Create("shutdown", t));
                 else if (e.Id == 1001 && (e.ProviderName ?? "").Contains("WER-SystemErrorReporting")) sys.Add(Tuple.Create("bsod", t));
             }
+            var advice = new Dictionary<string, string>
+            {
+                { "bsod", "Hvad gør jeg? Én enkelt blå skærm er sjældent farlig. Sker det igen: 1) opdatér grafikdriveren og BIOS (se Optimering), 2) har du slået XMP/EXPO til, så prøv uden, 3) test RAM: tryk Start, og søg på \"Windows Hukommelsesdiagnosticering\", 4) se under Hændelsesforløb, hvad der skete lige før." },
+                { "restart", "Hvad gør jeg? Holdt du tænd/sluk-knappen inde, eller gik strømmen? Så er det ikke en fejl. Sker det af sig selv, især under spil: hold øje med temperaturen (grafikkortet live herover) og overvej strømforsyningen." },
+                { "shutdown", "Hvad gør jeg? Det sker, når Windows ikke nåede at lukke ordentligt ned, fx efter en blå skærm eller strømtab. Se de andre linjer herover." },
+            };
             foreach (var k in new[] { Tuple.Create("bsod", "Blå skærm (systemnedbrud)", 0, "Ofte driver, RAM (fx ustabil XMP) eller overophedning"), Tuple.Create("restart", "Uventet genstart eller strømtab", 1, "Strømafbrydelse, holdt tænd/sluk inde, eller ustabil hardware"), Tuple.Create("shutdown", "Pc'en lukkede ned uventet", 1, "") })
             {
                 var ev = sys.Where(s => s.Item1 == k.Item1).ToList();
-                if (ev.Count > 0) res.Rows.Add(new CrashRow { Level = k.Item3, Title = k.Item2, Count = ev.Count + (ev.Count == 1 ? " gang" : " gange"), Last = ev.Max(x => x.Item2).ToString("dd-MM HH:mm"), Note = k.Item4, Sort = 0 });
+                if (ev.Count > 0) res.Rows.Add(new CrashRow { Level = k.Item3, Title = k.Item2, Count = ev.Count + (ev.Count == 1 ? " gang" : " gange"), Last = ev.Max(x => x.Item2).ToString("dd-MM HH:mm"), Note = k.Item4, Sort = 0, Advice = advice[k.Item1] });
             }
+            // Blå skærm, genstart og nedlukning inden for få minutter er én og samme hændelse
+            var bs = sys.Where(x => x.Item1 == "bsod").Select(x => x.Item2).ToList();
+            if (bs.Count > 0 && sys.Any(x => x.Item1 != "bsod" && bs.Any(b => Math.Abs((x.Item2 - b).TotalMinutes) < 10)))
+                foreach (var row in res.Rows.Where(r => r.Sort == 0 && r.Title != "Blå skærm (systemnedbrud)")) { row.Note = "Skete samtidig med den blå skærm, så det er samme hændelse."; row.Advice = ""; }
             foreach (var a in apps.Values.OrderByDescending(a => a.Item2 + a.Item3))
             {
                 int n = a.Item2 + a.Item3;
-                var near = installs.Where(i => i.Item1 <= a.Item4 && i.Item1 >= a.Item4.AddHours(-48)).OrderByDescending(i => i.Item1).FirstOrDefault();
+                // Defenders daglige definitioner og Microsoft Store-apps er næsten aldrig årsagen: dem nævner vi ikke
+                var near = installs.Where(i => i.Item1 <= a.Item4 && i.Item1 >= a.Item4.AddHours(-48) && !Regex.IsMatch(i.Item2, "Defender|sikkerhedsefterretning|Security Intelligence|KB2267602|9[A-Z0-9]{11}", RegexOptions.IgnoreCase)).OrderByDescending(i => i.Item1).FirstOrDefault();
                 string nice = Regex.Replace(a.Item1, @"\.exe$", "", RegexOptions.IgnoreCase);
+                bool installer = Regex.IsMatch(nice, "^(msiexec|setup|install|unins\\d*|.*installer.*)$", RegexOptions.IgnoreCase);
+                string adv = installer ? "Hvad gør jeg? En installation gik ned. Ingen grund til bekymring, medmindre et program ikke virker. Så installér det igen."
+                    : n == 1 ? "Hvad gør jeg? Sket én gang. Gør ingenting, medmindre det sker igen."
+                    : near != null ? "Hvad gør jeg? Det begyndte kort efter " + near.Item2 + ". Opdatér " + nice + " (se Opdateringer), eller prøv at afinstallere det, der blev installeret lige før."
+                    : "Hvad gør jeg? 1) Opdatér " + nice + " (se Opdateringer). 2) Er det et spil eller en emulator: opdatér grafikdriveren, og slå overlays fra (Discord, MSI Afterburner/RTSS, NVIDIA-overlay). 3) Hjælper det ikke, så geninstallér det.";
                 res.Rows.Add(new CrashRow
                 {
                     Level = n >= 3 ? 0 : n >= 2 ? 1 : 2, Sort = 1,
                     Title = nice + (a.Item2 > 0 && a.Item3 > 0 ? " lukkede uventet / hang" : a.Item2 > 0 ? " lukkede uventet" : " holdt op med at svare"),
                     Count = n + (n == 1 ? " gang" : " gange"), Last = a.Item5.ToString("dd-MM HH:mm"),
-                    Note = near != null ? "Begyndte " + a.Item4.ToString("dd-MM") + ", kort efter: " + near.Item2 + " (" + near.Item1.ToString("dd-MM HH:mm") + ")" : n >= 2 ? "Første gang " + a.Item4.ToString("dd-MM HH:mm") : ""
+                    Note = near != null ? "Begyndte " + a.Item4.ToString("dd-MM") + ", kort efter: " + near.Item2 + " (" + near.Item1.ToString("dd-MM HH:mm") + ")" : n >= 2 ? "Første gang " + a.Item4.ToString("dd-MM HH:mm") : "",
+                    Advice = adv
                 });
             }
             res.Total = apps.Values.Sum(a => a.Item2 + a.Item3) + sys.Count;

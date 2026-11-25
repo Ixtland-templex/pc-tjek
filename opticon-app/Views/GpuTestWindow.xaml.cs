@@ -11,7 +11,7 @@ using Microsoft.Web.WebView2.Core;
 
 namespace Opticon.Views
 {
-    public class GpuStep { public string Res; public string Label; public double Fps; public double P99; public string PowerMode; public double? Watts; public bool SwitchFailed; }
+    public class GpuStep { public string Res; public string Label; public double Fps; public double P99; public string PowerMode; public double? Watts; public bool SwitchFailed; public double Limit; public Func<bool> Prepare; }
 
     public class GpuTestResult
     {
@@ -91,7 +91,7 @@ namespace Opticon.Views
                     if (cur < 0 || cur >= steps.Count) break;
                     var res = m.GetProperty("w").GetInt32() + "x" + m.GetProperty("h").GetInt32();
                     if (res != steps[cur].Res) break;   // gammel måling fra forrige opløsning
-                    if (switching || (steps[cur].PowerMode != null && (DateTime.Now - stepStart).TotalSeconds < 3)) break;   // lige efter skift af strømtilstand
+                    if (switching || ((steps[cur].PowerMode != null || steps[cur].Prepare != null) && (DateTime.Now - stepStart).TotalSeconds < 3)) break;   // lige efter skift af strømtilstand
                     if (firstData == default(DateTime)) firstData = DateTime.Now;
                     sumF += m.GetProperty("f").GetDouble(); sumMs += m.GetProperty("ms").GetDouble();
                     p99s.Add(m.GetProperty("p99").GetDouble());
@@ -113,6 +113,18 @@ namespace Opticon.Views
             cur++;
             sumF = 0; sumMs = 0; p99s.Clear(); lock (watts) watts.Clear(); firstData = default(DateTime); stepStart = DateTime.Now;
             if (cur >= steps.Count) { Finish(); return; }
+            var prep = steps[cur].Prepare;
+            if (prep != null)
+            {
+                switching = true;
+                var step = steps[cur];
+                Task.Run(prep).ContinueWith(t =>
+                {
+                    step.SwitchFailed = t.IsFaulted || !t.Result;
+                    switching = false; stepStart = DateTime.Now; lastMsg = DateTime.Now;
+                    Send();
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+            }
             var pm = steps[cur].PowerMode;
             if (pm != null)
             {
@@ -136,7 +148,7 @@ namespace Opticon.Views
             for (int i = Math.Max(0, cur); i < steps.Count; i++) remain += StepSec + 3;
             if (cur >= 0 && cur < steps.Count) remain -= Math.Min(StepSec + 3, (DateTime.Now - stepStart).TotalSeconds);
             var st = cur >= 0 && cur < steps.Count
-                ? new Dictionary<string, object> { { "Res", steps[cur].Res }, { "Label", "Trin " + (cur + 1) + " af " + steps.Count + " · " + (switching ? "skifter strømtilstand…" : steps[cur].Label) }, { "Remain", (int)Math.Max(0, remain) } }
+                ? new Dictionary<string, object> { { "Res", steps[cur].Res }, { "Label", "Trin " + (cur + 1) + " af " + steps.Count + " · " + (switching ? "skifter indstilling…" : steps[cur].Label) }, { "Remain", (int)Math.Max(0, remain) } }
                 : new Dictionary<string, object> { { "Done", true } };
             try { Web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(st)); } catch { }
         }

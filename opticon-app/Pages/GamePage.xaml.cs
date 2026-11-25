@@ -90,6 +90,42 @@ namespace Opticon.Pages
         }
 
         void NvApply_Click(object sender, RoutedEventArgs e) { NvApply(NvSlider.Value); }
+
+        /// <summary>Kører grafiktesten ved 100, 90, 80, 70 og 60 % strømgrænse og anbefaler den laveste, der stadig giver mindst 97 % af FPS.</summary>
+        async void NvFind_Click(object sender, RoutedEventArgs e)
+        {
+            if (nv == null || running) return;
+            if (!Admin.IsElevated)
+            {
+                if (MessageBox.Show("Testen ændrer grafikkortets strømgrænse undervejs og kræver administrator.\n\nGenstarte Opticon som administrator nu?", "Opticon", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes) Admin.RestartElevated("--page game");
+                return;
+            }
+            if (MessageBox.Show("Opticon kører grafiktesten 5 gange med forskellige strømgrænser (100 % ned til 60 %) og finder den laveste grænse, der næsten ikke koster FPS. Tager ca. 1½ minut. Grænsen sættes tilbage bagefter.\n\nStart?", "Find den bedste grænse", MessageBoxButton.OKCancel, MessageBoxImage.Information) != MessageBoxResult.OK) return;
+            running = true; BtnNvFind.IsEnabled = false;
+            var gpu = nv; double orig = gpu.Limit;
+            var steps = new[] { 1.0, 0.9, 0.8, 0.7, 0.6 }.Select(f => Math.Round(Math.Max(gpu.Min, gpu.Default * f))).Distinct()
+                .Select(w => new GpuStep { Res = "2560x1440", Label = w + " W", Limit = w, Prepare = () => NvidiaPower.TrySet(gpu, w) }).ToList();
+            GpuTestResult g = null;
+            try { var win = new GpuTestWindow(steps); win.Show(); g = await win.Result; }
+            catch (Exception ex) { App.Log("Strømgrænse-test: " + ex); }
+            finally { await Task.Run(() => NvidiaPower.TrySet(gpu, orig)); Activate(); running = false; BtnNvFind.IsEnabled = true; }
+            var ok = g == null ? new List<GpuStep>() : g.Steps.Where(x => !x.SwitchFailed && x.Fps > 0).ToList();
+            var baseStep = ok.FirstOrDefault(x => Math.Abs(x.Limit - Math.Round(gpu.Default)) < 1);
+            if (baseStep == null || ok.Count < 2) { NvResult.Visibility = Visibility.Visible; NvResult.Text = "Testen blev ikke færdig" + (g != null && g.Error != null ? ": " + g.Error : ".") + " Grænsen er sat tilbage til " + orig + " W."; return; }
+            var da = new CultureInfo("da-DK");
+            var best = ok.Where(x => x.Fps >= baseStep.Fps * 0.97).OrderBy(x => x.Limit).First();
+            var lines = string.Join("\n", ok.Select(x => string.Format(da, "•  {0:0} W: {1:N0} fps ({2:+0;-0;0} %){3}", x.Limit, x.Fps, 100 * (x.Fps - baseStep.Fps) / baseStep.Fps, x.Watts.HasValue ? string.Format(da, " · brugte {0:0} W", x.Watts) : "")));
+            NvResult.Visibility = Visibility.Visible;
+            if (best.Limit >= baseStep.Limit - 1)
+                NvResult.Text = "✓ Dit kort taber FPS med det samme, når strømmen sænkes, så standardgrænsen er bedst.\n\n" + lines;
+            else
+            {
+                NvResult.Text = string.Format(da, "💡 Anbefalet: {0:0} W. Det er {1:0} % mindre strøm for {2:0.#} % færre FPS, så kortet bliver køligere og mere stille.\n\n", best.Limit, 100 * (1 - best.Limit / baseStep.Limit), 100 * (1 - best.Fps / baseStep.Fps)) + lines;
+                NvSlider.Value = best.Limit;
+                NvResult.Text += "\n\nSkyderen står nu på " + best.Limit + " W. Tryk \"Anvend\" for at bruge den.";
+            }
+            App.Log("Strømgrænse-test: anbefalet " + best.Limit + " W");
+        }
         void NvReset_Click(object sender, RoutedEventArgs e) { if (nv != null) NvApply(nv.Default); }
 
         async void LoadSettings()
