@@ -25,6 +25,7 @@ namespace Opticon
                 var args = Environment.GetCommandLineArgs();
                 if (Array.IndexOf(args, "security") >= 0) NavSecurity.IsChecked = true;
                 else if (Array.IndexOf(args, "clean") >= 0) NavClean.IsChecked = true;
+                else if (Array.IndexOf(args, "game") >= 0) NavGame.IsChecked = true;
                 await LoadOverview();
                 await Task.Delay(4000);
                 await CheckUpdate(false);
