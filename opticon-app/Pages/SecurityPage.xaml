@@ -13,8 +13,19 @@
           <TextBlock Text="Er Windows' egen beskyttelse slået til? Opticon kan rette det meste med ét klik." Style="{StaticResource Sub}" Margin="0,4,0,0"/>
         </StackPanel>
       </DockPanel>
-      <!-- Scan pc'en -->
+      <!-- Vagten -->
       <Border Style="{StaticResource CardB}" Margin="0,18,0,0">
+        <DockPanel>
+          <CheckBox x:Name="ChkVagt" DockPanel.Dock="Right" VerticalAlignment="Center" Content="Slået til" Checked="Vagt_Changed" Unchecked="Vagt_Changed"/>
+          <StackPanel>
+            <TextBlock Text="🛡  Vagten (anbefalet)" FontSize="15" FontWeight="SemiBold"/>
+            <TextBlock x:Name="VagtSub" Style="{StaticResource Sub}" Margin="0,2,0,0" TextWrapping="Wrap" Text="Kører stille i baggrunden og giver en lille besked nederst til højre, når du henter et program eller en fil, der kan være farlig, og når noget nyt sætter sig til at starte automatisk."/>
+          </StackPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- Scan pc'en -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
         <StackPanel>
           <DockPanel Margin="0,0,0,6">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">

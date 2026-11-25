@@ -49,6 +49,10 @@ Name: "desktopicon"; Description: "Lav en genvej på skrivebordet"; GroupDescrip
 [Files]
 Source: "{#Src}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Registry]
+; Fjern Vagtens autostart, når Opticon afinstalleres (opretter intet ved installation)
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "Opticon Vagt"; ValueType: none; Flags: uninsdeletevalue
+
 [Icons]
 Name: "{group}\Opticon"; Filename: "{app}\Opticon.exe"
 Name: "{autodesktop}\Opticon"; Filename: "{app}\Opticon.exe"; Tasks: desktopicon

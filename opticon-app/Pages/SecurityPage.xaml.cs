@@ -17,6 +17,23 @@ namespace Opticon.Pages
         {
             InitializeComponent();
             BtnAdmin.Visibility = Admin.IsElevated ? Visibility.Collapsed : Visibility.Visible;
+            vagtInit = true; ChkVagt.IsChecked = Vagt.Enabled; vagtInit = false;
+            ShowVagt();
+        }
+
+        bool vagtInit;
+
+        void ShowVagt()
+        {
+            if (Vagt.Enabled) VagtSub.Text = "Kører stille i baggrunden og starter, når du logger ind. Den giver besked om farlige downloads og nye programmer, der starter automatisk." + (Vagt.IsRunning ? "" : " (Starter ved næste login.)");
+        }
+
+        void Vagt_Changed(object sender, RoutedEventArgs e)
+        {
+            if (vagtInit) return;
+            try { Vagt.SetEnabled(ChkVagt.IsChecked == true); App.Log("Vagten " + (ChkVagt.IsChecked == true ? "slået til" : "slået fra")); }
+            catch (Exception ex) { MessageBox.Show("Kunne ikke ændre Vagten: " + ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            ShowVagt();
         }
 
         /// <summary>Kaldes, når siden vises. Tjekker kun automatisk første gang.</summary>
