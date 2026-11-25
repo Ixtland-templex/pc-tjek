@@ -57,11 +57,13 @@ namespace Opticon
             PageSecurity.Visibility = Visibility.Collapsed;
             PageClean.Visibility = Visibility.Collapsed;
             PageGame.Visibility = Visibility.Collapsed;
+            PageUpdates.Visibility = Visibility.Collapsed;
             var rb = (RadioButton)sender;
             if (rb == NavOverview) PageOverview.Visibility = Visibility.Visible;
             else if (rb == NavSecurity) { PageSecurity.Visibility = Visibility.Visible; PageSecurity.OnShown(); }
             else if (rb == NavClean) { PageClean.Visibility = Visibility.Visible; PageClean.OnShown(); }
             else if (rb == NavGame) { PageGame.Visibility = Visibility.Visible; PageGame.OnShown(); }
+            else if (rb == NavUpdates) { PageUpdates.Visibility = Visibility.Visible; PageUpdates.OnShown(); }
             else if (rb == NavAbout) PageAbout.Visibility = Visibility.Visible;
             else
             {

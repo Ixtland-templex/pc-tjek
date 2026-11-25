@@ -26,6 +26,7 @@
           <RadioButton x:Name="NavOverview" Style="{StaticResource Nav}" GroupName="nav" Content="🏠  Overblik" IsChecked="True" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavSecurity" Style="{StaticResource Nav}" GroupName="nav" Content="🛡  Sikkerhed" Tag="Sikkerhed" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" GroupName="nav" Content="🧹  Oprydning" Checked="Nav_Checked"/>
+          <RadioButton x:Name="NavUpdates" Style="{StaticResource Nav}" GroupName="nav" Content="📦  Opdateringer" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavGame" Style="{StaticResource Nav}" GroupName="nav" Content="🎮  Spil og grafik" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavAbout" Style="{StaticResource Nav}" GroupName="nav" Content="ℹ  Om Opticon" Checked="Nav_Checked"/>
         </StackPanel>
@@ -84,6 +85,7 @@
       <pages:SecurityPage x:Name="PageSecurity" Visibility="Collapsed"/>
       <pages:CleanPage x:Name="PageClean" Visibility="Collapsed"/>
       <pages:GamePage x:Name="PageGame" Visibility="Collapsed"/>
+      <pages:UpdatesPage x:Name="PageUpdates" Visibility="Collapsed"/>
 
       <!-- Kommer snart -->
       <StackPanel x:Name="PageSoon" Visibility="Collapsed">

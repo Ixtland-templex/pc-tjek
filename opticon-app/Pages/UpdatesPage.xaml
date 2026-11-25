@@ -1,0 +1,45 @@
+<UserControl x:Class="Opticon.Pages.UpdatesPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button x:Name="BtnCheck" Content="↻  Søg efter opdateringer" Click="Check_Click"/>
+          <Button x:Name="BtnUpgrade" Content="⬇  Opdatér valgte" Style="{StaticResource Primary}" Click="Upgrade_Click" IsEnabled="False" Margin="0"/>
+        </StackPanel>
+        <StackPanel>
+          <TextBlock Text="Opdateringer" Style="{StaticResource H1}"/>
+          <TextBlock Text="Gamle programmer er en af de mest almindelige veje ind for malware. Opticon bruger Microsofts egen pakkehåndtering (winget)." Style="{StaticResource Sub}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+      </DockPanel>
+      <Border Style="{StaticResource CardB}" Margin="0,18,0,0">
+        <StackPanel>
+          <TextBlock x:Name="Sum" Style="{StaticResource Sub}" FontSize="14" Text="Tryk på &quot;Søg efter opdateringer&quot;." Margin="0,0,0,8"/>
+          <ItemsControl x:Name="List">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,9">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="36"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="220"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" Checked="Sel_Changed" Unchecked="Sel_Changed"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="14"/>
+                      <TextBlock Text="{Binding Id}" Style="{StaticResource Sub}" FontSize="12"/>
+                      <TextBlock Text="{Binding Status}" Foreground="#4ADE80" FontSize="12"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right"><Run Text="{Binding Version, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  →  "/><Run Text="{Binding Available, Mode=OneWay}" FontWeight="SemiBold"/></TextBlock>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

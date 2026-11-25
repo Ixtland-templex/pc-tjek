@@ -94,5 +94,51 @@ namespace Opticon.Pages
             var p = (string)((Button)sender).Tag;
             try { Process.Start(new ProcessStartInfo("explorer.exe", "\"" + p + "\"") { UseShellExecute = true }); } catch { }
         }
+
+        List<FileRow> files;
+
+        void FileSel_Changed(object sender, RoutedEventArgs e) { UpdateFilesSum(); }
+
+        void UpdateFilesSum()
+        {
+            if (files == null) return;
+            var sel = files.Where(f => f.Selected).ToList();
+            FilesSum.Text = files.Count + " filer fundet · valgt: " + sel.Count + " (" + Cleanup.Fmt(sel.Sum(f => f.Size)) + ")";
+            BtnFilesDel.IsEnabled = sel.Count > 0;
+        }
+
+        async void Files_Click(object sender, RoutedEventArgs e)
+        {
+            BtnFiles.IsEnabled = false; BtnFilesDel.IsEnabled = false;
+            FilesSum.Text = "Leder…";
+            try
+            {
+                files = await Task.Run(() => FileFinder.Run(s => Dispatcher.BeginInvoke(new Action(() => FilesSum.Text = s))));
+                FilesList.ItemsSource = files;
+                if (files.Count == 0) FilesSum.Text = "Ingen dubletter, gamle installere eller store filer fundet. 👍";
+                else UpdateFilesSum();
+            }
+            catch (Exception ex) { App.Log("Filer: " + ex); FilesSum.Text = "Fejl: " + ex.Message; }
+            BtnFiles.IsEnabled = true;
+        }
+
+        async void FilesDel_Click(object sender, RoutedEventArgs e)
+        {
+            var sel = files.Where(f => f.Selected).ToList();
+            if (MessageBox.Show(sel.Count + " filer (" + Cleanup.Fmt(sel.Sum(f => f.Size)) + ") lægges i papirkurven. Du kan hente dem tilbage derfra.\n\nFortsæt?", "Opticon", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            BtnFilesDel.IsEnabled = false;
+            int ok = await Task.Run(() => FileFinder.ToRecycleBin(sel.Select(f => f.FullPath)));
+            App.Log("Filer i papirkurven: " + ok + " af " + sel.Count);
+            files = files.Where(f => System.IO.File.Exists(f.FullPath)).ToList();
+            FilesList.ItemsSource = files;
+            UpdateFilesSum();
+            FilesSum.Text = ok + " filer lagt i papirkurven. " + FilesSum.Text;
+        }
+
+        void ShowFile_Click(object sender, RoutedEventArgs e)
+        {
+            var p = (string)((Button)sender).Tag;
+            try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + p + "\"") { UseShellExecute = true }); } catch { }
+        }
     }
 }
