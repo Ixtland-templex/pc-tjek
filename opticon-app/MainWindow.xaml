@@ -24,7 +24,7 @@
         <StackPanel>
           <RadioButton x:Name="NavOverview" Style="{StaticResource Nav}" GroupName="nav" Content="🏠  Overblik" IsChecked="True" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavSecurity" Style="{StaticResource Nav}" GroupName="nav" Content="🛡  Sikkerhed" Tag="Sikkerhed" Checked="Nav_Checked"/>
-          <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" GroupName="nav" Content="🧹  Oprydning" Tag="Oprydning" Checked="Nav_Checked"/>
+          <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" GroupName="nav" Content="🧹  Oprydning" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavGame" Style="{StaticResource Nav}" GroupName="nav" Content="🎮  Spil og grafik" Tag="Spil og grafik" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavAbout" Style="{StaticResource Nav}" GroupName="nav" Content="ℹ  Om Opticon" Checked="Nav_Checked"/>
         </StackPanel>
@@ -73,7 +73,7 @@
           <Border Style="{StaticResource CardB}" Margin="0,4,0,0" Background="#1B1630" BorderBrush="#3B3366">
             <StackPanel>
               <TextBlock Text="🚧  Opticon flytter ind i et rigtigt Windows-program" FontSize="15" FontWeight="SemiBold"/>
-              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Sikkerhed er flyttet over. Oprydning og Spil og grafik følger én ad gangen. Indtil da kan du stadig bruge den gamle app."/>
+              <TextBlock Style="{StaticResource Sub}" Margin="0,6,0,0" Text="Det her er første version af den nye app. Sikkerhed og Oprydning er flyttet over. Spil og grafik følger. Indtil da kan du stadig bruge den gamle app."/>
             </StackPanel>
           </Border>
         </StackPanel>
@@ -81,6 +81,7 @@
 
       <!-- Sikkerhed -->
       <pages:SecurityPage x:Name="PageSecurity" Visibility="Collapsed"/>
+      <pages:CleanPage x:Name="PageClean" Visibility="Collapsed"/>
 
       <!-- Kommer snart -->
       <StackPanel x:Name="PageSoon" Visibility="Collapsed">

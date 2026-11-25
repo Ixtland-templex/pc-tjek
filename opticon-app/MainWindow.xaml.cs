@@ -22,7 +22,9 @@ namespace Opticon
             AboutData.Text = "Log og indstillinger: " + App.DataDir;
             Loaded += async (s, e) =>
             {
-                if (Array.IndexOf(Environment.GetCommandLineArgs(), "security") >= 0) NavSecurity.IsChecked = true;
+                var args = Environment.GetCommandLineArgs();
+                if (Array.IndexOf(args, "security") >= 0) NavSecurity.IsChecked = true;
+                else if (Array.IndexOf(args, "clean") >= 0) NavClean.IsChecked = true;
                 await LoadOverview();
             };
         }
@@ -51,9 +53,11 @@ namespace Opticon
             PageSoon.Visibility = Visibility.Collapsed;
             PageAbout.Visibility = Visibility.Collapsed;
             PageSecurity.Visibility = Visibility.Collapsed;
+            PageClean.Visibility = Visibility.Collapsed;
             var rb = (RadioButton)sender;
             if (rb == NavOverview) PageOverview.Visibility = Visibility.Visible;
             else if (rb == NavSecurity) { PageSecurity.Visibility = Visibility.Visible; PageSecurity.OnShown(); }
+            else if (rb == NavClean) { PageClean.Visibility = Visibility.Visible; PageClean.OnShown(); }
             else if (rb == NavAbout) PageAbout.Visibility = Visibility.Visible;
             else
             {
