@@ -1,3 +1,4 @@
+/** @OnlyCurrentDoc */
 /**
  * Opticon – fælles benchmark-resultater (Google Apps Script)
  *
