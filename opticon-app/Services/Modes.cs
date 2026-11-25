@@ -14,6 +14,7 @@ namespace Opticon.Services
     {
         public string Name { get; set; }
         public string Exe { get; set; }            // procesnavn uden .exe
+        public string Path { get; set; }           // fuld sti til spillets .exe
         public List<string> Close { get; set; } = new List<string>();
         public bool Mute { get; set; } = true;
         public string CloseText { get { return Close == null || Close.Count == 0 ? "Lukker ingen programmer" : "Lukker: " + string.Join(", ", Close); } }
