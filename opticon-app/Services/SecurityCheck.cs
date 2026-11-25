@@ -19,10 +19,25 @@ namespace Opticon.Services
         public string Uri { get; set; }
 
         public string Dot { get { return Level == 0 ? "🔴" : Level == 1 ? "🟡" : Level == 2 ? "🟢" : "ℹ"; } }
+        public System.Windows.Media.Brush DotBrush { get { return DotBrushes.For(Level == 0 ? "#F05252" : Level == 1 ? "#F5B83D" : Level == 2 ? "#4ADE80" : "#6B8AFD"); } }
         public Visibility HowVis { get { return string.IsNullOrEmpty(How) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public Visibility FixVis { get { return string.IsNullOrEmpty(Fix) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public Visibility UriVis { get { return string.IsNullOrEmpty(Uri) || Level == 2 ? Visibility.Collapsed : Visibility.Visible; } }
         public int Sort { get { return Level == 0 ? 0 : Level == 1 ? 1 : Level == 3 ? 2 : 3; } }
+    }
+
+    public static class DotBrushes
+    {
+        static readonly Dictionary<string, System.Windows.Media.SolidColorBrush> cache = new Dictionary<string, System.Windows.Media.SolidColorBrush>();
+        public static System.Windows.Media.Brush For(string hex)
+        {
+            lock (cache)
+            {
+                System.Windows.Media.SolidColorBrush b;
+                if (!cache.TryGetValue(hex, out b)) { b = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)); b.Freeze(); cache[hex] = b; }
+                return b;
+            }
+        }
     }
 
     public class SecResult
@@ -260,6 +275,18 @@ namespace Opticon.Services
                 var al = Wmi.RegStr(K, "AutoAdminLogon"); var pw = Wmi.RegStr(K, "DefaultPassword");
                 if (al == "1" && !string.IsNullOrEmpty(pw)) Add(r, "autologon", 0, "Automatisk login", "Adgangskode gemt i klartekst", "Din Windows-adgangskode ligger ukrypteret i registreringsdatabasen, hvor ethvert program kan læse den.", "Opticon kan fjerne den gemte adgangskode og slå automatisk login fra. Skift derefter adgangskoden, hvis den også bruges andre steder.", "autologon");
                 else if (al == "1") Add(r, "autologon", 1, "Automatisk login", "Til", "Pc'en logger selv på, så alle med adgang til den kan bruge den", "Tryk Windows-tasten, skriv netplwiz, og sæt flueben i \"Brugerne skal angive brugernavn og adgangskode\".");
+            });
+
+            // 16. Diskenes helbred (Windows' egen vurdering fra disken)
+            Safe("disk", () =>
+            {
+                var disks = Wmi.Query(@"root\Microsoft\Windows\Storage", "SELECT FriendlyName, HealthStatus FROM MSFT_PhysicalDisk");
+                if (disks.Count == 0) return;
+                var bad = disks.Where(d => Convert.ToInt32(Wmi.Prop(d, "HealthStatus") ?? 0) == 2).Select(d => Convert.ToString(Wmi.Prop(d, "FriendlyName"))).ToList();
+                var warn = disks.Where(d => Convert.ToInt32(Wmi.Prop(d, "HealthStatus") ?? 0) == 1).Select(d => Convert.ToString(Wmi.Prop(d, "FriendlyName"))).ToList();
+                if (bad.Count > 0) Add(r, "disk", 0, "Diskens helbred", "Fejl: " + string.Join(", ", bad), "Disken selv melder, at den har problemer. Den kan gå i stykker når som helst.", "Tag backup af dine vigtige filer NU (fx til OneDrive eller et USB-drev), og udskift disken.");
+                else if (warn.Count > 0) Add(r, "disk", 1, "Diskens helbred", "Advarsel: " + string.Join(", ", warn), "Disken melder en advarsel, fx at den er ved at være slidt.", "Tag backup, og hold øje med den. Se detaljer i Indstillinger → System → Lager → Diske og drev.", "", "ms-settings:disksandvolumes");
+                else Add(r, "disk", 2, "Diskens helbred", disks.Count == 1 ? "Sund" : "Alle " + disks.Count + " diske er sunde", "Diskene melder ingen problemer");
             });
 
             r.Items = r.Items.OrderBy(i => i.Sort).ToList();

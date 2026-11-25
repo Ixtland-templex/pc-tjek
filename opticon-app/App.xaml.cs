@@ -9,6 +9,8 @@ namespace Opticon
     {
         public static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Opticon");
 
+        public static bool VagtMode;
+
         public static void Log(string msg)
         {
             try
@@ -23,13 +25,23 @@ namespace Opticon
         {
             DispatcherUnhandledException += OnUiError;
             AppDomain.CurrentDomain.UnhandledException += (s, a) => Log("Fejl: " + a.ExceptionObject);
-            Log("Start " + typeof(App).Assembly.GetName().Version);
             base.OnStartup(e);
+            if (Array.IndexOf(e.Args, "--vagt") >= 0)
+            {
+                VagtMode = true;
+                ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                Services.Vagt.Start();
+                return;
+            }
+            Log("Start " + typeof(App).Assembly.GetName().Version + (Services.Admin.IsElevated ? " (administrator)" : ""));
+            new MainWindow().Show();
         }
 
         void OnUiError(object sender, DispatcherUnhandledExceptionEventArgs e)
         {
             Log("Fejl: " + e.Exception);
+            e.Handled = true;
+            if (VagtMode) return;
             MessageBox.Show("Der skete en fejl:\n\n" + e.Exception.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning);
             e.Handled = true;
         }

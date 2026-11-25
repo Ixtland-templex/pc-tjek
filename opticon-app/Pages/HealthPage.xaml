@@ -1,0 +1,103 @@
+<UserControl x:Class="Opticon.Pages.HealthPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button Content="📋  Kopiér pc-info til support" Click="Copy_Click"/>
+          <Button Content="↻  Tjek igen" Click="Refresh_Click" Margin="0"/>
+        </StackPanel>
+        <StackPanel>
+          <TextBlock Text="Ydelse og helbred" Style="{StaticResource H1}"/>
+          <TextBlock Text="Diske, hukommelse, nedbrud og grafikkortet lige nu." Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+        </StackPanel>
+      </DockPanel>
+
+      <!-- Grafikkort live -->
+      <Border x:Name="GpuCard" Style="{StaticResource CardB}" Margin="0,18,0,0" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock x:Name="GpuTitle" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock Text="Opdateres hvert 3. sekund · bare til orientering" Style="{StaticResource Sub}" FontSize="12" Margin="0,2,0,10"/>
+          <UniformGrid Columns="5">
+            <StackPanel><TextBlock Text="Strøm" Style="{StaticResource Sub}"/><TextBlock x:Name="GPower" FontSize="18" FontWeight="SemiBold"/></StackPanel>
+            <StackPanel><TextBlock Text="Temperatur" Style="{StaticResource Sub}"/><TextBlock x:Name="GTemp" FontSize="18" FontWeight="SemiBold"/></StackPanel>
+            <StackPanel><TextBlock Text="Blæser" Style="{StaticResource Sub}"/><TextBlock x:Name="GFan" FontSize="18" FontWeight="SemiBold"/></StackPanel>
+            <StackPanel><TextBlock Text="Hastighed" Style="{StaticResource Sub}"/><TextBlock x:Name="GClock" FontSize="18" FontWeight="SemiBold"/></StackPanel>
+            <StackPanel><TextBlock Text="Belastning" Style="{StaticResource Sub}"/><TextBlock x:Name="GUtil" FontSize="18" FontWeight="SemiBold"/></StackPanel>
+          </UniformGrid>
+        </StackPanel>
+      </Border>
+
+      <!-- Nedbrud -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock x:Name="CrashBig" Text="…" FontSize="28" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,14,0"/>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock Text="💥  Nedbrud de seneste 14 dage" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="CrashSub" Style="{StaticResource Sub}" TextWrapping="Wrap"/>
+            </StackPanel>
+          </StackPanel>
+          <ItemsControl x:Name="CrashList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="26"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="90"/>
+                      <ColumnDefinition Width="100"/>
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="10" Height="10" Fill="{Binding DotBrush}" VerticalAlignment="Top" Margin="0,5,0,0" HorizontalAlignment="Left"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Title}" FontSize="14"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding Count}" HorizontalAlignment="Right"/>
+                    <TextBlock Grid.Column="3" Text="{Binding Last}" HorizontalAlignment="Right" Foreground="#9AA3B5"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Helbred -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,6">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="BtnHigh" Content="⚡  Strømplan: Høj ydelse" Click="High_Click"/>
+              <Button Content="Balanceret" Click="Bal_Click" Margin="0"/>
+            </StackPanel>
+            <TextBlock Text="💓  Helbred" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </DockPanel>
+          <ItemsControl x:Name="List">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="26"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="10" Height="10" Fill="{Binding DotBrush}" VerticalAlignment="Top" Margin="0,5,0,0" HorizontalAlignment="Left"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="14"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding Value}" FontSize="14" Margin="12,0,0,0"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
