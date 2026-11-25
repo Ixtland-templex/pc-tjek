@@ -1,0 +1,182 @@
+<UserControl x:Class="Opticon.Pages.ToolsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <TextBlock Text="Værktøjer" Style="{StaticResource H1}"/>
+      <TextBlock Text="Sikkerhedsnet, oprydning i Windows, programmer, batteri og netværk." Style="{StaticResource Sub}" Margin="0,4,0,18"/>
+
+      <!-- Gendannelsespunkt -->
+      <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Content="Åbn Systemgendannelse" Click="Rstrui_Click"/>
+            <Button x:Name="BtnRestore" Content="🛟  Lav gendannelsespunkt" Style="{StaticResource Primary}" Click="Restore_Click" Margin="0"/>
+          </StackPanel>
+          <StackPanel>
+            <TextBlock Text="🛟  Gendannelsespunkt" FontSize="15" FontWeight="SemiBold"/>
+            <TextBlock x:Name="RestoreSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Et sikkerhedsnet: går noget galt efter en ændring eller installation, kan Windows sættes tilbage hertil. Dine filer røres ikke."/>
+          </StackPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- Reklamer -->
+      <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,6">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+              <Button x:Name="BtnAdsUndo" Content="Sæt tilbage" Click="AdsUndo_Click" Visibility="Collapsed"/>
+              <Button x:Name="BtnAds" Content="🚫  Slå valgte fra" Style="{StaticResource Primary}" Click="Ads_Click" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="🚫  Reklamer og forslag i Windows" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="AdsSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Windows viser reklamer og installerer selv &quot;foreslåede&quot; apps. Slå det fra med ét klik. Kan altid sættes tilbage."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="AdsList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,7">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="32"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="13.5" TextWrapping="Wrap"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0,0,0">
+                      <TextBlock Text="{Binding State}" Foreground="#9AA3B5" HorizontalAlignment="Right"/>
+                      <TextBlock Text="{Binding Status}" Foreground="#4ADE80" HorizontalAlignment="Right"/>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Forudinstallerede apps -->
+      <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,6">
+            <Button x:Name="BtnBloat" DockPanel.Dock="Right" Content="🗑  Fjern valgte" Style="{StaticResource Primary}" Click="Bloat_Click" Margin="0" VerticalAlignment="Top"/>
+            <StackPanel>
+              <TextBlock Text="🗑  Forudinstallerede apps" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="BloatSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Apps, som fulgte med Windows, og som de fleste aldrig bruger. Fjernes kun for din bruger, og alle kan hentes igen gratis i Microsoft Store."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="BloatList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,7">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="32"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="13.5" TextWrapping="Wrap"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0,0,0">
+                      <TextBlock Text="{Binding State}" Foreground="#9AA3B5" HorizontalAlignment="Right"/>
+                      <TextBlock Text="{Binding Status}" Foreground="#4ADE80" HorizontalAlignment="Right"/>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Installér programmer -->
+      <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,6">
+            <Button x:Name="BtnInstall" DockPanel.Dock="Right" Content="⬇  Installér valgte" Style="{StaticResource Primary}" Click="Install_Click" Margin="0" VerticalAlignment="Top"/>
+            <StackPanel>
+              <TextBlock Text="⬇  Installér populære programmer" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="InstallSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Hentes direkte fra udgiveren via Microsofts winget, så du ikke risikerer falske download-sider."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="InstallList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,7">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="32"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="13.5" TextWrapping="Wrap"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="12,0,0,0">
+                      <TextBlock Text="{Binding State}" Foreground="#9AA3B5" HorizontalAlignment="Right"/>
+                      <TextBlock Text="{Binding Status}" Foreground="#4ADE80" HorizontalAlignment="Right"/>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Batteri -->
+      <Border x:Name="BatCard" Style="{StaticResource CardB}" Margin="0,0,0,14" Visibility="Collapsed">
+        <StackPanel>
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="📄  Fuld rapport" Click="BatReport_Click" Margin="0" VerticalAlignment="Center"/>
+            <TextBlock Text="🔋  Batteriets helbred" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </DockPanel>
+          <TextBlock x:Name="BatBig" FontSize="26" FontWeight="SemiBold" Margin="0,8,0,0"/>
+          <TextBlock x:Name="BatText" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+      </Border>
+
+      <!-- Netværk -->
+      <Border Style="{StaticResource CardB}">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,6">
+            <Button x:Name="BtnNet" DockPanel.Dock="Right" Content="📶  Test forbindelsen" Style="{StaticResource Primary}" Click="Net_Click" Margin="0" VerticalAlignment="Top"/>
+            <StackPanel>
+              <TextBlock Text="📶  Netværk til spil" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="NetSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Måler ping, udsving (jitter) og tabte pakker til din router og internettet. Tager ca. 15 sekunder."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="NetList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,7">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="24"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="10" Height="10" Fill="{Binding DotBrush}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="{Binding Target}" FontSize="13.5"/>
+                    <TextBlock Grid.Column="2" FontSize="13"><Run Text="{Binding Result, Mode=OneWay}"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Note, Mode=OneWay}" Foreground="#9AA3B5"/></TextBlock>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <TextBlock x:Name="NetAdvice" TextWrapping="Wrap" Foreground="#C3CAD6" Margin="0,8,0,0" LineHeight="20"/>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

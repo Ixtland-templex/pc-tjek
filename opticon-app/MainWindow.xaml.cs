@@ -23,6 +23,7 @@ namespace Opticon
             AboutData.Text = "Log og indstillinger: " + App.DataDir;
             SetupTray();
             ChkTray.IsChecked = Settings.Current.CloseToTray;
+            ChkShare.IsChecked = Settings.Current.ShareResults == true;
             SourceInitialized += (s, e) =>
             {
                 // Mørk titellinje, så den passer til resten af appen
@@ -42,6 +43,7 @@ namespace Opticon
                 else if (Array.IndexOf(args, "game") >= 0) NavGame.IsChecked = true;
                 else if (Array.IndexOf(args, "tweaks") >= 0) NavTweaks.IsChecked = true;
                 else if (Array.IndexOf(args, "modes") >= 0) NavModes.IsChecked = true;
+                else if (Array.IndexOf(args, "tools") >= 0) NavTools.IsChecked = true;
                 // Tilstande: rydder op efter et nedbrud og afslutter fokus, når tiden er gået (også uden Vagten)
                 var modeTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
                 modeTimer.Tick += async (s2, e2) => await Task.Run(() => Modes.Tick(false));
@@ -81,6 +83,7 @@ namespace Opticon
             PageUpdates.Visibility = Visibility.Collapsed;
             PageTweaks.Visibility = Visibility.Collapsed;
             PageModes.Visibility = Visibility.Collapsed;
+            PageTools.Visibility = Visibility.Collapsed;
             PageHealth.Visibility = Visibility.Collapsed;
             PageTimeline.Visibility = Visibility.Collapsed;
             var rb = (RadioButton)sender;
@@ -91,6 +94,7 @@ namespace Opticon
             else if (rb == NavUpdates) { PageUpdates.Visibility = Visibility.Visible; PageUpdates.OnShown(); }
             else if (rb == NavTweaks) { PageTweaks.Visibility = Visibility.Visible; PageTweaks.OnShown(); }
             else if (rb == NavModes) { PageModes.Visibility = Visibility.Visible; PageModes.OnShown(); }
+            else if (rb == NavTools) { PageTools.Visibility = Visibility.Visible; PageTools.OnShown(); }
             else if (rb == NavHealth) { PageHealth.Visibility = Visibility.Visible; PageHealth.OnShown(); }
             else if (rb == NavTimeline) { PageTimeline.Visibility = Visibility.Visible; PageTimeline.OnShown(); }
             else if (rb == NavAbout) PageAbout.Visibility = Visibility.Visible;
@@ -162,6 +166,11 @@ namespace Opticon
             if (tray != null) { tray.Visible = false; tray.Dispose(); }
             base.OnClosed(e);
             Application.Current.Shutdown();
+        }
+
+        void Share_Changed(object sender, RoutedEventArgs e)
+        {
+            Settings.Current.ShareResults = ChkShare.IsChecked == true; Settings.Save();
         }
 
         void Tray_Changed(object sender, RoutedEventArgs e)

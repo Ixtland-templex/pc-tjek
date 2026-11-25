@@ -43,8 +43,30 @@ namespace Opticon.Pages
             catch (Exception ex) { App.Log("Sammenlign: " + ex.Message); CmpText.Text = "Kunne ikke hente andres resultater lige nu."; }
         }
 
-        void Share_Click(object sender, RoutedEventArgs e)
+        /// <summary>Første gang: spørg om resultater må deles. Derefter deles de automatisk (kan slås fra under Om Opticon).</summary>
+        async Task AskAndShare(BenchResult r)
         {
+            if (Settings.Current.ShareResults == null)
+            {
+                var ans = MessageBox.Show("Må Opticon dele dine benchmark-resultater anonymt?\n\nSå kan du (og andre) se, om pc'en yder som andre med samme processor og grafikkort.\n\nDer deles kun: processor, grafikkort, RAM, diskmodel, bærbar/stationær og testtallene. Ingen navne, filer eller IP-adresser.\n\nDu bliver ikke spurgt igen. Det kan altid ændres under Om Opticon.", "Del resultater?", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                Settings.Current.ShareResults = ans == MessageBoxResult.Yes; Settings.Save();
+            }
+            if (Settings.Current.ShareResults != true) return;
+            var err = await Task.Run(() => Community.Submit(r));
+            if (err == null) BenchSub.Text += " · 👥 Delt anonymt";
+            else if (err != "nourl") App.Log("Automatisk deling fejlede: " + err);
+        }
+
+        async void Share_Click(object sender, RoutedEventArgs e)
+        {
+            if (shown != null && shown.Score > 0 && !shown.OnBattery && !string.IsNullOrEmpty(await Task.Run(() => Community.Url)))
+            {
+                var me = shown;
+                var err = await Task.Run(() => Community.Submit(me));
+                MessageBox.Show(err == null ? "✓ Dit resultat er delt anonymt. Tak!" : "Det lykkedes ikke at dele: " + err, "Del resultat", MessageBoxButton.OK, err == null ? MessageBoxImage.Information : MessageBoxImage.Warning);
+                if (err == null) LoadCompare();
+                return;
+            }
             if (shown == null || shown.Score <= 0) { MessageBox.Show("Kun fulde tests kan deles. Kør benchmarken, så alle dele bliver målt.", "Del resultat"); return; }
             if (shown.OnBattery) { MessageBox.Show("Dette resultat er målt på batteri og kan ikke sammenlignes retfærdigt. Sæt opladeren i, kør testen igen, og del det.", "Del resultat", MessageBoxButton.OK, MessageBoxImage.Warning); return; }
             if (MessageBox.Show("Dit resultat deles offentligt i Opticons GitHub-projekt, så andre med samme hardware kan sammenligne.\n\nDet indeholder kun: processor, grafikkort, RAM, diskmodel, bærbar/stationær og testtallene. Ingen navne, filer eller andet.\n\nGitHub åbner med et færdigt opslag. Du skal være logget ind og trykke \"Create\". Resultatet kommer med i Opticon få minutter efter.\n\nFortsæt?", "Del mit resultat", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
@@ -208,6 +230,7 @@ namespace Opticon.Pages
                 App.Log("Benchmark: " + (r.Score > 0 ? r.Score + " point" : "delvis") + (r.GpuNote != null ? " · " + r.GpuNote : ""));
                 Show(r, prev, null);
                 shown = r;
+                if (full && r.Score > 0 && !r.OnBattery) await AskAndShare(r);
                 LoadCompare();
             }
             catch (Exception ex)

@@ -29,6 +29,7 @@
           <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" GroupName="nav" Content="🧹  Oprydning" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavUpdates" Style="{StaticResource Nav}" GroupName="nav" Content="📦  Opdateringer" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavGame" Style="{StaticResource Nav}" GroupName="nav" Content="🎮  Spil og grafik" Checked="Nav_Checked"/>
+          <RadioButton x:Name="NavTools" Style="{StaticResource Nav}" GroupName="nav" Content="🧰  Værktøjer" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavModes" Style="{StaticResource Nav}" GroupName="nav" Content="🎯  Tilstande" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavHealth" Style="{StaticResource Nav}" GroupName="nav" Content="💓  Ydelse og helbred" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavTimeline" Style="{StaticResource Nav}" GroupName="nav" Content="🕒  Hændelsesforløb" Checked="Nav_Checked"/>
@@ -87,6 +88,7 @@
       <pages:UpdatesPage x:Name="PageUpdates" Visibility="Collapsed"/>
       <pages:TweaksPage x:Name="PageTweaks" Visibility="Collapsed"/>
       <pages:ModesPage x:Name="PageModes" Visibility="Collapsed"/>
+      <pages:ToolsPage x:Name="PageTools" Visibility="Collapsed"/>
       <pages:HealthPage x:Name="PageHealth" Visibility="Collapsed"/>
       <pages:TimelinePage x:Name="PageTimeline" Visibility="Collapsed"/>
 
@@ -106,6 +108,7 @@
             <TextBlock x:Name="AboutVersion" FontSize="16" FontWeight="SemiBold"/>
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" Text="Opticon er gratis og open source. Koden ligger åbent på GitHub, så alle kan se præcis, hvad programmet gør."/>
             <TextBlock Style="{StaticResource Sub}" Margin="0,8,0,0" x:Name="AboutData"/>
+            <CheckBox x:Name="ChkShare" Content="Del mine benchmark-resultater anonymt, så jeg kan sammenligne med andre" Margin="0,14,0,0" Checked="Share_Changed" Unchecked="Share_Changed"/>
             <CheckBox x:Name="ChkTray" Content="Når jeg lukker vinduet, skal Opticon blive ved uret (så Vagt, tilstande og opdateringer kører videre)" Margin="0,14,0,0" Checked="Tray_Changed" Unchecked="Tray_Changed"/>
             <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
               <Button x:Name="BtnCheckUpdate" Content="Søg efter opdatering" Click="CheckUpdate_Click"/>
