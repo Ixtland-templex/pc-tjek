@@ -10,7 +10,8 @@ namespace Opticon.Pages
 {
     public partial class SecurityPage : UserControl
     {
-        bool loaded, busy;
+        bool loaded, busy, scanning;
+        ScanResult lastScan;
 
         public SecurityPage()
         {
@@ -81,6 +82,74 @@ namespace Opticon.Pages
             var it = (SecItem)((Button)sender).Tag;
             try { Process.Start(new ProcessStartInfo(it.Uri) { UseShellExecute = true }); }
             catch (Exception ex) { App.Log("Åbn " + it.Uri + ": " + ex.Message); }
+        }
+
+        async void Scan_Click(object sender, RoutedEventArgs e)
+        {
+            if (scanning) return;
+            scanning = true; BtnScan.IsEnabled = false;
+            ScanBar.Visibility = Visibility.Visible; ScanBar.Value = 0;
+            ScanSum.Text = "Scanner…";
+            try
+            {
+                var prog = new Progress<Tuple<double, string>>(p => { ScanBar.Value = p.Item1; ScanSum.Text = p.Item2; });
+                IProgress<Tuple<double, string>> ip = prog;
+                lastScan = await Task.Run(() => MalwareScan.Run((pc, t) => ip.Report(Tuple.Create(pc, t))));
+                int crit = lastScan.Finds.Count(f => f.Level >= 4), high = lastScan.Finds.Count(f => f.Level == 3), mid = lastScan.Finds.Count(f => f.Level == 2);
+                ScanSum.Text = (crit > 0 ? "⛔ " + crit + " kritiske fund. Se dem herunder." : high > 0 ? "⚠ " + high + " fund bør tjekkes." : mid > 0 ? "Ingen tegn på malware. " + mid + " ting er værd at kigge på." : "✓ Ingen tegn på malware fundet.")
+                    + " " + lastScan.Checked + " ting tjekket." + (lastScan.Elevated ? "" : " Kør som administrator for at se Defenders fund og undtagelser.");
+                App.Log("Scan: " + crit + " kritiske, " + high + " høje, " + mid + " mellem, " + lastScan.Checked + " tjekket");
+                ChkAll.Visibility = Visibility.Visible;
+                ShowScan();
+            }
+            catch (Exception ex) { App.Log("Scan fejlede: " + ex); ScanSum.Text = "Scanningen fejlede: " + ex.Message; }
+            finally { scanning = false; BtnScan.IsEnabled = true; ScanBar.Visibility = Visibility.Collapsed; }
+        }
+
+        void ChkAll_Changed(object sender, RoutedEventArgs e) { ShowScan(); }
+
+        void ShowScan()
+        {
+            if (lastScan == null) return;
+            ScanList.ItemsSource = ChkAll.IsChecked == true ? lastScan.Finds : lastScan.Finds.Where(f => f.Level >= 2).ToList();
+        }
+
+        async void Quick_Click(object sender, RoutedEventArgs e)
+        {
+            BtnQuick.IsEnabled = false;
+            var old = ScanSum.Text;
+            ScanSum.Text = "Microsoft Defender scanner de steder, malware typisk gemmer sig. Det tager normalt 1-5 minutter…";
+            try
+            {
+                var r = await Task.Run(() => MalwareScan.DefenderQuickScan());
+                ScanSum.Text = r.Item2;
+                MessageBox.Show(r.Item2, "Defender-hurtigscanning", MessageBoxButton.OK, r.Item1 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+            }
+            catch (Exception ex) { ScanSum.Text = old; MessageBox.Show("Scanningen kunne ikke starte: " + ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
+            BtnQuick.IsEnabled = true;
+        }
+
+        void ShowFile_Click(object sender, RoutedEventArgs e)
+        {
+            var f = (ScanFind)((Button)sender).Tag;
+            try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + f.FilePath + "\"") { UseShellExecute = true }); } catch { }
+        }
+
+        async void VirusTotal_Click(object sender, RoutedEventArgs e)
+        {
+            var f = (ScanFind)((Button)sender).Tag;
+            try
+            {
+                // Kun filens fingeraftryk (SHA-256) sendes med i adressen, aldrig selve filen
+                string hash = await Task.Run(() =>
+                {
+                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                    using (var st = System.IO.File.OpenRead(f.FilePath))
+                        return BitConverter.ToString(sha.ComputeHash(st)).Replace("-", "").ToLowerInvariant();
+                });
+                Process.Start(new ProcessStartInfo("https://www.virustotal.com/gui/file/" + hash) { UseShellExecute = true });
+            }
+            catch (Exception ex) { MessageBox.Show("Kunne ikke læse filen: " + ex.Message, "Opticon", MessageBoxButton.OK, MessageBoxImage.Warning); }
         }
     }
 }
