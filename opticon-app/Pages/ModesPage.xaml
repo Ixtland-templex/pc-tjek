@@ -1,0 +1,68 @@
+<UserControl x:Class="Opticon.Pages.ModesPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <TextBlock Text="Tilstande" Style="{StaticResource H1}"/>
+      <TextBlock Text="Spil uden forstyrrelser, eller arbejd i fred. Alt sættes tilbage bagefter, også hvis pc'en går ned." Style="{StaticResource Sub}" Margin="0,4,0,18" TextWrapping="Wrap"/>
+
+      <!-- Aktiv tilstand -->
+      <Border x:Name="ActiveCard" Style="{StaticResource CardB}" Margin="0,0,0,14" Background="#1B1630" BorderBrush="#3B3366" Visibility="Collapsed">
+        <DockPanel>
+          <Button DockPanel.Dock="Right" Content="⏹  Afslut nu" Style="{StaticResource Primary}" Click="Stop_Click" Margin="0" VerticalAlignment="Center"/>
+          <StackPanel>
+            <TextBlock x:Name="ActiveTitle" FontSize="16" FontWeight="SemiBold"/>
+            <TextBlock x:Name="ActiveSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+          </StackPanel>
+        </DockPanel>
+      </Border>
+
+      <!-- Spil -->
+      <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,8">
+            <Button DockPanel.Dock="Right" Content="➕  Tilføj spil" Style="{StaticResource Primary}" Click="Add_Click" Margin="0" VerticalAlignment="Top"/>
+            <StackPanel>
+              <TextBlock Text="🎮  Spil-tilstand" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="GameSub" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,0" Text="Når et af dine spil starter, lukker Opticon de programmer, du har valgt (fx browser, Teams eller OneDrive), og slår beskeder fra. Når spillet lukkes, startes de igen. Programmer lukkes pænt, som når du trykker på krydset, så du mister intet."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="GameList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,9">
+                  <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                      <Button Content="▶  Start nu" Tag="{Binding}" Click="StartGame_Click"/>
+                      <Button Content="Fjern" Tag="{Binding}" Click="Remove_Click" Margin="0"/>
+                    </StackPanel>
+                    <StackPanel>
+                      <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Exe, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text=".exe" Foreground="#9AA3B5"/></TextBlock>
+                      <TextBlock Text="{Binding CloseText}" Style="{StaticResource Sub}" FontSize="12"/>
+                    </StackPanel>
+                  </DockPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Fokus -->
+      <Border Style="{StaticResource CardB}">
+        <StackPanel>
+          <TextBlock Text="🎯  Fokus-tilstand" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,2,0,12" Text="Slår beskeder fra og blokerer de sider, du vælger, i en periode. Godt til lektier og eksamenslæsning. Blokering af sider kræver administrator."/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="Varighed:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <Button x:Name="Dur" Content="⏱  45 min" Click="Dur_Click"/>
+            <CheckBox x:Name="ChkMute" Content="Slå beskeder fra" IsChecked="True" VerticalAlignment="Center" Margin="10,0,0,0"/>
+          </StackPanel>
+          <TextBlock Text="Blokér disse sider (adskil med komma eller mellemrum):" Style="{StaticResource Sub}" Margin="0,0,0,4"/>
+          <TextBox x:Name="Sites" Text="youtube.com, tiktok.com, instagram.com, facebook.com, reddit.com" Padding="8,6" Background="#0E1118" Foreground="#E7E9EE" BorderBrush="#2A3142" CaretBrush="#E7E9EE"/>
+          <Button Content="▶  Start fokus" Style="{StaticResource Primary}" Click="Focus_Click" HorizontalAlignment="Left" Margin="0,12,0,0"/>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

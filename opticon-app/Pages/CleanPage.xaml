@@ -1,0 +1,130 @@
+<UserControl x:Class="Opticon.Pages.CleanPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <DockPanel>
+        <Button x:Name="BtnAdmin" DockPanel.Dock="Right" VerticalAlignment="Center" Content="🛡  Kør som administrator" Click="Admin_Click" Margin="0"/>
+        <StackPanel>
+          <TextBlock Text="Oprydning" Style="{StaticResource H1}"/>
+          <TextBlock Text="Fjern filer, som Windows og programmerne ikke har brug for, og se hvad der fylder." Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+        </StackPanel>
+      </DockPanel>
+
+      <!-- Ryd op -->
+      <Border Style="{StaticResource CardB}" Margin="0,18,0,14">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+              <Button x:Name="BtnMeasure" Content="Beregn størrelser" Click="Measure_Click"/>
+              <Button x:Name="BtnClean" Content="🧹  Ryd op" Style="{StaticResource Primary}" Click="Clean_Click" IsEnabled="False" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="🧹  Ryd op" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="CleanSum" Style="{StaticResource Sub}" Margin="0,2,0,0" Text="Tryk på &quot;Beregn størrelser&quot; for at se, hvor meget der kan ryddes."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="CleanList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,10">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="36"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="110"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" Checked="Sel_Changed" Unchecked="Sel_Changed"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock Text="{Binding Name}" FontSize="14"/>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}"/>
+                      <TextBlock Text="{Binding AdminText}" Foreground="#F5B83D" FontSize="12"/>
+                      <TextBlock Text="{Binding Status}" Foreground="#4ADE80" FontSize="12"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding SizeText}" FontSize="14" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Hvad fylder -->
+      <Border Style="{StaticResource CardB}">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,10">
+            <Button x:Name="BtnSpace" DockPanel.Dock="Right" Content="📊  Mål nu" Click="Space_Click" Margin="0" VerticalAlignment="Center"/>
+            <StackPanel>
+              <TextBlock Text="📊  Hvad fylder?" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="SpaceSum" Style="{StaticResource Sub}" Margin="0,2,0,0" Text="Måler dine mapper og spil, og viser hvad der er vokset siden sidst."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="SpaceList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="280"/>
+                      <ColumnDefinition Width="90"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                      <TextBlock Text="{Binding Label}" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding ChangeText}" Style="{StaticResource Sub}" FontSize="12"/>
+                    </StackPanel>
+                    <Border Grid.Column="1" Height="6" CornerRadius="3" Background="#8B5CF6" HorizontalAlignment="Left" Width="{Binding BarWidth}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    <Button Grid.Column="3" Content="Åbn" Tag="{Binding Path}" Click="OpenFolder_Click" Margin="12,0,0,0" Padding="10,4"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Filer -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="BtnFiles" Content="📁  Find filer" Click="Files_Click"/>
+              <Button x:Name="BtnFilesDel" Content="🗑  Læg valgte i papirkurven" Style="{StaticResource Primary}" Click="FilesDel_Click" IsEnabled="False" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="📁  Dubletter, gamle installere og store filer" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="FilesSum" Style="{StaticResource Sub}" Margin="0,2,0,0" Text="Gennemgår Overførsler, Skrivebord, Dokumenter, Billeder, Videoer og Musik. Filer lægges i papirkurven, så du kan fortryde."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="FilesList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="36"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="90"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" Checked="FileSel_Changed" Unchecked="FileSel_Changed"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock FontSize="13" TextTrimming="CharacterEllipsis"><Run Text="{Binding Group, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Name, Mode=OneWay}"/></TextBlock>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Style="{StaticResource Sub}" FontSize="11" TextTrimming="CharacterEllipsis"><Run Text="{Binding Folder, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding DateText, Mode=OneWay}"/></TextBlock>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    <Button Grid.Column="3" Content="Vis" Tag="{Binding FullPath}" Click="ShowFile_Click" Margin="12,0,0,0" Padding="10,4"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
