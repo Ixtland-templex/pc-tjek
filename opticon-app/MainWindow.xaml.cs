@@ -21,6 +21,8 @@ namespace Opticon
             VersionText.Text = "Version " + ver + " (preview)" + (Services.Admin.IsElevated ? "\nKører som administrator" : "");
             AboutVersion.Text = "Opticon " + ver + " (preview)";
             AboutData.Text = "Log og indstillinger: " + App.DataDir;
+            SetupTray();
+            ChkTray.IsChecked = Settings.Current.CloseToTray;
             SourceInitialized += (s, e) =>
             {
                 // Mørk titellinje, så den passer til resten af appen
@@ -108,6 +110,63 @@ namespace Opticon
         void OpenGitHub_Click(object sender, RoutedEventArgs e)
         {
             try { Process.Start(new ProcessStartInfo(RepoUrl) { UseShellExecute = true }); } catch { }
+        }
+
+        // ---------- Ikon ved uret ----------
+        System.Windows.Forms.NotifyIcon tray;
+
+        void SetupTray()
+        {
+            try
+            {
+                tray = new System.Windows.Forms.NotifyIcon { Text = "Opticon", Visible = true };
+                try { tray.Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath); } catch { tray.Icon = System.Drawing.SystemIcons.Shield; }
+                var menu = new System.Windows.Forms.ContextMenuStrip();
+                menu.Items.Add("Åbn Opticon", null, (s, e) => ShowFromTray());
+                menu.Items.Add("Scan pc'en", null, (s, e) => { ShowFromTray(); NavSecurity.IsChecked = true; });
+                menu.Items.Add("Ryd op", null, (s, e) => { ShowFromTray(); NavClean.IsChecked = true; });
+                menu.Items.Add("Tilstande", null, (s, e) => { ShowFromTray(); NavModes.IsChecked = true; });
+                menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+                menu.Items.Add("Afslut Opticon", null, (s, e) => { App.Exiting = true; Application.Current.Shutdown(); });
+                tray.ContextMenuStrip = menu;
+                tray.MouseClick += (s, e) => { if (e.Button == System.Windows.Forms.MouseButtons.Left) ShowFromTray(); };
+            }
+            catch (Exception e) { App.Log("Ikon ved uret: " + e.Message); }
+        }
+
+        public void ShowFromTray()
+        {
+            Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Activate(); Topmost = true; Topmost = false; Focus();
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            if (!App.Exiting && Settings.Current.CloseToTray && tray != null)
+            {
+                e.Cancel = true;
+                Hide();
+                if (!Settings.Current.TrayTipShown)
+                {
+                    tray.ShowBalloonTip(5000, "Opticon kører videre", "Opticon ligger nu som et ikon ved uret. Klik på det for at åbne, eller højreklik for at afslutte.", System.Windows.Forms.ToolTipIcon.Info);
+                    Settings.Current.TrayTipShown = true; Settings.Save();
+                }
+                return;
+            }
+            base.OnClosing(e);
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            if (tray != null) { tray.Visible = false; tray.Dispose(); }
+            base.OnClosed(e);
+            Application.Current.Shutdown();
+        }
+
+        void Tray_Changed(object sender, RoutedEventArgs e)
+        {
+            Settings.Current.CloseToTray = ChkTray.IsChecked == true; Settings.Save();
         }
 
         UpdateInfo pending;
