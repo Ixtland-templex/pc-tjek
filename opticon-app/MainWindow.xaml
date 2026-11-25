@@ -24,6 +24,7 @@
         <TextBlock DockPanel.Dock="Bottom" x:Name="VersionText" Foreground="{StaticResource Muted}" FontSize="11" Margin="8,0" TextWrapping="Wrap"/>
         <StackPanel>
           <RadioButton x:Name="NavOverview" Style="{StaticResource Nav}" GroupName="nav" Content="🏠  Overblik" IsChecked="True" Checked="Nav_Checked"/>
+          <RadioButton x:Name="NavTweaks" Style="{StaticResource Nav}" GroupName="nav" Content="⚡  Optimering" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavSecurity" Style="{StaticResource Nav}" GroupName="nav" Content="🛡  Sikkerhed" Tag="Sikkerhed" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" GroupName="nav" Content="🧹  Oprydning" Checked="Nav_Checked"/>
           <RadioButton x:Name="NavUpdates" Style="{StaticResource Nav}" GroupName="nav" Content="📦  Opdateringer" Checked="Nav_Checked"/>
@@ -86,6 +87,7 @@
       <pages:CleanPage x:Name="PageClean" Visibility="Collapsed"/>
       <pages:GamePage x:Name="PageGame" Visibility="Collapsed"/>
       <pages:UpdatesPage x:Name="PageUpdates" Visibility="Collapsed"/>
+      <pages:TweaksPage x:Name="PageTweaks" Visibility="Collapsed"/>
 
       <!-- Kommer snart -->
       <StackPanel x:Name="PageSoon" Visibility="Collapsed">
