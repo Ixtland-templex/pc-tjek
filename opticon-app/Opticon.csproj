@@ -10,7 +10,7 @@
     <RootNamespace>Opticon</RootNamespace>
     <ApplicationIcon>Opticon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.9.1</Version>
+    <Version>0.9.2</Version>
     <Product>Opticon</Product>
     <Company>Opticon</Company>
     <Description>Opticon - sikkerhed, oprydning og optimering af din pc</Description>
