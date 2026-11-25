@@ -85,6 +85,46 @@
           </ItemsControl>
         </StackPanel>
       </Border>
+
+      <!-- Filer -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="BtnFiles" Content="📁  Find filer" Click="Files_Click"/>
+              <Button x:Name="BtnFilesDel" Content="🗑  Læg valgte i papirkurven" Style="{StaticResource Primary}" Click="FilesDel_Click" IsEnabled="False" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="📁  Dubletter, gamle installere og store filer" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="FilesSum" Style="{StaticResource Sub}" Margin="0,2,0,0" Text="Gennemgår Overførsler, Skrivebord, Dokumenter, Billeder, Videoer og Musik. Filer lægges i papirkurven, så du kan fortryde."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="FilesList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="36"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="90"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" Checked="FileSel_Changed" Unchecked="FileSel_Changed"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock FontSize="13" TextTrimming="CharacterEllipsis"><Run Text="{Binding Group, Mode=OneWay}" Foreground="#9AA3B5"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Name, Mode=OneWay}"/></TextBlock>
+                      <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Style="{StaticResource Sub}" FontSize="11" TextTrimming="CharacterEllipsis"><Run Text="{Binding Folder, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding DateText, Mode=OneWay}"/></TextBlock>
+                    </StackPanel>
+                    <TextBlock Grid.Column="2" Text="{Binding SizeText}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    <Button Grid.Column="3" Content="Vis" Tag="{Binding FullPath}" Click="ShowFile_Click" Margin="12,0,0,0" Padding="10,4"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
     </StackPanel>
   </ScrollViewer>
 </UserControl>

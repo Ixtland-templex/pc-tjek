@@ -11,7 +11,7 @@ using Microsoft.Web.WebView2.Core;
 
 namespace Opticon.Views
 {
-    public class GpuStep { public string Res; public string Label; public double Fps; public double P99; }
+    public class GpuStep { public string Res; public string Label; public double Fps; public double P99; public string PowerMode; public double? Watts; public bool SwitchFailed; }
 
     public class GpuTestResult
     {
@@ -32,7 +32,9 @@ namespace Opticon.Views
         int cur = -1;
         DateTime stepStart, firstData, lastMsg = DateTime.Now;
         double sumF, sumMs; readonly List<double> p99s = new List<double>();
-        bool ready, finished;
+        bool ready, finished, switching;
+        readonly List<double> watts = new List<double>();
+        readonly bool battery = Opticon.Services.PowerMode.OnBattery();
 
         public GpuTestWindow(IEnumerable<GpuStep> steps)
         {
@@ -89,6 +91,7 @@ namespace Opticon.Views
                     if (cur < 0 || cur >= steps.Count) break;
                     var res = m.GetProperty("w").GetInt32() + "x" + m.GetProperty("h").GetInt32();
                     if (res != steps[cur].Res) break;   // gammel måling fra forrige opløsning
+                    if (switching || (steps[cur].PowerMode != null && (DateTime.Now - stepStart).TotalSeconds < 3)) break;   // lige efter skift af strømtilstand
                     if (firstData == default(DateTime)) firstData = DateTime.Now;
                     sumF += m.GetProperty("f").GetDouble(); sumMs += m.GetProperty("ms").GetDouble();
                     p99s.Add(m.GetProperty("p99").GetDouble());
@@ -103,12 +106,26 @@ namespace Opticon.Views
                 steps[cur].Fps = Math.Round(1000 * sumF / sumMs);
                 var s = p99s.OrderBy(x => x).ToList();
                 steps[cur].P99 = s.Count > 0 ? s[s.Count / 2] : 0;
+                if (watts.Count > 0) steps[cur].Watts = Math.Round(watts.Average(), 1);
                 result.Steps.Add(steps[cur]);
                 App.Log("Grafiktest " + steps[cur].Res + ": " + steps[cur].Fps + " fps");
             }
             cur++;
-            sumF = 0; sumMs = 0; p99s.Clear(); firstData = default(DateTime); stepStart = DateTime.Now;
+            sumF = 0; sumMs = 0; p99s.Clear(); lock (watts) watts.Clear(); firstData = default(DateTime); stepStart = DateTime.Now;
             if (cur >= steps.Count) { Finish(); return; }
+            var pm = steps[cur].PowerMode;
+            if (pm != null)
+            {
+                switching = true;
+                var step = steps[cur];
+                Task.Run(() => Opticon.Services.PowerMode.Set(pm)).ContinueWith(t =>
+                {
+                    step.SwitchFailed = !t.Result;
+                    App.Log("Strømtest: " + Opticon.Services.PowerMode.Name(pm) + (t.Result ? " slået til" : " kunne ikke slås til"));
+                    switching = false; stepStart = DateTime.Now; lastMsg = DateTime.Now;
+                    Send();
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+            }
             Send();
         }
 
@@ -119,7 +136,7 @@ namespace Opticon.Views
             for (int i = Math.Max(0, cur); i < steps.Count; i++) remain += StepSec + 3;
             if (cur >= 0 && cur < steps.Count) remain -= Math.Min(StepSec + 3, (DateTime.Now - stepStart).TotalSeconds);
             var st = cur >= 0 && cur < steps.Count
-                ? new Dictionary<string, object> { { "Res", steps[cur].Res }, { "Label", "Trin " + (cur + 1) + " af " + steps.Count + " · " + steps[cur].Label }, { "Remain", (int)Math.Max(0, remain) } }
+                ? new Dictionary<string, object> { { "Res", steps[cur].Res }, { "Label", "Trin " + (cur + 1) + " af " + steps.Count + " · " + (switching ? "skifter strømtilstand…" : steps[cur].Label) }, { "Remain", (int)Math.Max(0, remain) } }
                 : new Dictionary<string, object> { { "Done", true } };
             try { Web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(st)); } catch { }
         }
@@ -128,11 +145,24 @@ namespace Opticon.Views
         {
             if (finished) return;
             if ((DateTime.Now - lastMsg).TotalSeconds > 20) { result.Error = "Grafiktesten holdt op med at svare."; Finish(); return; }
-            if (!ready) return;
+            if (!ready || switching) return;
             Send();
+            SampleWatts();
             bool enough = firstData != default(DateTime) && (DateTime.Now - firstData).TotalSeconds >= StepSec;
             bool timeout = (DateTime.Now - stepStart).TotalSeconds > StepTimeout;
             if (enough || timeout) { if (timeout && !enough) App.Log("Grafiktest: trin " + (cur >= 0 && cur < steps.Count ? steps[cur].Res : "?") + " nåede ikke at måle færdigt"); NextStep(); }
+        }
+
+        bool sampling;
+        void SampleWatts()
+        {
+            if (sampling || cur < 0 || cur >= steps.Count || (DateTime.Now - stepStart).TotalSeconds < 3) return;
+            sampling = true;
+            Task.Run(() => Opticon.Services.PowerMode.Watts(battery)).ContinueWith(t =>
+            {
+                sampling = false;
+                if (t.Status == TaskStatus.RanToCompletion && t.Result.HasValue && !switching) lock (watts) watts.Add(t.Result.Value);
+            });
         }
 
         void Finish()

@@ -70,6 +70,47 @@ namespace Opticon.Services
             return null;
         }
 
+        /// <summary>
+        /// Skifter strømtilstand med Windows' eget powercfg i en separat proces (det direkte Windows-kald fik
+        /// den gamle app til at gå ned på en Snapdragon-pc). Returnerer true, hvis skiftet blev bekræftet.
+        /// </summary>
+        public static bool Set(string guid)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "powercfg.exe"), "/overlaysetactive " + guid) { UseShellExecute = false, CreateNoWindow = true };
+                using (var p = System.Diagnostics.Process.Start(psi)) { if (!p.WaitForExit(6000)) { try { p.Kill(); } catch { } } }
+                for (int i = 0; i < 6; i++) { System.Threading.Thread.Sleep(200); if (string.Equals(Current(), guid, StringComparison.OrdinalIgnoreCase)) return true; }
+            }
+            catch (Exception e) { App.Log("Skift strømtilstand: " + e.Message); }
+            return false;
+        }
+
+        /// <summary>Strømforbrug lige nu i watt: batteriets afladning (bærbar uden oplader) eller NVIDIA-kortets forbrug. Null, hvis det ikke kan måles.</summary>
+        public static double? Watts(bool battery)
+        {
+            try
+            {
+                if (battery)
+                {
+                    var b = Wmi.First(@"root\wmi", "SELECT DischargeRate, PowerOnline FROM BatteryStatus");
+                    if (b != null && !Convert.ToBoolean(Wmi.Prop(b, "PowerOnline") ?? true)) { var mw = Convert.ToDouble(Wmi.Prop(b, "DischargeRate") ?? 0); if (mw > 0) return Math.Round(mw / 1000, 1); }
+                    return null;
+                }
+                var smi = System.IO.Path.Combine(Environment.SystemDirectory, "nvidia-smi.exe");
+                if (!System.IO.File.Exists(smi)) return null;
+                var psi = new System.Diagnostics.ProcessStartInfo(smi, "--query-gpu=power.draw --format=csv,noheader,nounits") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                using (var p = System.Diagnostics.Process.Start(psi))
+                {
+                    var o = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(3000)) { try { p.Kill(); } catch { } return null; }
+                    double w; if (double.TryParse(o.Split('\n')[0].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out w)) return Math.Round(w, 1);
+                }
+            }
+            catch { }
+            return null;
+        }
+
         public static string Name(string g)
         {
             string n; return g != null && Names.TryGetValue(g, out n) ? n : "Ukendt";

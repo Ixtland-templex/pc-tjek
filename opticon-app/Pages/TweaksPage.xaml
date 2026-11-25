@@ -1,0 +1,80 @@
+<UserControl x:Class="Opticon.Pages.TweaksPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <StackPanel>
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Content="↻  Tjek igen" Click="Refresh_Click" Margin="0" VerticalAlignment="Center"/>
+        <StackPanel>
+          <TextBlock Text="Optimering" Style="{StaticResource H1}"/>
+          <TextBlock x:Name="Sum" Text="Gratis ydelse, der ofte bliver glemt. Intet ændres, uden at du selv gør det." Style="{StaticResource Sub}" Margin="0,4,0,0"/>
+        </StackPanel>
+      </DockPanel>
+
+      <ItemsControl x:Name="Cards" Margin="0,18,0,0">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <Border Style="{StaticResource CardB}" Margin="0,0,0,14">
+              <StackPanel>
+                <DockPanel>
+                  <Border DockPanel.Dock="Right" Background="{Binding BadgeBack}" CornerRadius="8" Padding="10,4" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Badge}" Foreground="{Binding BadgeBrush}" FontSize="12" FontWeight="SemiBold"/>
+                  </Border>
+                  <TextBlock FontSize="15" FontWeight="SemiBold"><Run Text="{Binding Icon, Mode=OneWay}"/><Run Text="  "/><Run Text="{Binding Title, Mode=OneWay}"/></TextBlock>
+                </DockPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                  <TextBlock Text="{Binding Now}" FontSize="20" FontWeight="SemiBold"/>
+                  <TextBlock Text="   →   " FontSize="20" Foreground="#6B7488" Visibility="{Binding CanVis}"/>
+                  <TextBlock Text="{Binding Can}" FontSize="20" FontWeight="SemiBold" Foreground="#F6C344" Visibility="{Binding CanVis}"/>
+                </StackPanel>
+                <TextBlock Text="{Binding Text}" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,8,0,0" FontSize="13"/>
+                <Expander Visibility="{Binding StepsVis}" Margin="0,8,0,0" Foreground="#C3CAD6">
+                  <Expander.Header><TextBlock Text="📖  Sådan gør du" Foreground="#C3CAD6"/></Expander.Header>
+                  <TextBlock Text="{Binding Steps}" TextWrapping="Wrap" Foreground="#C3CAD6" Margin="0,6,0,0" LineHeight="20"/>
+                </Expander>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                  <Button Content="{Binding Action}" Tag="{Binding ActionId}" Click="Action_Click" Visibility="{Binding ActionVis}"/>
+                  <Button Content="{Binding Action2}" Tag="{Binding Action2Id}" Click="Action_Click" Visibility="{Binding Action2Vis}"/>
+                </StackPanel>
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <!-- Opstart -->
+      <Border Style="{StaticResource CardB}">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,8">
+            <Button x:Name="BtnFast" DockPanel.Dock="Right" Content="🚀  Gør opstarten hurtigere" Style="{StaticResource Primary}" Click="Fast_Click" Margin="0" VerticalAlignment="Center"/>
+            <StackPanel>
+              <TextBlock Text="🚀  Programmer, der starter med Windows" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="StartSum" Style="{StaticResource Sub}" Margin="0,2,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="StartList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="26"/>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Width="10" Height="10" Fill="{Binding DotBrush}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                    <StackPanel Grid.Column="1">
+                      <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding State, Mode=OneWay}" Foreground="#9AA3B5"/></TextBlock>
+                      <TextBlock Style="{StaticResource Sub}" FontSize="12"><Run Text="{Binding Tip, Mode=OneWay}"/><Run Text="  ·  "/><Run Text="{Binding Publisher, Mode=OneWay}"/><Run Text="  ·  "/><Run Text="{Binding Source, Mode=OneWay}"/></TextBlock>
+                    </StackPanel>
+                    <Button Grid.Column="2" Content="{Binding ToggleText}" Tag="{Binding}" Click="Toggle_Click" Margin="12,0,0,0" VerticalAlignment="Center"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

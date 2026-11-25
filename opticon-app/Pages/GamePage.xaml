@@ -33,6 +33,39 @@
             <Border Style="{StaticResource Tile}" Width="200"><StackPanel><TextBlock Text="Disk (C:)" Style="{StaticResource Sub}"/><TextBlock x:Name="TDisk" FontSize="18" FontWeight="SemiBold"/><TextBlock x:Name="TDiskSub" Style="{StaticResource Sub}" FontSize="12"/></StackPanel></Border>
             <Border Style="{StaticResource Tile}" Width="410"><StackPanel><TextBlock Text="Grafikkort (FPS uden skærmlås)" Style="{StaticResource Sub}"/><TextBlock x:Name="TGpu" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="TGpuSub" Style="{StaticResource Sub}" FontSize="12"/></StackPanel></Border>
           </WrapPanel>
+          <StackPanel x:Name="CmpPanel" Visibility="Collapsed" Margin="0,6,0,0">
+            <DockPanel Margin="0,0,0,6">
+              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="Se i Geekbench" Click="Geekbench_Click"/>
+                <Button x:Name="BtnShare" Content="📤  Del mit resultat" Click="Share_Click" Margin="0"/>
+              </StackPanel>
+              <TextBlock Text="👥  Sammenlignet med andre med samme hardware" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBlock x:Name="CmpText" Style="{StaticResource Sub}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+            <ItemsControl x:Name="CmpList">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,7">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="110"/>
+                        <ColumnDefinition Width="90"/>
+                      </Grid.ColumnDefinitions>
+                      <StackPanel>
+                        <TextBlock Text="{Binding Name}" FontSize="13"/>
+                        <TextBlock Text="{Binding Who}" Style="{StaticResource Sub}" FontSize="11"/>
+                      </StackPanel>
+                      <TextBlock Grid.Column="1" Text="{Binding Mine}" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                      <TextBlock Grid.Column="2" Text="{Binding Median}" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#9AA3B5"/>
+                      <TextBlock Grid.Column="3" Text="{Binding Diff}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    </Grid>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
         </StackPanel>
       </Border>
 
@@ -53,7 +86,7 @@
                       <ColumnDefinition Width="*"/>
                       <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding Dot}" FontSize="16"/>
+                    <Ellipse Width="12" Height="12" Fill="{Binding DotBrush}" VerticalAlignment="Top" HorizontalAlignment="Left" Margin="2,4,0,0"/>
                     <StackPanel Grid.Column="1">
                       <TextBlock FontSize="14"><Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  ·  " Foreground="#6B7488"/><Run Text="{Binding Value, Mode=OneWay}"/></TextBlock>
                       <TextBlock Text="{Binding Note}" Style="{StaticResource Sub}" Margin="0,4,0,0"/>
@@ -71,8 +104,71 @@
         </StackPanel>
       </Border>
 
-      <Border Style="{StaticResource CardB}" Margin="0,14,0,0" Background="#1B1630" BorderBrush="#3B3366">
-        <TextBlock Style="{StaticResource Sub}" Text="Strømtesten, &quot;Mål i mit spil&quot; og &quot;Hjalp det i mit spil?&quot; flyttes over i næste version. Indtil da findes de i den gamle app."/>
+      <!-- Strømtest -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,8">
+            <Button x:Name="BtnPower" DockPanel.Dock="Right" Content="🔋  Kør strømtest" Click="Power_Click" Margin="0" VerticalAlignment="Center"/>
+            <StackPanel>
+              <TextBlock Text="🔋  Strømtest" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="PowerSub" Style="{StaticResource Sub}" Margin="0,2,0,0" TextWrapping="Wrap" Text="Kører grafiktesten i hver af Windows' strømtilstande og viser, hvor meget hurtigere den bliver, og hvad det koster i strøm. Tager ca. 1 minut. På en bærbar: tag opladeren ud for at måle batteriforbruget."/>
+            </StackPanel>
+          </DockPanel>
+          <ItemsControl x:Name="PowerList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border BorderBrush="#1F2533" BorderThickness="0,1,0,0" Padding="0,8">
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="110"/>
+                      <ColumnDefinition Width="110"/>
+                      <ColumnDefinition Width="130"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding Item1}" FontSize="14"/>
+                    <TextBlock Grid.Column="1" Text="{Binding Item2}" HorizontalAlignment="Right"/>
+                    <TextBlock Grid.Column="2" Text="{Binding Item3}" HorizontalAlignment="Right" Foreground="#9AA3B5"/>
+                    <TextBlock Grid.Column="3" Text="{Binding Item4}" HorizontalAlignment="Right" Foreground="#9AA3B5"/>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
+
+      <!-- Mål i mit spil -->
+      <Border Style="{StaticResource CardB}" Margin="0,14,0,0">
+        <StackPanel>
+          <DockPanel Margin="0,0,0,8">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+<Button x:Name="GameDur" Content="⏱  60 sek." Click="Dur_Click" ToolTip="Hvor længe der måles"/>
+              <Button x:Name="BtnAb" Content="Hjalp det?" Click="Ab_Click"/>
+              <Button x:Name="BtnGame" Content="🎯  Mål i mit spil" Style="{StaticResource Primary}" Click="Game_Click" Margin="0"/>
+            </StackPanel>
+            <StackPanel>
+              <TextBlock Text="🎯  Mål i mit spil" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="GameSub" Style="{StaticResource Sub}" Margin="0,2,0,0" TextWrapping="Wrap" Text="Start dit spil, tryk på knappen, og spil videre. Opticon måler FPS, 1 % low og hak med Intels PresentMon og fortæller, hvad der bremser."/>
+            </StackPanel>
+          </DockPanel>
+          <TextBlock x:Name="GameText" TextWrapping="Wrap" FontSize="14" LineHeight="22"/>
+        </StackPanel>
+      </Border>
+
+      <!-- NVIDIA strømgrænse -->
+      <Border x:Name="NvCard" Style="{StaticResource CardB}" Margin="0,14,0,0" Visibility="Collapsed">
+        <StackPanel>
+          <TextBlock Text="⚡  Grafikkortets strømgrænse (NVIDIA)" FontSize="15" FontWeight="SemiBold"/>
+          <TextBlock x:Name="NvSub" Style="{StaticResource Sub}" Margin="0,2,0,10" TextWrapping="Wrap"/>
+          <DockPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button Content="Standard" Click="NvReset_Click"/>
+              <Button Content="Anvend" Style="{StaticResource Primary}" Click="NvApply_Click" Margin="0"/>
+            </StackPanel>
+            <TextBlock x:Name="NvVal" DockPanel.Dock="Right" Width="80" VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold" Margin="12,0"/>
+            <Slider x:Name="NvSlider" VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="5" ValueChanged="NvSlider_Changed"/>
+          </DockPanel>
+        </StackPanel>
       </Border>
     </StackPanel>
   </ScrollViewer>
