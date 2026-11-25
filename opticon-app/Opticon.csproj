@@ -9,7 +9,7 @@
     <RootNamespace>Opticon</RootNamespace>
     <ApplicationIcon>Opticon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.8.0</Version>
+    <Version>0.9.0</Version>
     <Product>Opticon</Product>
     <Company>Opticon</Company>
     <Description>Opticon - sikkerhed, oprydning og optimering af din pc</Description>
@@ -25,6 +25,7 @@
     <PackageReference Include="System.Management" Version="8.0.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.0" />
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Opticon.ico" />
