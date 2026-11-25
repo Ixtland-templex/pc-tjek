@@ -52,7 +52,7 @@ namespace Opticon.Services
                     i.Build = "Build " + S(os["BuildNumber"]) + (ubr.Length > 0 ? "." + ubr : "");
                     var boot = ManagementDateTimeConverter.ToDateTime(S(os["LastBootUpTime"]));
                     var up = DateTime.Now - boot;
-                    i.Uptime = up.TotalDays >= 1 ? string.Format("tændt i {0:0.#} dage", up.TotalDays) : string.Format("tændt i {0} timer", (int)up.TotalHours);
+                    i.Uptime = up.TotalDays >= 1 ? string.Format("tændt i {0:0.#} dage", up.TotalDays) : ((int)up.TotalHours == 1 ? "tændt i 1 time" : string.Format("tændt i {0} timer", (int)up.TotalHours));
                     double totKb = Convert.ToDouble(os["TotalVisibleMemorySize"]), freeKb = Convert.ToDouble(os["FreePhysicalMemory"]);
                     i.RamUsedPct = (int)Math.Round(100 - freeKb / totKb * 100);
                     i.Ram = string.Format("{0} GB", Math.Round(totKb / 1024 / 1024));
@@ -97,7 +97,8 @@ namespace Opticon.Services
             }
             catch { }
 
-            i.Arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString();
+            var a = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
+            i.Arch = a == System.Runtime.InteropServices.Architecture.Arm64 ? "ARM (Snapdragon)" : a == System.Runtime.InteropServices.Architecture.X64 ? "64-bit" : a.ToString();
             return i;
         }
     }
